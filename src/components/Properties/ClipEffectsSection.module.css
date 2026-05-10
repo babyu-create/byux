@@ -1,0 +1,153 @@
+.root {
+  padding: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px 4px;
+}
+
+.title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.effect {
+  padding: 6px 14px;
+  border-bottom: 1px dashed var(--border-soft);
+}
+
+.effect:last-child {
+  border-bottom: none;
+}
+
+.effectHeader {
+  display: flex;
+  align-items: center;
+}
+
+.toggle {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 22px auto 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  transition: all var(--t-fast);
+}
+
+.toggle:hover {
+  background: var(--bg-panel);
+  border-color: var(--border-strong);
+}
+
+.toggleOn {
+  background: var(--accent-soft) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
+
+.toggleIcon {
+  font-size: 14px;
+  text-align: center;
+}
+
+.toggleHint {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toggleOn .toggleHint {
+  color: var(--accent);
+  opacity: 0.8;
+}
+
+.controls {
+  margin-top: 8px;
+  padding: 4px 4px 4px 14px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 60px 1fr 38px;
+  align-items: center;
+  gap: 6px;
+}
+
+.rowLabel {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.row input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.rowValue {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--text);
+  text-align: right;
+}
+
+.speedGroup {
+  display: inline-flex;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.speedBtn {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  font-family: var(--font-en);
+}
+
+.speedBtn:hover {
+  color: var(--text);
+  background: var(--bg-elevated);
+}
+
+.speedActive {
+  background: var(--accent) !important;
+  color: var(--text-inverse) !important;
+}

@@ -1,0 +1,44 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-timeline);
+  overflow: hidden;
+}
+
+.body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.trackHeaders {
+  display: flex;
+  flex-direction: column;
+  padding-top: 28px;
+  background: var(--bg-elevated);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.scroll {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.scrollInner {
+  position: relative;
+  height: 100%;
+  min-width: 100%;
+}
+
+.trackArea {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: calc(100% - 28px);
+  min-height: 0;
+}

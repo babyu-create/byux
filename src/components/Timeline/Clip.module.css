@@ -1,0 +1,143 @@
+.clip {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  display: flex;
+  align-items: stretch;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  transition:
+    box-shadow var(--t-fast),
+    transform var(--t-fast);
+  outline: none;
+  border: 1.5px solid transparent;
+}
+
+.clip:active,
+.dragging {
+  cursor: grabbing;
+}
+
+.clip[data-kind='video'] {
+  background: var(--clip-video-bg);
+  border-color: var(--clip-video);
+}
+.clip[data-kind='overlay'] {
+  background: var(--clip-overlay-bg);
+  border-color: var(--clip-overlay);
+}
+.clip[data-kind='audio'] {
+  background: var(--clip-audio-bg);
+  border-color: var(--clip-audio);
+}
+
+.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+  border-color: var(--accent) !important;
+}
+
+.locked {
+  cursor: not-allowed !important;
+  opacity: 0.7;
+}
+
+.locked::after {
+  content: '🔒';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  font-size: 10px;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.handleStart,
+.handleEnd {
+  width: 6px;
+  flex-shrink: 0;
+  cursor: ew-resize;
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.18),
+    transparent
+  );
+  position: relative;
+  z-index: 2;
+}
+
+.handleEnd {
+  background: linear-gradient(to left, rgba(0, 0, 0, 0.18), transparent);
+}
+
+.handleStart::before,
+.handleEnd::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 18px;
+  border-radius: 1px;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.body {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.thumbVideo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.waveformWrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  overflow: hidden;
+  padding: 2px 6px;
+}
+
+.label {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 4px 6px;
+  height: 100%;
+  min-width: 0;
+}
+
+.labelText {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.labelDuration {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.6);
+}

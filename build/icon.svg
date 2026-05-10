@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff5d54"/>
+      <stop offset="100%" stop-color="#d92e22"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#g)"/>
+  <text x="256" y="288" font-family="Arial, sans-serif" font-weight="900" font-size="160" text-anchor="middle" fill="#ffffff" letter-spacing="-4">FCE</text>
+  <text x="256" y="380" font-family="Arial, sans-serif" font-weight="600" font-size="48" text-anchor="middle" fill="#ffffff" opacity="0.85">EDITOR</text>
+</svg>

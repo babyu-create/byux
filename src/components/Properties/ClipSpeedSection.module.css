@@ -1,0 +1,104 @@
+.root {
+  padding: 0 14px 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 8px;
+}
+
+.title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 18px;
+  padding: 0 8px;
+  border-radius: 9px;
+  background: var(--bg-panel-2);
+  color: var(--text-dim);
+  font-family: var(--font-en);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.countActive {
+  background: var(--accent) !important;
+  color: var(--text-inverse) !important;
+}
+
+.presetGroup {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+  background: var(--border);
+  padding: 1px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.presetBtn {
+  padding: 6px 0;
+  font-family: var(--font-en);
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  border: none;
+  transition: all var(--t-fast);
+}
+
+.presetBtn:hover {
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
+.active {
+  background: var(--accent) !important;
+  color: var(--text-inverse) !important;
+}
+
+.sliderRow {
+  margin-bottom: 8px;
+}
+
+.slider {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.estimateRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 11px;
+  padding: 2px 0;
+}
+
+.estimateLabel {
+  color: var(--text-muted);
+}
+
+.estimateValue {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.estimateValueSub {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}

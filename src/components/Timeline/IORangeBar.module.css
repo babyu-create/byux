@@ -1,0 +1,95 @@
+.root {
+  position: absolute;
+  top: 18px;
+  bottom: 18px;
+  z-index: 3;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.bar {
+  position: absolute;
+  inset: 0;
+  background: rgba(74, 222, 128, 0.22);
+  border-top: 2px dashed var(--success);
+  border-bottom: 2px dashed var(--success);
+}
+
+.selected .bar {
+  background: rgba(74, 222, 128, 0.38);
+  border-top-style: solid;
+  border-bottom-style: solid;
+}
+
+.bracketLeft,
+.bracketRight {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--success);
+  color: var(--text-inverse);
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-en);
+}
+
+.bracketLeft {
+  left: -14px;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.bracketRight {
+  right: -14px;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.pendingIn {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.pendingLine {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  background: var(--success);
+  opacity: 0.85;
+}
+
+.pendingLabel {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--success);
+  color: var(--text-inverse);
+  font-family: var(--font-en);
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  animation: pulse 1.4s infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.12);
+  }
+}

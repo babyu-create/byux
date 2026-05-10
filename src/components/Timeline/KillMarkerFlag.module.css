@@ -1,0 +1,42 @@
+.root {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.flag {
+  position: absolute;
+  top: 2px;
+  left: -7px;
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  clip-path: polygon(0 0, 100% 0, 100% 70%, 50% 100%, 0 70%);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
+  cursor: pointer;
+  pointer-events: auto;
+  transition: transform var(--t-fast);
+}
+
+.flag:hover {
+  transform: scale(1.15);
+}
+
+.selected .flag {
+  background: var(--text);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.line {
+  position: absolute;
+  top: 12px;
+  bottom: 4px;
+  left: -1px;
+  width: 2px;
+  background: var(--accent);
+  opacity: 0.55;
+}

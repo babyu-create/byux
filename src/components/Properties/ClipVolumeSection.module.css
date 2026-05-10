@@ -1,0 +1,122 @@
+.root {
+  padding: 0 14px 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 8px;
+}
+
+.title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 18px;
+  padding: 0 8px;
+  border-radius: 9px;
+  background: var(--bg-panel-2);
+  color: var(--text-dim);
+  font-family: var(--font-en);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.countActive {
+  background: var(--accent) !important;
+  color: var(--text-inverse) !important;
+}
+
+.countMuted {
+  background: var(--text-dim) !important;
+  color: var(--text-inverse) !important;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 28px 1fr 38px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.muteBtn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  transition: all var(--t-fast);
+}
+
+.muteBtn:hover {
+  background: var(--bg-panel);
+}
+
+.muteOn {
+  background: var(--accent-soft) !important;
+  border-color: var(--accent) !important;
+}
+
+.slider {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.slider:disabled {
+  opacity: 0.5;
+}
+
+.value {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  text-align: right;
+}
+
+.presetGroup {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+  background: var(--border);
+  padding: 1px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.presetBtn {
+  padding: 5px 0;
+  font-family: var(--font-en);
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  border: none;
+  transition: all var(--t-fast);
+}
+
+.presetBtn:hover {
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
+.active {
+  background: var(--accent) !important;
+  color: var(--text-inverse) !important;
+}

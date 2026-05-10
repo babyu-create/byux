@@ -1,0 +1,32 @@
+.root {
+  position: relative;
+  flex: 1;
+  border-bottom: 1px solid var(--border-soft);
+  min-height: 0;
+}
+
+.root[data-kind='video'] {
+  background: var(--bg-track);
+}
+.root[data-kind='overlay'] {
+  background: var(--bg-track-alt);
+}
+.root[data-kind='audio'] {
+  background: var(--bg-track);
+}
+
+.locked {
+  background:
+    repeating-linear-gradient(
+      45deg,
+      transparent 0,
+      transparent 6px,
+      rgba(0, 0, 0, 0.03) 6px,
+      rgba(0, 0, 0, 0.03) 12px
+    ),
+    var(--bg-track);
+}
+
+.hidden {
+  opacity: 0.5;
+}

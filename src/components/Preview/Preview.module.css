@@ -1,0 +1,295 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-app);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+}
+
+.aspectGroup {
+  display: inline-flex;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.aspectBtn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  transition: all var(--t-fast);
+}
+
+.aspectBtn:hover {
+  color: var(--text);
+}
+
+.aspectActive {
+  background: var(--accent) !important;
+  color: var(--text-inverse) !important;
+}
+
+.fileName {
+  flex: 1;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background:
+    linear-gradient(transparent 50%, rgba(0, 0, 0, 0.02) 50%) 0 0 / 24px 24px,
+    var(--bg-app);
+  overflow: hidden;
+  min-height: 0;
+  container-type: size;
+  container-name: stage;
+}
+
+.frame {
+  position: relative;
+  background: #000;
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+/* Compute the largest box of the requested aspect that fits inside the stage,
+   so the frame is always exactly the target aspect — never wider or taller. */
+.frame[data-aspect='16:9'] {
+  aspect-ratio: 16 / 9;
+  width: min(100cqi, calc(100cqb * 16 / 9));
+}
+
+.frame[data-aspect='9:16'] {
+  aspect-ratio: 9 / 16;
+  width: min(100cqi, calc(100cqb * 9 / 16));
+}
+
+.video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: pointer;
+  background: #000;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.fadeOverlay {
+  position: absolute;
+  inset: 0;
+  background: #000000;
+  pointer-events: none;
+}
+
+.speedBadge {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-family: var(--font-en);
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+}
+
+.timecode {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tcCurrent {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tcSep {
+  color: var(--text-muted);
+}
+
+.tcTotal {
+  color: var(--text-dim);
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: center;
+}
+
+.iconBtn,
+.playBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text);
+  transition: all var(--t-fast);
+}
+
+.iconBtn {
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.iconBtn:hover {
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
+.playBtn {
+  width: 36px;
+  height: 36px;
+  background: var(--accent);
+  color: var(--text-inverse);
+}
+
+.playBtn:hover {
+  background: var(--accent-hover);
+  transform: scale(1.04);
+}
+
+.playIcon {
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: -0.05em;
+}
+
+.iconSm {
+  font-size: 14px;
+  filter: grayscale(1) opacity(0.7);
+}
+
+.scrubber {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-panel-2);
+  cursor: pointer;
+  outline: none;
+}
+
+.scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: grab;
+  border: 2px solid var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+.scrubber::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: grab;
+  border: 2px solid var(--bg-elevated);
+}
+
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+  background:
+    repeating-linear-gradient(
+      45deg,
+      var(--bg-panel) 0px,
+      var(--bg-panel) 12px,
+      var(--bg-panel-2) 12px,
+      var(--bg-panel-2) 24px
+    );
+}
+
+.gap {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #000;
+  color: var(--text-muted);
+}
+
+.gapIcon {
+  font-size: 32px;
+  opacity: 0.4;
+}
+
+.gapText {
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.emptyIcon {
+  font-size: 48px;
+  margin-bottom: 4px;
+  filter: grayscale(0.3);
+}
+
+.emptyText {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+.emptyHint {
+  font-size: 12px;
+  color: var(--text-muted);
+}

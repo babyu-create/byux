@@ -1,0 +1,39 @@
+.root {
+  position: relative;
+  height: 28px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+.tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.tickMinor {
+  background: var(--border-soft);
+  height: 6px;
+  top: 0;
+}
+
+.tickMajor {
+  background: var(--border);
+  height: 12px;
+  top: 0;
+}
+
+.label {
+  position: absolute;
+  top: 14px;
+  left: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
