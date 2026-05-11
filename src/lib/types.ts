@@ -17,9 +17,18 @@ export interface MediaAsset {
   waveform?: { peaks: Float32Array; peaksPerSecond: number };
 }
 
+export type ClipEffectType = 'fade-in' | 'fade-out' | 'motion-blur';
+
 export interface ClipEffect {
-  type: 'fade-in' | 'fade-out';
+  type: ClipEffectType;
+  /** Fade duration in seconds (fade-in / fade-out). */
   duration?: number;
+  /**
+   * Motion blur strength (0–100). Drives:
+   *   - preview: CSS blur radius proportional to playback speed
+   *   - export: number of frames mixed by the tmix filter
+   */
+  intensity?: number;
 }
 
 export type OverlayPosition =

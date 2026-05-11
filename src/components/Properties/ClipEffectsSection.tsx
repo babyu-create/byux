@@ -12,6 +12,7 @@ export function ClipEffectsSection({ clip }: ClipEffectsSectionProps) {
 
   const fadeIn = clip.effects.find((e) => e.type === 'fade-in');
   const fadeOut = clip.effects.find((e) => e.type === 'fade-out');
+  const motionBlur = clip.effects.find((e) => e.type === 'motion-blur');
 
   return (
     <div className={styles.root}>
@@ -52,6 +53,44 @@ export function ClipEffectsSection({ clip }: ClipEffectsSectionProps) {
               />
               <span className={styles.rowValue}>
                 {(fadeIn.duration ?? 0.4).toFixed(1)}s
+              </span>
+            </label>
+          </div>
+        ) : null}
+      </div>
+
+      {/* Motion Blur */}
+      <div className={`${styles.effect} ${motionBlur ? styles.active : ''}`}>
+        <div className={styles.effectHeader}>
+          <button
+            type="button"
+            className={`${styles.toggle} ${motionBlur ? styles.toggleOn : ''}`}
+            onClick={() => toggleEffect(clip.id, 'motion-blur')}
+            aria-pressed={!!motionBlur}
+          >
+            <span className={styles.toggleIcon}>≋</span>
+            <span>モーションブラー</span>
+            <span className={styles.toggleHint}>動きに残像を付与 (書き出し時 重め)</span>
+          </button>
+        </div>
+        {motionBlur ? (
+          <div className={styles.controls}>
+            <label className={styles.row}>
+              <span className={styles.rowLabel}>強さ</span>
+              <input
+                type="range"
+                min={5}
+                max={100}
+                step={5}
+                value={motionBlur.intensity ?? 40}
+                onChange={(e) =>
+                  updateEffect(clip.id, 'motion-blur', {
+                    intensity: parseInt(e.target.value, 10),
+                  })
+                }
+              />
+              <span className={styles.rowValue}>
+                {(motionBlur.intensity ?? 40).toFixed(0)}
               </span>
             </label>
           </div>

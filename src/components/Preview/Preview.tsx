@@ -75,7 +75,18 @@ export function Preview() {
 
   const fadeIn = activeClip?.effects.find((e) => e.type === 'fade-in') ?? null;
   const fadeOut = activeClip?.effects.find((e) => e.type === 'fade-out') ?? null;
+  const motionBlur =
+    activeClip?.effects.find((e) => e.type === 'motion-blur') ?? null;
   const clipSpeed = activeClip?.speed ?? 1;
+
+  // Preview-time motion blur: only while playing, scaled by clip speed.
+  // Range mapping: intensity 0–100 → up to 6px blur at speed=1, doubled at 2×.
+  const motionBlurPx = useMemo(() => {
+    if (!motionBlur || !isPlaying) return 0;
+    const intensity = Math.max(0, Math.min(100, motionBlur.intensity ?? 40));
+    const speedFactor = Math.max(0.5, Math.min(2, clipSpeed));
+    return (intensity / 100) * 6 * speedFactor;
+  }, [motionBlur, isPlaying, clipSpeed]);
 
   // Build template context (e.g. {n}/{total} for kill counter)
   const overlayContext = useMemo<Record<string, string>>(() => {
@@ -397,6 +408,11 @@ export function Preview() {
                 playsInline
                 muted={videoTrackMuted}
                 onClick={togglePlay}
+                style={
+                  motionBlurPx > 0
+                    ? { filter: `blur(${motionBlurPx.toFixed(2)}px)` }
+                    : undefined
+                }
               />
               {fadeOpacity > 0 ? (
                 <div

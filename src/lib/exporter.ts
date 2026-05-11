@@ -145,6 +145,7 @@ export async function exportProject(
       const speed = clip.speed ?? 1;
       const fadeIn = clip.effects.find((e) => e.type === 'fade-in');
       const fadeOut = clip.effects.find((e) => e.type === 'fade-out');
+      const motionBlur = clip.effects.find((e) => e.type === 'motion-blur');
       const trackMuted = videoTrack?.muted ?? false;
       const clipMuted = clip.muted ?? false;
       const clipVolume = clipMuted || trackMuted ? 0 : (clip.volume ?? 1);
@@ -162,6 +163,13 @@ export async function exportProject(
       videoFilters.push(`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`);
       videoFilters.push('setsar=1');
       videoFilters.push(`fps=${targetFps}`);
+      if (motionBlur) {
+        // Map intensity 5–100 → tmix frame count 2–8. tmix defaults to equal
+        // weights when omitted, which gives a balanced temporal blur.
+        const intensity = Math.max(5, Math.min(100, motionBlur.intensity ?? 40));
+        const frames = Math.max(2, Math.min(8, Math.round(2 + (intensity / 100) * 6)));
+        videoFilters.push(`tmix=frames=${frames}`);
+      }
       if (fadeIn) {
         const d = Math.max(0.05, fadeIn.duration ?? 0.4);
         videoFilters.push(`fade=t=in:st=0:d=${d.toFixed(3)}`);

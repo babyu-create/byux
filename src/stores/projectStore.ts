@@ -92,10 +92,13 @@ interface ProjectStoreState {
   clearMessage: () => void;
 
   setClipEffects: (clipId: string, effects: import('../lib/types').ClipEffect[]) => void;
-  toggleClipEffect: (clipId: string, type: 'fade-in' | 'fade-out') => void;
+  toggleClipEffect: (
+    clipId: string,
+    type: import('../lib/types').ClipEffectType,
+  ) => void;
   updateClipEffect: (
     clipId: string,
-    type: 'fade-in' | 'fade-out',
+    type: import('../lib/types').ClipEffectType,
     patch: Partial<import('../lib/types').ClipEffect>,
   ) => void;
   setClipSpeed: (clipId: string, speed: number) => void;
@@ -659,9 +662,13 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
         if (has) {
           return { ...c, effects: c.effects.filter((e) => e.type !== type) };
         }
-        const defaults: Record<typeof type, import('../lib/types').ClipEffect> = {
+        const defaults: Record<
+          import('../lib/types').ClipEffectType,
+          import('../lib/types').ClipEffect
+        > = {
           'fade-in': { type: 'fade-in', duration: 0.4 },
           'fade-out': { type: 'fade-out', duration: 0.4 },
+          'motion-blur': { type: 'motion-blur', intensity: 40 },
         };
         return { ...c, effects: [...c.effects, defaults[type]] };
       }),
