@@ -11,6 +11,7 @@ import { TrackHeader } from './TrackHeader';
 import { Playhead } from './Playhead';
 import { SnapGuide } from './SnapGuide';
 import { TimelineToolbar } from './TimelineToolbar';
+import { TimelineScrollProvider } from '../../hooks/useTimelineAutoScroll';
 import styles from './Timeline.module.css';
 
 export function Timeline() {
@@ -209,6 +210,7 @@ export function Timeline() {
   };
 
   return (
+    <TimelineScrollProvider value={{ scrollRef }}>
     <div className={styles.root}>
       <TimelineToolbar />
       <div className={styles.body}>
@@ -244,5 +246,6 @@ export function Timeline() {
         </div>
       </div>
     </div>
+    </TimelineScrollProvider>
   );
 }

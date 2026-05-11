@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import { useProjectStore } from '../stores/projectStore';
 import { pxToTime } from '../lib/timeline';
+import { useTimelineAutoScroll } from './useTimelineAutoScroll';
 
 interface ScrubOptions {
   /**
@@ -21,6 +22,7 @@ interface ScrubOptions {
 export function useScrub(options: ScrubOptions = {}) {
   const { containerSelector = '[data-track-area]', pausePlayback = true } = options;
   const draggingRef = useRef(false);
+  const { maybeScroll, stopAutoScroll } = useTimelineAutoScroll();
 
   const updateFromClientX = (clientX: number) => {
     const trackArea = document.querySelector(containerSelector) as HTMLElement | null;
@@ -46,12 +48,14 @@ export function useScrub(options: ScrubOptions = {}) {
 
   const onPointerMove = (e: React.PointerEvent<HTMLElement>) => {
     if (!draggingRef.current) return;
+    maybeScroll(e.clientX);
     updateFromClientX(e.clientX);
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLElement>) => {
     if (!draggingRef.current) return;
     draggingRef.current = false;
+    stopAutoScroll();
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }

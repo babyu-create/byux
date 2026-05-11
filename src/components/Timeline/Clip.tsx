@@ -2,6 +2,7 @@ import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } fro
 import type { Clip as ClipType, MediaAsset, TrackKind } from '../../lib/types';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
+import { useTimelineAutoScroll } from '../../hooks/useTimelineAutoScroll';
 import {
   clipDuration,
   collectSnapPoints,
@@ -55,6 +56,7 @@ export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
 
   const dragRef = useRef<DragState | null>(null);
   const [draggingMode, setDraggingMode] = useState<DragMode | null>(null);
+  const { maybeScroll, stopAutoScroll } = useTimelineAutoScroll();
 
   const left = timeToPx(clip.start, zoom);
   const width = Math.max(8, timeToPx(clipDuration(clip), zoom));
@@ -83,6 +85,7 @@ export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
   const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
+    maybeScroll(e.clientX);
     const deltaPx = e.clientX - drag.startX;
     const deltaSec = pxToTime(deltaPx, zoom);
 
@@ -174,6 +177,7 @@ export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
       (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
       dragRef.current = null;
       setDraggingMode(null);
+      stopAutoScroll();
       useProjectStore.getState().setSnapIndicator(null);
     }
   };
