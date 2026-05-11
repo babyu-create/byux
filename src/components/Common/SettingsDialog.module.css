@@ -69,6 +69,35 @@
   background: var(--bg-panel);
 }
 
+.tabBar {
+  display: flex;
+  gap: 4px;
+  padding: 0 18px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.tabBtn {
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--t-fast);
+}
+
+.tabBtn:hover {
+  color: var(--text);
+}
+
+.tabActive {
+  color: var(--accent) !important;
+  border-bottom-color: var(--accent) !important;
+}
+
 .recordingBanner {
   padding: 10px 18px;
   background: var(--accent-soft);

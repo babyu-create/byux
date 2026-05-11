@@ -10,13 +10,17 @@ import {
   setBinding,
   subscribeBindings,
 } from '../../lib/keybindings';
+import { ThemeSettings } from './ThemeSettings';
 import styles from './SettingsDialog.module.css';
+
+type SettingsTab = 'shortcuts' | 'theme';
 
 interface SettingsDialogProps {
   onClose: () => void;
 }
 
 export function SettingsDialog({ onClose }: SettingsDialogProps) {
+  const [tab, setTab] = useState<SettingsTab>('shortcuts');
   const [bindings, setBindingsState] = useState(() => getBindings());
   const [recordingId, setRecordingId] = useState<ActionId | null>(null);
   const [conflictWarning, setConflictWarning] = useState<string | null>(null);
@@ -67,7 +71,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
     <div className={styles.backdrop} role="dialog" aria-modal="true" onClick={onClose}>
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div className={styles.header}>
-          <span className={styles.title}>⚙ ショートカット設定</span>
+          <span className={styles.title}>⚙ 設定</span>
           <button
             type="button"
             className={styles.closeBtn}
@@ -78,15 +82,43 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
           </button>
         </div>
 
-        {recordingId ? (
+        <div className={styles.tabBar} role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'shortcuts'}
+            className={`${styles.tabBtn} ${tab === 'shortcuts' ? styles.tabActive : ''}`}
+            onClick={() => setTab('shortcuts')}
+          >
+            ⌨ ショートカット
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'theme'}
+            className={`${styles.tabBtn} ${tab === 'theme' ? styles.tabActive : ''}`}
+            onClick={() => setTab('theme')}
+          >
+            🎨 テーマ
+          </button>
+        </div>
+
+        {tab === 'shortcuts' && recordingId ? (
           <div className={styles.recordingBanner}>
             🎙 新しいキーを押してください (Escでキャンセル)
           </div>
         ) : null}
-        {conflictWarning ? (
+        {tab === 'shortcuts' && conflictWarning ? (
           <div className={styles.conflictBanner}>⚠ {conflictWarning}</div>
         ) : null}
 
+        {tab === 'theme' ? (
+          <div className={styles.body}>
+            <ThemeSettings />
+          </div>
+        ) : null}
+
+        {tab === 'shortcuts' ? (
         <div className={styles.body}>
           {Object.entries(grouped).map(([group, items]) => (
             <section key={group} className={styles.group}>
@@ -126,19 +158,24 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
             </section>
           ))}
         </div>
+        ) : null}
 
         <div className={styles.footer}>
-          <button
-            type="button"
-            className={styles.btnReset}
-            onClick={() => {
-              if (window.confirm('全てのショートカットをデフォルトに戻しますか？')) {
-                resetBindings();
-              }
-            }}
-          >
-            全てリセット
-          </button>
+          {tab === 'shortcuts' ? (
+            <button
+              type="button"
+              className={styles.btnReset}
+              onClick={() => {
+                if (window.confirm('全てのショートカットをデフォルトに戻しますか？')) {
+                  resetBindings();
+                }
+              }}
+            >
+              全てリセット
+            </button>
+          ) : (
+            <span />
+          )}
           <button type="button" className={styles.btnDone} onClick={onClose}>
             完了
           </button>

@@ -61,4 +61,83 @@
   /* Transition */
   --t-fast: 0.12s ease;
   --t: 0.2s ease;
+
+  /* Gaming-only glow (no-op in light) */
+  --glow: 0 0 0 transparent;
+}
+
+/* Dark theme — neutral, low-glare */
+:root[data-theme='dark'] {
+  --bg-app: #0f0f12;
+  --bg-panel: #16161a;
+  --bg-panel-2: #1d1d22;
+  --bg-timeline: #131316;
+  --bg-track: #18181c;
+  --bg-track-alt: #1c1c20;
+  --bg-elevated: #1a1a1f;
+  --bg-overlay: rgba(0, 0, 0, 0.72);
+
+  --border: #2a2a30;
+  --border-soft: #222227;
+  --border-strong: #3a3a42;
+
+  --text: #ececf0;
+  --text-dim: #a0a0a8;
+  --text-muted: #6a6a72;
+  --text-inverse: #0f0f12;
+
+  --accent: #ff3b30;
+  --accent-hover: #ff5a4f;
+  --accent-soft: rgba(255, 59, 48, 0.18);
+
+  --clip-video: #5b9dff;
+  --clip-video-bg: rgba(91, 157, 255, 0.22);
+  --clip-overlay: #ffb547;
+  --clip-overlay-bg: rgba(255, 181, 71, 0.22);
+  --clip-audio: #4ade80;
+  --clip-audio-bg: rgba(74, 222, 128, 0.22);
+
+  --beat-line: rgba(255, 59, 48, 0.45);
+  --playhead: #ff3b30;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+/* Gaming theme — dark base + saturated accents + soft glow.
+   Accent colors and clip colors come from inline CSS custom properties
+   set by applyTheme() at runtime, so this rule only owns the surfaces. */
+:root[data-theme='gaming'] {
+  --bg-app: #0a0014;
+  --bg-panel: #11091f;
+  --bg-panel-2: #180f2b;
+  --bg-timeline: #0d0620;
+  --bg-track: #150b28;
+  --bg-track-alt: #1a0f30;
+  --bg-elevated: #150b28;
+  --bg-overlay: rgba(8, 0, 18, 0.78);
+
+  --border: #2a1248;
+  --border-soft: #20103a;
+  --border-strong: #3d1d65;
+
+  --text: #f4eaff;
+  --text-dim: #b8a8d8;
+  --text-muted: #7a6a98;
+  --text-inverse: #0a0014;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.6);
+  --shadow: 0 2px 14px rgba(0, 0, 0, 0.7);
+  --shadow-lg: 0 18px 44px rgba(0, 0, 0, 0.8);
+
+  --glow: 0 0 12px var(--accent-soft);
+}
+
+:root[data-theme='gaming'] button:focus-visible,
+:root[data-theme='gaming'] input:focus-visible,
+:root[data-theme='gaming'] select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px var(--accent-soft), 0 0 16px var(--accent-soft);
 }
