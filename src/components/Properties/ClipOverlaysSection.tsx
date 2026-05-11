@@ -1,5 +1,6 @@
 import { useProjectStore } from '../../stores/projectStore';
 import type { Clip, OverlayPosition, OverlayText } from '../../lib/types';
+import { DEFAULT_FONT_ID, getFontGroups, getFontStack } from '../../lib/fonts';
 import styles from './ClipOverlaysSection.module.css';
 
 interface ClipOverlaysSectionProps {
@@ -25,8 +26,11 @@ function buildDefaultOverlay(): Omit<OverlayText, 'id'> {
     weight: 700,
     outline: true,
     outlineColor: '#000000',
+    fontFamily: DEFAULT_FONT_ID,
   };
 }
+
+const FONT_GROUPS = getFontGroups();
 
 export function ClipOverlaysSection({ clip }: ClipOverlaysSectionProps) {
   const addOverlay = useProjectStore((s) => s.addClipOverlay);
@@ -129,6 +133,32 @@ export function ClipOverlaysSection({ clip }: ClipOverlaysSectionProps) {
                   }
                 />
                 <span className={styles.sliderValue}>{o.fontSize.toFixed(1)}</span>
+              </div>
+              <div className={styles.fontRow}>
+                <span className={styles.sliderLabel}>フォント</span>
+                <select
+                  className={styles.fontSelect}
+                  value={o.fontFamily ?? DEFAULT_FONT_ID}
+                  style={{ fontFamily: getFontStack(o.fontFamily) }}
+                  onChange={(e) =>
+                    updateOverlay(clip.id, o.id, { fontFamily: e.target.value })
+                  }
+                  aria-label="フォント"
+                >
+                  {FONT_GROUPS.map((group) => (
+                    <optgroup key={group.category} label={group.label}>
+                      {group.fonts.map((f) => (
+                        <option
+                          key={f.id}
+                          value={f.id}
+                          style={{ fontFamily: f.stack }}
+                        >
+                          {f.label} — {f.sample ?? f.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
               </div>
             </div>
           ))}

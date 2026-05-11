@@ -1,4 +1,5 @@
 import type { OverlayText } from '../../lib/types';
+import { getFontStack } from '../../lib/fonts';
 import styles from './OverlayLayer.module.css';
 
 interface OverlayLayerProps {
@@ -47,7 +48,7 @@ export function OverlayLayer({ overlays, contextValues }: OverlayLayerProps) {
         const wrapperStyle: React.CSSProperties = {
           ...positionStyle(o.position),
           fontSize: `${o.fontSize}cqh`,
-          fontFamily: o.fontFamily ?? 'Inter, "Noto Sans JP", sans-serif',
+          fontFamily: getFontStack(o.fontFamily),
           fontWeight: o.weight ?? 700,
           fontStyle: o.italic ? 'italic' : 'normal',
           color: o.color,
