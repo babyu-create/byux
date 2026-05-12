@@ -169,3 +169,50 @@
   color: var(--text-dim);
   letter-spacing: 0.04em;
 }
+
+.cycleRow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.cycleBtn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 6px;
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--t-fast);
+}
+
+.cycleBtn:hover {
+  border-color: var(--text-dim);
+}
+
+.cycleActive {
+  border-color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.cycleLabel {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.cycleHint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.cycleNote {
+  margin: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}

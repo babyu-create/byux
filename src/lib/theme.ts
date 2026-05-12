@@ -74,6 +74,7 @@ export const DEFAULT_GAMING_COLORS: GamingColors = GAMING_PRESETS[0].colors;
 
 const THEME_KEY = 'fce.pref.theme';
 const COLORS_KEY = 'fce.pref.gamingColors';
+const RGB_CYCLE_KEY = 'fce.pref.rgbCycle';
 
 function isThemeId(v: string | null): v is ThemeId {
   return v === 'light' || v === 'dark' || v === 'gaming';
@@ -107,6 +108,25 @@ export function saveGamingColors(colors: GamingColors): void {
   window.localStorage.setItem(COLORS_KEY, JSON.stringify(colors));
 }
 
+export type RgbCycleSpeed = 'off' | 'slow' | 'normal' | 'fast';
+
+const RGB_CYCLE_SPEEDS: RgbCycleSpeed[] = ['off', 'slow', 'normal', 'fast'];
+
+function isCycleSpeed(v: string | null): v is RgbCycleSpeed {
+  return v !== null && (RGB_CYCLE_SPEEDS as string[]).includes(v);
+}
+
+export function loadRgbCycle(): RgbCycleSpeed {
+  if (typeof window === 'undefined') return 'off';
+  const raw = window.localStorage.getItem(RGB_CYCLE_KEY);
+  return isCycleSpeed(raw) ? raw : 'off';
+}
+
+export function saveRgbCycle(speed: RgbCycleSpeed): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(RGB_CYCLE_KEY, speed);
+}
+
 function hexToRgbTuple(hex: string): [number, number, number] | null {
   const m = hex.replace('#', '').match(/^([0-9a-f]{6}|[0-9a-f]{3})$/i);
   if (!m) return null;
@@ -124,12 +144,25 @@ function softAlpha(hex: string, alpha: number): string {
 
 /**
  * Apply theme to the document root. For 'gaming', the supplied colors
- * (or stored colors when omitted) override the gaming defaults.
+ * (or stored colors when omitted) override the gaming defaults. The
+ * data-rgb-cycle attribute drives a CSS keyframe animation that hue-
+ * shifts every gaming-mode accent color.
  */
-export function applyTheme(theme: ThemeId, colors?: GamingColors): void {
+export function applyTheme(
+  theme: ThemeId,
+  colors?: GamingColors,
+  rgbCycle?: RgbCycleSpeed,
+): void {
   if (typeof document === 'undefined') return;
   const root = document.documentElement;
   root.setAttribute('data-theme', theme);
+
+  const cycle = rgbCycle ?? loadRgbCycle();
+  if (theme === 'gaming' && cycle !== 'off') {
+    root.setAttribute('data-rgb-cycle', cycle);
+  } else {
+    root.removeAttribute('data-rgb-cycle');
+  }
 
   if (theme !== 'gaming') {
     // Clear any inline overrides set by a previous gaming theme.
@@ -152,6 +185,30 @@ export function applyTheme(theme: ThemeId, colors?: GamingColors): void {
   }
 
   const c = colors ?? loadGamingColors();
+
+  // bg-app stays static even with RGB cycling — it's a surface color, not an accent.
+  root.style.setProperty('--bg-app', c.bgApp);
+
+  // Accent / clip / playhead colors are owned by the keyframe rule while the
+  // RGB cycle is active. Inline styles would beat the @keyframes-driven CSS
+  // because of specificity rules, so write them only when cycle is off.
+  const cyclic = [
+    '--accent',
+    '--accent-hover',
+    '--accent-soft',
+    '--clip-video',
+    '--clip-video-bg',
+    '--clip-overlay',
+    '--clip-overlay-bg',
+    '--clip-audio',
+    '--clip-audio-bg',
+    '--playhead',
+    '--beat-line',
+  ] as const;
+  if (cycle !== 'off') {
+    cyclic.forEach((p) => root.style.removeProperty(p));
+    return;
+  }
   root.style.setProperty('--accent', c.accent);
   root.style.setProperty('--accent-hover', c.accent);
   root.style.setProperty('--accent-soft', softAlpha(c.accent, 0.18));
@@ -162,6 +219,5 @@ export function applyTheme(theme: ThemeId, colors?: GamingColors): void {
   root.style.setProperty('--clip-audio', c.clipAudio);
   root.style.setProperty('--clip-audio-bg', softAlpha(c.clipAudio, 0.22));
   root.style.setProperty('--playhead', c.playhead);
-  root.style.setProperty('--bg-app', c.bgApp);
   root.style.setProperty('--beat-line', softAlpha(c.accent, 0.45));
 }

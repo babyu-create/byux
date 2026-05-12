@@ -4,10 +4,13 @@ import {
   GAMING_PRESETS,
   applyTheme,
   loadGamingColors,
+  loadRgbCycle,
   loadTheme,
   saveGamingColors,
+  saveRgbCycle,
   saveTheme,
   type GamingColors,
+  type RgbCycleSpeed,
   type ThemeId,
 } from '../../lib/theme';
 import styles from './ThemeSettings.module.css';
@@ -32,14 +35,22 @@ const COLOR_FIELDS: ColorFieldDef[] = [
   { key: 'bgApp', label: '背景' },
 ];
 
+const CYCLE_OPTIONS: { id: RgbCycleSpeed; label: string; hint: string }[] = [
+  { id: 'off', label: 'OFF', hint: '静的' },
+  { id: 'slow', label: '低速', hint: '24秒/周' },
+  { id: 'normal', label: '通常', hint: '8秒/周' },
+  { id: 'fast', label: '高速', hint: '3秒/周' },
+];
+
 export function ThemeSettings() {
   const [theme, setTheme] = useState<ThemeId>(() => loadTheme());
   const [colors, setColors] = useState<GamingColors>(() => loadGamingColors());
+  const [cycle, setCycle] = useState<RgbCycleSpeed>(() => loadRgbCycle());
 
-  // Re-apply whenever theme or colors change so the user sees a live preview.
+  // Re-apply whenever theme, colors, or cycle change so the user sees a live preview.
   useEffect(() => {
-    applyTheme(theme, colors);
-  }, [theme, colors]);
+    applyTheme(theme, colors, cycle);
+  }, [theme, colors, cycle]);
 
   const changeTheme = (next: ThemeId) => {
     setTheme(next);
@@ -62,6 +73,11 @@ export function ThemeSettings() {
   const resetGaming = () => {
     setColors(DEFAULT_GAMING_COLORS);
     saveGamingColors(DEFAULT_GAMING_COLORS);
+  };
+
+  const changeCycle = (next: RgbCycleSpeed) => {
+    setCycle(next);
+    saveRgbCycle(next);
   };
 
   return (
@@ -87,6 +103,28 @@ export function ThemeSettings() {
 
       {theme === 'gaming' ? (
         <>
+          <section className={styles.section}>
+            <h3 className={styles.sectionTitle}>RGB サイクル</h3>
+            <div className={styles.cycleRow} role="radiogroup" aria-label="RGB サイクル速度">
+              {CYCLE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={cycle === opt.id}
+                  className={`${styles.cycleBtn} ${cycle === opt.id ? styles.cycleActive : ''}`}
+                  onClick={() => changeCycle(opt.id)}
+                >
+                  <span className={styles.cycleLabel}>{opt.label}</span>
+                  <span className={styles.cycleHint}>{opt.hint}</span>
+                </button>
+              ))}
+            </div>
+            <p className={styles.cycleNote}>
+              ※ サイクル中はアクセント/クリップ色がHSL連続変化（背景・カスタム配色は維持）
+            </p>
+          </section>
+
           <section className={styles.section}>
             <h3 className={styles.sectionTitle}>プリセット</h3>
             <div className={styles.presetRow}>

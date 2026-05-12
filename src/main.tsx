@@ -6,7 +6,7 @@ import App from './App';
 import { applyTheme, loadTheme } from './lib/theme';
 
 // Apply persisted theme before first render to prevent FOUC.
-applyTheme(loadTheme());
+applyTheme(loadTheme(), undefined);
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
