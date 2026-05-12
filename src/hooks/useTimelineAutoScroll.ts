@@ -27,6 +27,7 @@ export function useTimelineAutoScroll() {
   const rafRef = useRef<number | null>(null);
   const directionRef = useRef<-1 | 0 | 1>(0);
   const speedRef = useRef(0);
+  const tickListenerRef = useRef<(() => void) | null>(null);
 
   const stop = () => {
     if (rafRef.current !== null) {
@@ -35,6 +36,7 @@ export function useTimelineAutoScroll() {
     }
     directionRef.current = 0;
     speedRef.current = 0;
+    tickListenerRef.current = null;
   };
 
   useEffect(() => {
@@ -48,7 +50,24 @@ export function useTimelineAutoScroll() {
       return;
     }
     el.scrollLeft += directionRef.current * speedRef.current;
+    // Let the drag handler reposition the clip to match the new scroll position
+    // before the next paint. Without this, the cursor sits still while the
+    // viewport scrolls, and the clip visually drifts away from the cursor.
+    tickListenerRef.current?.();
     rafRef.current = requestAnimationFrame(tick);
+  };
+
+  /**
+   * Register a callback fired on every auto-scroll frame. Drag handlers use
+   * this to recompute the clip's start position from the new scrollLeft, so
+   * the clip stays glued to the cursor while the viewport pans beneath it.
+   * Returns an unregister function.
+   */
+  const onScrollTick = (cb: () => void): (() => void) => {
+    tickListenerRef.current = cb;
+    return () => {
+      if (tickListenerRef.current === cb) tickListenerRef.current = null;
+    };
   };
 
   const maybeScroll = (clientX: number) => {
@@ -72,7 +91,14 @@ export function useTimelineAutoScroll() {
     }
 
     if (dir === 0) {
-      stop();
+      // Pause the loop but keep the tick listener so a subsequent edge entry
+      // resumes seamlessly.
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      directionRef.current = 0;
+      speedRef.current = 0;
       return;
     }
 
@@ -88,5 +114,15 @@ export function useTimelineAutoScroll() {
     }
   };
 
-  return { maybeScroll, stopAutoScroll: stop };
+  /**
+   * Returns the current scroll-left of the timeline container, or 0 when no
+   * container is registered. Drag handlers call this on pointerdown and on
+   * every pointermove to compensate for auto-scroll motion: the clip should
+   * follow the cursor in content-space, not screen-space.
+   */
+  const getScrollLeft = (): number => {
+    return ctx?.scrollRef.current?.scrollLeft ?? 0;
+  };
+
+  return { maybeScroll, stopAutoScroll: stop, getScrollLeft, onScrollTick };
 }

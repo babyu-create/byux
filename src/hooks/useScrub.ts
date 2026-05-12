@@ -22,7 +22,8 @@ interface ScrubOptions {
 export function useScrub(options: ScrubOptions = {}) {
   const { containerSelector = '[data-track-area]', pausePlayback = true } = options;
   const draggingRef = useRef(false);
-  const { maybeScroll, stopAutoScroll } = useTimelineAutoScroll();
+  const lastClientXRef = useRef(0);
+  const { maybeScroll, stopAutoScroll, onScrollTick } = useTimelineAutoScroll();
 
   const updateFromClientX = (clientX: number) => {
     const trackArea = document.querySelector(containerSelector) as HTMLElement | null;
@@ -38,6 +39,8 @@ export function useScrub(options: ScrubOptions = {}) {
     e.preventDefault();
     e.stopPropagation();
     draggingRef.current = true;
+    lastClientXRef.current = e.clientX;
+    onScrollTick(() => updateFromClientX(lastClientXRef.current));
     if (pausePlayback) {
       const { isPlaying, setIsPlaying } = useProjectStore.getState();
       if (isPlaying) setIsPlaying(false);
@@ -48,6 +51,7 @@ export function useScrub(options: ScrubOptions = {}) {
 
   const onPointerMove = (e: React.PointerEvent<HTMLElement>) => {
     if (!draggingRef.current) return;
+    lastClientXRef.current = e.clientX;
     maybeScroll(e.clientX);
     updateFromClientX(e.clientX);
   };

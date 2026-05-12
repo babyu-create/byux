@@ -34,6 +34,8 @@ interface DragState {
   mode: DragMode;
   pointerId: number;
   startX: number;
+  /** scrollLeft of the timeline container when the drag began. */
+  startScroll: number;
   origStart: number;
   origTrimStart: number;
   origTrimEnd: number;
@@ -55,8 +57,11 @@ export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
   };
 
   const dragRef = useRef<DragState | null>(null);
+  const lastClientXRef = useRef(0);
+  const lastShiftKeyRef = useRef(false);
   const [draggingMode, setDraggingMode] = useState<DragMode | null>(null);
-  const { maybeScroll, stopAutoScroll } = useTimelineAutoScroll();
+  const { maybeScroll, stopAutoScroll, getScrollLeft, onScrollTick } =
+    useTimelineAutoScroll();
 
   const left = timeToPx(clip.start, zoom);
   const width = Math.max(8, timeToPx(clipDuration(clip), zoom));
@@ -72,25 +77,36 @@ export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
       mode,
       pointerId: e.pointerId,
       startX: e.clientX,
+      startScroll: getScrollLeft(),
       origStart: clip.start,
       origTrimStart: clip.trimStart,
       origTrimEnd: clip.trimEnd,
       origSpeed: clip.speed ?? 1,
       assetDuration: asset.duration,
     };
+    lastClientXRef.current = e.clientX;
+    lastShiftKeyRef.current = e.shiftKey;
+    onScrollTick(applyDrag);
     setDraggingMode(mode);
     (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
   };
 
-  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+  // Core drag-update routine. Reads the latest cursor position from refs so
+  // both real pointermove events and auto-scroll rAF ticks can drive it.
+  const applyDrag = () => {
     const drag = dragRef.current;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    maybeScroll(e.clientX);
-    const deltaPx = e.clientX - drag.startX;
+    if (!drag) return;
+    const clientX = lastClientXRef.current;
+    const shiftKey = lastShiftKeyRef.current;
+    // Compose pointer delta (screen-space) with scroll delta (content-space)
+    // so the clip tracks the cursor's content position even as auto-scroll
+    // moves the viewport under it.
+    const scrollDelta = getScrollLeft() - drag.startScroll;
+    const deltaPx = clientX - drag.startX + scrollDelta;
     const deltaSec = pxToTime(deltaPx, zoom);
 
     const state = useProjectStore.getState();
-    const useSnap = state.snapEnabled && !e.shiftKey;
+    const useSnap = state.snapEnabled && !shiftKey;
     let points = useSnap
       ? collectSnapPoints(state.clips, clip.id, state.playhead)
       : [];
@@ -169,6 +185,15 @@ export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
       trimClipEnd(clip.id, next);
       state.setSnapIndicator(snappedTo);
     }
+  };
+
+  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    lastClientXRef.current = e.clientX;
+    lastShiftKeyRef.current = e.shiftKey;
+    maybeScroll(e.clientX);
+    applyDrag();
   };
 
   const handlePointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
