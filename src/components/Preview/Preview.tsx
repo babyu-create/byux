@@ -79,13 +79,22 @@ export function Preview() {
     activeClip?.effects.find((e) => e.type === 'motion-blur') ?? null;
   const clipSpeed = activeClip?.speed ?? 1;
 
-  // Preview-time motion blur: only while playing, scaled by clip speed.
-  // Range mapping: intensity 0–100 → up to 6px blur at speed=1, doubled at 2×.
-  const motionBlurPx = useMemo(() => {
-    if (!motionBlur || !isPlaying) return 0;
+  // Preview motion blur — directional horizontal blur + chromatic aberration
+  // to evoke fast viewpoint panning instead of a uniform gaussian mosaic.
+  // Range mapping: intensity 0–100 → stdDeviation X 0–16 / chroma offset 0–6.
+  const motionBlurParams = useMemo(() => {
+    if (!motionBlur || !isPlaying) return null;
     const intensity = Math.max(0, Math.min(100, motionBlur.intensity ?? 40));
     const speedFactor = Math.max(0.5, Math.min(2, clipSpeed));
-    return (intensity / 100) * 6 * speedFactor;
+    const t = (intensity / 100) * speedFactor;
+    return {
+      // Strong horizontal, minimal vertical → "camera pan" feel.
+      stdDevX: (4 + t * 12).toFixed(2),
+      stdDevY: (0.4 + t * 0.6).toFixed(2),
+      // Chromatic split: red leads, blue trails.
+      chromaOffset: (t * 6).toFixed(2),
+      filterId: 'fx-motion-blur',
+    };
   }, [motionBlur, isPlaying, clipSpeed]);
 
   // Build template context (e.g. {n}/{total} for kill counter)
@@ -400,6 +409,72 @@ export function Preview() {
         <div className={styles.frame} data-aspect={aspectRatio}>
           {showVideo ? (
             <>
+              {motionBlurParams ? (
+                <svg
+                  className={styles.fxSvg}
+                  width="0"
+                  height="0"
+                  aria-hidden="true"
+                >
+                  <defs>
+                    <filter
+                      id={motionBlurParams.filterId}
+                      x="-5%"
+                      y="-5%"
+                      width="110%"
+                      height="110%"
+                    >
+                      {/* Split into R / G / B channels, offset R and B
+                          horizontally, then horizontally blur each before
+                          recompositing — directional blur + chromatic split. */}
+                      <feColorMatrix
+                        in="SourceGraphic"
+                        result="r"
+                        values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"
+                      />
+                      <feColorMatrix
+                        in="SourceGraphic"
+                        result="g"
+                        values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"
+                      />
+                      <feColorMatrix
+                        in="SourceGraphic"
+                        result="b"
+                        values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0"
+                      />
+                      <feOffset
+                        in="r"
+                        dx={`-${motionBlurParams.chromaOffset}`}
+                        dy="0"
+                        result="rOff"
+                      />
+                      <feOffset
+                        in="b"
+                        dx={motionBlurParams.chromaOffset}
+                        dy="0"
+                        result="bOff"
+                      />
+                      <feGaussianBlur
+                        in="rOff"
+                        stdDeviation={`${motionBlurParams.stdDevX} ${motionBlurParams.stdDevY}`}
+                        result="rBlur"
+                      />
+                      <feGaussianBlur
+                        in="g"
+                        stdDeviation={`${motionBlurParams.stdDevX} ${motionBlurParams.stdDevY}`}
+                        result="gBlur"
+                      />
+                      <feGaussianBlur
+                        in="bOff"
+                        stdDeviation={`${motionBlurParams.stdDevX} ${motionBlurParams.stdDevY}`}
+                        result="bBlur"
+                      />
+                      <feBlend in="rBlur" in2="gBlur" mode="screen" result="rg" />
+                      <feBlend in="rg" in2="bBlur" mode="screen" />
+                    </filter>
+                  </defs>
+                </svg>
+              ) : null}
               <video
                 key={displayAsset?.id}
                 ref={videoRef}
@@ -409,8 +484,8 @@ export function Preview() {
                 muted={videoTrackMuted}
                 onClick={togglePlay}
                 style={
-                  motionBlurPx > 0
-                    ? { filter: `blur(${motionBlurPx.toFixed(2)}px)` }
+                  motionBlurParams
+                    ? { filter: `url(#${motionBlurParams.filterId})` }
                     : undefined
                 }
               />
