@@ -11,8 +11,10 @@ import {
 
 const DEFAULT_TRACKS: Track[] = [
   { id: 'track-video', kind: 'video', label: '映像メイン', locked: false, muted: false, hidden: false },
+  { id: 'track-video-2', kind: 'video', label: '映像サブ', locked: false, muted: false, hidden: false },
   { id: 'track-overlay', kind: 'overlay', label: 'オーバーレイ', locked: false, muted: false, hidden: false },
-  { id: 'track-audio', kind: 'audio', label: 'BGM / SE', locked: false, muted: false, hidden: false },
+  { id: 'track-audio', kind: 'audio', label: 'BGM', locked: false, muted: false, hidden: false },
+  { id: 'track-audio-2', kind: 'audio', label: 'SE', locked: false, muted: false, hidden: false },
 ];
 
 interface ProjectStoreState {
@@ -35,7 +37,14 @@ interface ProjectStoreState {
   ioRanges: IORange[];
   pendingIn: PendingIn | null;
   selectedRangeId: string | null;
-  transientMessage: { kind: 'info' | 'error' | 'success'; text: string; key: number } | null;
+  transientMessage: {
+    kind: 'info' | 'error' | 'success';
+    text: string;
+    key: number;
+    /** Total visible duration in milliseconds — used by the Toast to render a
+     *  visible progress bar so users see when the message will disappear. */
+    durationMs: number;
+  } | null;
 
   addClipFromAsset: (
     assetId: string,
@@ -432,14 +441,14 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
   autoClipFromMarkers: (assetId, options) => {
     const state = get();
-    const asset = { id: assetId };
     const markers = state.markers
       .filter((m) => m.assetId === assetId)
       .sort((a, b) => a.time - b.time);
     if (markers.length === 0) return 0;
 
-    const videoTrackId =
-      state.tracks.find((t) => t.kind === 'video')?.id ?? 'track-video';
+    const videoTrack = state.tracks.find((t) => t.kind === 'video');
+    if (!videoTrack) return 0;
+    const videoTrackId = videoTrack.id;
 
     // Optionally drop existing clips of this asset on the video track.
     let baseClips = state.clips;
@@ -479,7 +488,6 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       clips: [...baseClips, ...newClips],
       selectedClipIds: newClips.map((c) => c.id),
     });
-    void asset;
     return newClips.length;
   },
 
@@ -551,18 +559,28 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     const state = get();
     const pending = state.pendingIn;
     if (!pending) return null;
-    // Find current source time at playhead via the active video clip.
-    const videoTrackId = state.tracks.find((t) => t.kind === 'video')?.id;
-    if (!videoTrackId) return null;
+    // Find current source time at playhead via the active video clip,
+    // searching ALL video tracks (the project may have multiple).
+    const videoTrackIds = new Set(
+      state.tracks.filter((t) => t.kind === 'video').map((t) => t.id),
+    );
+    if (videoTrackIds.size === 0) return null;
     const activeClip = state.clips.find((c) => {
-      if (c.trackId !== videoTrackId) return false;
+      if (!videoTrackIds.has(c.trackId)) return false;
       if (c.assetId !== pending.assetId) return false;
       const end = c.start + clipDuration(c);
       return state.playhead >= c.start - 1e-6 && state.playhead < end - 1e-6;
     });
     if (!activeClip) return null;
+    // Speed-adjust the timeline→source mapping. A 2× clip covers twice
+    // the source time per timeline second; omitting this caused IO
+    // ranges to land off by (1 - 1/speed) on any time-warped clip.
+    const clipSpeed = activeClip.speed ?? 1;
     const sourceTime =
-      activeClip.trimStart + (state.playhead - activeClip.start);
+      activeClip.trimStart + (state.playhead - activeClip.start) * clipSpeed;
+    // Resolve the destination track id from the active clip itself so
+    // multi-video-track projects place the new clip on the correct lane.
+    const videoTrackId = activeClip.trackId;
     const a = Math.min(pending.time, sourceTime);
     const b = Math.max(pending.time, sourceTime);
     if (b - a < 0.05) return null;
@@ -597,8 +615,9 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       .filter((r) => r.assetId === assetId)
       .sort((a, b) => a.inTime - b.inTime);
     if (ranges.length === 0) return 0;
-    const videoTrackId =
-      state.tracks.find((t) => t.kind === 'video')?.id ?? 'track-video';
+    const videoTrack = state.tracks.find((t) => t.kind === 'video');
+    if (!videoTrack) return 0;
+    const videoTrackId = videoTrack.id;
 
     let baseClips = state.clips;
     if (options.deleteSourceClips) {
@@ -638,7 +657,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
   showMessage: (kind, text, durationMs = 1800) => {
     const key = Date.now() + Math.random();
-    set({ transientMessage: { kind, text, key } });
+    set({ transientMessage: { kind, text, key, durationMs } });
     window.setTimeout(() => {
       const cur = get().transientMessage;
       if (cur && cur.key === key) set({ transientMessage: null });
@@ -694,10 +713,6 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       if (!target) return state;
       const track = state.tracks.find((t) => t.id === target.trackId);
       if (track?.locked) return state;
-      const others = state.clips.filter(
-        (c) => c.trackId === target.trackId && c.id !== clipId,
-      );
-      void others;
       return {
         clips: state.clips.map((c) =>
           c.id === clipId ? { ...c, speed: clamped } : c,
@@ -827,16 +842,23 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
   jumpToAdjacentMarker: (direction) => {
     const state = get();
-    // Find the asset at the playhead via the active video clip.
-    const videoTrackId = state.tracks.find((t) => t.kind === 'video')?.id;
-    if (!videoTrackId) return;
+    // Search across ALL video tracks for the clip under the playhead.
+    // Restricting to `tracks[0]` only would miss clips placed on the
+    // secondary video track (track-video-2) in the multi-track layout.
+    const videoTrackIds = new Set(
+      state.tracks.filter((t) => t.kind === 'video').map((t) => t.id),
+    );
+    if (videoTrackIds.size === 0) return;
     const activeClip = state.clips.find((c) => {
-      if (c.trackId !== videoTrackId) return false;
+      if (!videoTrackIds.has(c.trackId)) return false;
       const end = c.start + clipDuration(c);
       return state.playhead >= c.start - 1e-6 && state.playhead < end - 1e-6;
     });
     if (!activeClip) return;
-    const localTime = activeClip.trimStart + (state.playhead - activeClip.start);
+    // Speed-adjust the timeline→source mapping (timeline 1s = source `speed`s).
+    const clipSpeed = activeClip.speed ?? 1;
+    const localTime =
+      activeClip.trimStart + (state.playhead - activeClip.start) * clipSpeed;
     const sourceMarkers = state.markers
       .filter((m) => m.assetId === activeClip.assetId)
       .sort((a, b) => a.time - b.time);
@@ -848,15 +870,19 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       target = [...sourceMarkers].reverse().find((m) => m.time < localTime - 1e-3);
     }
     if (!target) return;
-    const newPlayhead = activeClip.start + (target.time - activeClip.trimStart);
+    // Reverse mapping: source seconds → timeline seconds via /speed.
+    const newPlayhead =
+      activeClip.start + (target.time - activeClip.trimStart) / clipSpeed;
     set({ playhead: Math.max(0, newPlayhead), selectedMarkerId: target.id });
   },
 }));
 
-export const useTimelineDuration = (): number => {
-  const clips = useProjectStore((s) => s.clips);
-  return clips.reduce(
-    (max, c) => Math.max(max, c.start + clipDuration(c)),
-    0,
+// Derive the reduced number INSIDE the selector so Zustand's Object.is
+// comparison runs on the scalar result rather than the clips array. The
+// previous form (subscribe to clips, then reduce in component body) caused
+// every Preview / WaveformPanel / ExportDialog to re-render on every clip
+// mutation (slider drag = 60/s), even when the duration was unchanged.
+export const useTimelineDuration = (): number =>
+  useProjectStore((s) =>
+    s.clips.reduce((max, c) => Math.max(max, c.start + clipDuration(c)), 0),
   );
-};

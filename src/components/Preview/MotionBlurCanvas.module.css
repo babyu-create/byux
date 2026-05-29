@@ -1,0 +1,20 @@
+/* Overlays the underlying <video>. The canvas owns the pixels the viewer
+   sees while the effect is active; the video element behind it still
+   drives playback, audio, and currentTime. pointer-events: none lets
+   clicks reach the video (togglePlay).
+   NOTE: no object-fit. With object-fit:contain, any sub-pixel difference
+   between the canvas backing-store aspect (video.videoWidth / videoHeight)
+   and the .frame CSS box aspect produces tiny letterbox stripes that
+   exposed the .frame's background as visible black bars. Letting the
+   canvas stretch to fill the box uniformly avoids the gap entirely; since
+   the backing-store aspect already matches the source video aspect, the
+   stretch is invisible. */
+.canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  background: transparent;
+  display: block;
+}

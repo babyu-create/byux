@@ -1,11 +1,53 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMediaStore, useSelectedAsset } from '../../stores/mediaStore';
 import { useProjectStore, useTimelineDuration } from '../../stores/projectStore';
 import { clipDuration } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
 import type { Clip, MediaAsset } from '../../lib/types';
+import { MotionBlurCanvas, type HudPreset } from './MotionBlurCanvas';
 import { OverlayLayer } from './OverlayLayer';
 import styles from './Preview.module.css';
+
+/**
+ * Gamma curve for the preview-only motion-blur strength multiplier.
+ * The underlying intensity stored on the clip is the linear 0..100 from
+ * the effects panel. Players experience that as "nothing happens 0-30,
+ * then it pops between 70-90, then breaks". A gamma curve >1 pushes
+ * more perceptible change into the middle of the range so dragging
+ * 40 → 60 actually feels like a doubling, not a tiny nudge. We cap the
+ * peak below the old 1.5x ceiling so high-intensity values stop short
+ * of the regime where the line integral exceeds the actual scene shift.
+ */
+const STRENGTH_GAMMA = 0.6;       // <1 → boost the low end
+const STRENGTH_PEAK = 1.25;       // tighter cap than the previous 1.5
+function shapeStrength(intensity01: number): number {
+  // intensity01 is the slider in 0..1; pow(x, gamma) with gamma<1 gives
+  // a curve that rises fast then plateaus, which is what the eye wants.
+  return Math.pow(Math.max(0, Math.min(1, intensity01)), STRENGTH_GAMMA) * STRENGTH_PEAK;
+}
+
+const HUD_PRESET_LABELS: Record<HudPreset, string> = {
+  valorant: 'VALORANT',
+  cs2: 'CS2',
+  apex: 'Apex',
+  none: 'OFF',
+};
+// Color chips per preset for quick visual identification. Picked from each
+// game's signature accent so users recognize the preset at a glance even
+// without reading the label.
+const HUD_PRESET_CHIP: Record<HudPreset, string> = {
+  valorant: '#ff4655',
+  cs2: '#f5a623',
+  apex: '#da292a',
+  none: '#888',
+};
+const HUD_PRESET_TITLES: Record<HudPreset, string> = {
+  valorant: 'VALORANT 用HUD保護プリセット',
+  cs2: 'CS2 用HUD保護プリセット',
+  apex: 'Apex Legends 用HUD保護プリセット',
+  none: 'HUD保護OFF（汎用映像向け）',
+};
+const HUD_PRESET_ORDER: HudPreset[] = ['valorant', 'cs2', 'apex', 'none'];
 
 export function Preview() {
   const fallbackAsset = useSelectedAsset();
@@ -79,23 +121,26 @@ export function Preview() {
     activeClip?.effects.find((e) => e.type === 'motion-blur') ?? null;
   const clipSpeed = activeClip?.speed ?? 1;
 
-  // Preview motion blur — directional horizontal blur + chromatic aberration
-  // to evoke fast viewpoint panning instead of a uniform gaussian mosaic.
-  // Range mapping: intensity 0–100 → stdDeviation X 0–16 / chroma offset 0–6.
-  const motionBlurParams = useMemo(() => {
-    if (!motionBlur || !isPlaying) return null;
+  // Preview-only multiplier on the canvas strength. Lets the user dial in
+  // the look during preview without touching the per-clip intensity stored
+  // by the effects panel. 0..1.5 — anything above 1 boosts beyond the
+  // clip's authored strength for spot-checking.
+  const [previewBlurBoost, setPreviewBlurBoost] = useState(1);
+
+  // Preview motion blur strength fed into MotionBlurCanvas. The canvas runs
+  // a per-pixel directional blur in a WebGL shader, sampling along the
+  // detected global motion vector — intensity here scales how far that
+  // line integral extends. A gamma curve (<1) maps the linear 0..100 panel
+  // value into a perceptually balanced 0..STRENGTH_PEAK so the middle of
+  // the slider does the visible work instead of the last 20% breaking.
+  // The previewBlurBoost is applied on top and lets you eyeball alternative
+  // strengths without re-editing the clip.
+  const motionBlurStrength = useMemo(() => {
+    if (!motionBlur) return 0;
     const intensity = Math.max(0, Math.min(100, motionBlur.intensity ?? 40));
     const speedFactor = Math.max(0.5, Math.min(2, clipSpeed));
-    const t = (intensity / 100) * speedFactor;
-    return {
-      // Strong horizontal, minimal vertical → "camera pan" feel.
-      stdDevX: (4 + t * 12).toFixed(2),
-      stdDevY: (0.4 + t * 0.6).toFixed(2),
-      // Chromatic split: red leads, blue trails.
-      chromaOffset: (t * 6).toFixed(2),
-      filterId: 'fx-motion-blur',
-    };
-  }, [motionBlur, isPlaying, clipSpeed]);
+    return shapeStrength(intensity / 100) * speedFactor * previewBlurBoost;
+  }, [motionBlur, clipSpeed, previewBlurBoost]);
 
   // Build template context (e.g. {n}/{total} for kill counter)
   const overlayContext = useMemo<Record<string, string>>(() => {
@@ -138,6 +183,16 @@ export function Preview() {
   const playingRef = useRef(isPlaying);
   playingRef.current = isPlaying;
 
+  // HUD preset for the motion blur canvas. Each preset wraps a per-game
+  // set of view-locked UI zones. 'valorant' (default) preserves the
+  // historical behaviour; 'cs2' and 'apex' target their respective
+  // layouts; 'none' disables the positional protect so the per-pixel
+  // luma-diff mask handles the entire workload — appropriate for non-FPS
+  // footage where the hard-coded HUD rectangles would falsely protect
+  // moving content.
+  const [hudPreset, setHudPreset] = useState<HudPreset>('valorant');
+
+
   // Sync audio element to active audio clip + playhead (similar to video).
   useEffect(() => {
     const audio = audioRef.current;
@@ -159,6 +214,15 @@ export function Preview() {
     } else {
       audio.pause();
     }
+    // Cleanup: ensure audio is paused when the effect tears down (clip
+    // switch, asset swap, component unmount). Without this, briefly two
+    // <audio> elements can play concurrently between react's render and
+    // unmount of the old keyed element.
+    return () => {
+      if (audio && !audio.paused) {
+        audio.pause();
+      }
+    };
   }, [
     activeAudioClip?.id,
     activeAudioAsset?.id,
@@ -230,6 +294,17 @@ export function Preview() {
       if (!v) return;
       const state = useProjectStore.getState();
 
+      // Resolve videoTrackId fresh each tick (not from the effect closure).
+      // The closure'd value could be stale across track reorders or after
+      // a project reload that briefly clears tracks, leaving playback
+      // pointed at a track that no longer exists.
+      const liveVideoTrackId =
+        state.tracks.find((t) => t.kind === 'video')?.id ?? null;
+      if (!liveVideoTrackId) {
+        state.setIsPlaying(false);
+        return;
+      }
+
       const totalDur = state.clips.reduce(
         (m, c) => Math.max(m, c.start + clipDuration(c)),
         0,
@@ -241,7 +316,7 @@ export function Preview() {
 
       // Find the clip currently under the playhead.
       const current = state.clips.find((c) => {
-        if (c.trackId !== videoTrackId) return false;
+        if (c.trackId !== liveVideoTrackId) return false;
         const end = c.start + clipDuration(c);
         return state.playhead >= c.start - 1e-6 && state.playhead < end - 1e-6;
       });
@@ -255,7 +330,7 @@ export function Preview() {
           const next = state.clips
             .filter(
               (c) =>
-                c.trackId === videoTrackId &&
+                c.trackId === liveVideoTrackId &&
                 c.start > current.start + 1e-6,
             )
             .sort((a, b) => a.start - b.start)[0];
@@ -276,7 +351,7 @@ export function Preview() {
         // Not in any clip — try to jump forward to the next one.
         const next = state.clips
           .filter(
-            (c) => c.trackId === videoTrackId && c.start > state.playhead + 1e-6,
+            (c) => c.trackId === liveVideoTrackId && c.start > state.playhead + 1e-6,
           )
           .sort((a, b) => a.start - b.start)[0];
         if (next) {
@@ -386,6 +461,52 @@ export function Preview() {
             9:16
           </button>
         </div>
+        {motionBlur && motionBlurStrength > 0 ? (
+          <div className={styles.blurControls}>
+            <span className={styles.blurLabel} aria-hidden="true">HUD</span>
+            <div
+              className={styles.hudPresetGroup}
+              role="group"
+              aria-label="HUD保護プリセット"
+            >
+              {HUD_PRESET_ORDER.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  className={`${styles.hudPresetBtn} ${hudPreset === preset ? styles.hudPresetActive : ''}`}
+                  onClick={() => setHudPreset(preset)}
+                  aria-pressed={hudPreset === preset}
+                  title={HUD_PRESET_TITLES[preset]}
+                >
+                  <span
+                    className={styles.hudPresetChip}
+                    style={{ background: HUD_PRESET_CHIP[preset] }}
+                    aria-hidden="true"
+                  />
+                  {HUD_PRESET_LABELS[preset]}
+                </button>
+              ))}
+            </div>
+            <label
+              className={styles.previewBoostLabel}
+              title="プレビュー時のみのモーションブラー倍率（クリップ強度は変えない）"
+            >
+              <span className={styles.previewBoostText}>
+                プレビュー {Math.round(previewBlurBoost * 100)}%
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={1.5}
+                step={0.01}
+                value={previewBlurBoost}
+                onChange={(e) => setPreviewBlurBoost(parseFloat(e.target.value))}
+                className={styles.previewBoostSlider}
+                aria-label="プレビューブラー強度"
+              />
+            </label>
+          </div>
+        ) : null}
         <div className={styles.fileName} title={displayAsset?.name ?? ''}>
           {clips.length > 0
             ? activeClip
@@ -409,72 +530,6 @@ export function Preview() {
         <div className={styles.frame} data-aspect={aspectRatio}>
           {showVideo ? (
             <>
-              {motionBlurParams ? (
-                <svg
-                  className={styles.fxSvg}
-                  width="0"
-                  height="0"
-                  aria-hidden="true"
-                >
-                  <defs>
-                    <filter
-                      id={motionBlurParams.filterId}
-                      x="-5%"
-                      y="-5%"
-                      width="110%"
-                      height="110%"
-                    >
-                      {/* Split into R / G / B channels, offset R and B
-                          horizontally, then horizontally blur each before
-                          recompositing — directional blur + chromatic split. */}
-                      <feColorMatrix
-                        in="SourceGraphic"
-                        result="r"
-                        values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"
-                      />
-                      <feColorMatrix
-                        in="SourceGraphic"
-                        result="g"
-                        values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"
-                      />
-                      <feColorMatrix
-                        in="SourceGraphic"
-                        result="b"
-                        values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0"
-                      />
-                      <feOffset
-                        in="r"
-                        dx={`-${motionBlurParams.chromaOffset}`}
-                        dy="0"
-                        result="rOff"
-                      />
-                      <feOffset
-                        in="b"
-                        dx={motionBlurParams.chromaOffset}
-                        dy="0"
-                        result="bOff"
-                      />
-                      <feGaussianBlur
-                        in="rOff"
-                        stdDeviation={`${motionBlurParams.stdDevX} ${motionBlurParams.stdDevY}`}
-                        result="rBlur"
-                      />
-                      <feGaussianBlur
-                        in="g"
-                        stdDeviation={`${motionBlurParams.stdDevX} ${motionBlurParams.stdDevY}`}
-                        result="gBlur"
-                      />
-                      <feGaussianBlur
-                        in="bOff"
-                        stdDeviation={`${motionBlurParams.stdDevX} ${motionBlurParams.stdDevY}`}
-                        result="bBlur"
-                      />
-                      <feBlend in="rBlur" in2="gBlur" mode="screen" result="rg" />
-                      <feBlend in="rg" in2="bBlur" mode="screen" />
-                    </filter>
-                  </defs>
-                </svg>
-              ) : null}
               <video
                 key={displayAsset?.id}
                 ref={videoRef}
@@ -483,11 +538,15 @@ export function Preview() {
                 playsInline
                 muted={videoTrackMuted}
                 onClick={togglePlay}
-                style={
-                  motionBlurParams
-                    ? { filter: `url(#${motionBlurParams.filterId})` }
-                    : undefined
-                }
+              />
+              <MotionBlurCanvas
+                videoRef={videoRef}
+                isPlaying={isPlaying}
+                active={motionBlur !== null && motionBlurStrength > 0}
+                strength={motionBlurStrength}
+                hudPreset={hudPreset}
+                hudMaskStrength={hudPreset === 'none' ? 0 : 1}
+                aspect={aspectRatio === '9:16' ? 9 / 16 : 16 / 9}
               />
               {fadeOpacity > 0 ? (
                 <div

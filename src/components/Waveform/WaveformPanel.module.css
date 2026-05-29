@@ -1,0 +1,78 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+
+.meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-muted);
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 16px;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.canvasWrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-track);
+  cursor: pointer;
+  touch-action: none;
+  /* Clip waveform draws to exact canvas bounds */
+  contain: paint;
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1.5px;
+  background: var(--playhead);
+  pointer-events: none;
+  box-shadow: 0 0 4px var(--accent-soft);
+  /* Promoted to own layer for smooth scrubbing */
+  will-change: left;
+}
+
+.playhead::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 7.5px;
+  height: 5px;
+  background: var(--playhead);
+  border-radius: 0 0 50% 50%;
+}

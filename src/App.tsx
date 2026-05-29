@@ -1,13 +1,22 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { MediaLibrary } from './components/MediaLibrary/MediaLibrary';
 import { Preview } from './components/Preview/Preview';
 import { PropertiesPanel } from './components/Properties/PropertiesPanel';
+import { WaveformPanel } from './components/Waveform/WaveformPanel';
 import { Timeline } from './components/Timeline/Timeline';
 import { Toast } from './components/Common/Toast';
-import { HelpDialog } from './components/Common/HelpDialog';
-import { SettingsDialog } from './components/Common/SettingsDialog';
+import { Splitter } from './components/Common/Splitter';
 import { UpdateBanner } from './components/Common/UpdateBanner';
-import { ExportDialog } from './components/Export/ExportDialog';
+
+const HelpDialog = lazy(() =>
+  import('./components/Common/HelpDialog').then((m) => ({ default: m.HelpDialog })),
+);
+const SettingsDialog = lazy(() =>
+  import('./components/Common/SettingsDialog').then((m) => ({ default: m.SettingsDialog })),
+);
+const ExportDialog = lazy(() =>
+  import('./components/Export/ExportDialog').then((m) => ({ default: m.ExportDialog })),
+);
 import { useProjectStore } from './stores/projectStore';
 import { useMediaStore } from './stores/mediaStore';
 import {
@@ -16,13 +25,31 @@ import {
   parseProjectFile,
   serialiseProject,
 } from './lib/project';
+import {
+  LAYOUT_BOUNDS,
+  clampSize,
+  loadLayout,
+  saveLayout,
+  type LayoutSizes,
+} from './lib/layout';
 import styles from './App.module.css';
+
+type CssVars = React.CSSProperties & Record<`--${string}`, string>;
 
 function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [layout, setLayout] = useState<LayoutSizes>(() => loadLayout());
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const updateLayout = <K extends keyof LayoutSizes>(key: K, value: number) => {
+    setLayout((prev) => {
+      const next = { ...prev, [key]: clampSize(key, value) };
+      saveLayout(next);
+      return next;
+    });
+  };
 
   const hasVideoClips = useProjectStore((s) =>
     s.clips.some(
@@ -133,8 +160,15 @@ function App() {
     }
   }, [mediaAssets, expectedAssets]);
 
+  const layoutVars: CssVars = {
+    '--layout-left-w': `${layout.leftWidth}px`,
+    '--layout-right-w': `${layout.rightWidth}px`,
+    '--layout-timeline-h': `${layout.timelineHeight}px`,
+    '--layout-properties-h': `${layout.propertiesHeight}px`,
+  };
+
   return (
-    <div className={styles.app}>
+    <div className={styles.app} style={layoutVars}>
       <header className={styles.header}>
         <div className={styles.brand}>
           <span className={styles.logoMark}>FCE</span>
@@ -182,22 +216,63 @@ function App() {
         </nav>
       </header>
 
-      {exportOpen ? <ExportDialog onClose={() => setExportOpen(false)} /> : null}
-      {helpOpen ? <HelpDialog onClose={() => setHelpOpen(false)} /> : null}
-      {settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null}
+      <Suspense fallback={null}>
+        {exportOpen ? <ExportDialog onClose={() => setExportOpen(false)} /> : null}
+        {helpOpen ? <HelpDialog onClose={() => setHelpOpen(false)} /> : null}
+        {settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null}
+      </Suspense>
 
       <main className={styles.workspace}>
         <section className={styles.panelLeft}>
           <MediaLibrary />
         </section>
+        <Splitter
+          orientation="vertical"
+          value={layout.leftWidth}
+          min={LAYOUT_BOUNDS.leftWidth.min}
+          max={LAYOUT_BOUNDS.leftWidth.max}
+          onResize={(v) => updateLayout('leftWidth', v)}
+          ariaLabel="メディアライブラリの幅"
+        />
         <section className={styles.panelCenter}>
           <Preview />
         </section>
+        <Splitter
+          orientation="vertical"
+          value={layout.rightWidth}
+          min={LAYOUT_BOUNDS.rightWidth.min}
+          max={LAYOUT_BOUNDS.rightWidth.max}
+          reverse
+          onResize={(v) => updateLayout('rightWidth', v)}
+          ariaLabel="プロパティ・波形パネルの幅"
+        />
         <section className={styles.panelRight}>
-          <PropertiesPanel />
+          <div className={styles.panelRightProperties}>
+            <PropertiesPanel />
+          </div>
+          <Splitter
+            orientation="horizontal"
+            value={layout.propertiesHeight}
+            min={LAYOUT_BOUNDS.propertiesHeight.min}
+            max={LAYOUT_BOUNDS.propertiesHeight.max}
+            onResize={(v) => updateLayout('propertiesHeight', v)}
+            ariaLabel="プロパティセクションの高さ"
+          />
+          <div className={styles.panelRightWaveform}>
+            <WaveformPanel />
+          </div>
         </section>
       </main>
 
+      <Splitter
+        orientation="horizontal"
+        value={layout.timelineHeight}
+        min={LAYOUT_BOUNDS.timelineHeight.min}
+        max={LAYOUT_BOUNDS.timelineHeight.max}
+        reverse
+        onResize={(v) => updateLayout('timelineHeight', v)}
+        ariaLabel="タイムラインの高さ"
+      />
       <footer className={styles.timelineSection}>
         <Timeline />
       </footer>

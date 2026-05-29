@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
-import { exportProject } from '../../lib/exporter';
+import {
+  exportProject,
+  getActiveCoreVariant,
+  getActiveCoreThreadCount,
+  resetFFmpeg,
+} from '../../lib/exporter';
 import styles from './ExportDialog.module.css';
 
 interface ExportDialogProps {
@@ -10,33 +15,134 @@ interface ExportDialogProps {
 
 type Phase = 'idle' | 'rendering' | 'done' | 'error';
 
+/**
+ * Structured error result for the dialog. `message` is the headline shown
+ * to the user; `steps` is an ordered list of "next things to try" rendered
+ * as a small troubleshooting checklist. The detail string is the raw error
+ * for the disclosure block.
+ */
+interface HumanizedError {
+  message: string;
+  steps: string[];
+  detail?: string;
+}
+
+/** Maps known error message fragments to user-friendly Japanese explanations
+ * with actionable next-step guidance. The "steps" list orders things by
+ * effort (cheapest first) so users self-resolve before pinging support. */
+function humanizeError(raw: string): HumanizedError {
+  if (raw.includes('FFmpeg 初期化失敗') || raw.includes('ffmpeg-core')) {
+    return {
+      message: 'FFmpeg の初期化に失敗しました',
+      steps: [
+        'ネットワーク接続を確認',
+        'ページをリロード（Ctrl+R / Cmd+R）',
+        '別ブラウザで再試行',
+        'それでも駄目なら GitHub Issue で報告',
+      ],
+      detail: raw,
+    };
+  }
+  if (raw.includes('SharedArrayBuffer') || raw.includes('crossOriginIsolated')) {
+    return {
+      message: 'マルチスレッドモードに必要な SharedArrayBuffer が利用できません',
+      steps: [
+        'ページをリロード',
+        'ブラウザのセキュリティ設定を確認（Cross-Origin Isolation）',
+        '単一スレッドモードで再試行',
+      ],
+      detail: raw,
+    };
+  }
+  if (raw.includes('映像クリップがありません') || raw.includes('元素材が見つかりません')) {
+    return {
+      message: '書き出せる映像クリップがありません',
+      steps: [
+        'タイムラインにクリップを追加',
+        'メディアライブラリから素材をドラッグ',
+      ],
+    };
+  }
+  if (raw.includes('タイムアウト') || raw.includes('timed out')) {
+    return {
+      message: 'FFmpeg コアの読み込みがタイムアウトしました',
+      steps: [
+        'ネットワーク接続を確認',
+        'ページをリロード',
+        '時間を置いて再試行',
+      ],
+      detail: raw,
+    };
+  }
+  if (raw.includes('out of memory') || raw.includes('OOM') || raw.includes('memory')) {
+    return {
+      message: 'メモリ不足です',
+      steps: [
+        '解像度を 720p に下げる',
+        'クリップ数を減らして書き出し',
+        'ブラウザの他タブを閉じる',
+      ],
+      detail: raw,
+    };
+  }
+  return {
+    message: '書き出しに失敗しました',
+    steps: [
+      'ページをリロードして再試行',
+      '解像度やクリップ数を変えて再試行',
+    ],
+    detail: raw,
+  };
+}
+
 export function ExportDialog({ onClose }: ExportDialogProps) {
   const clips = useProjectStore((s) => s.clips);
   const tracks = useProjectStore((s) => s.tracks);
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
   const projectFps = useProjectStore((s) => s.fps);
   const projectResolution = useProjectStore((s) => s.resolution);
+  const projectName = useProjectStore((s) => s.name);
   const assets = useMediaStore((s) => s.assets);
 
   const [resolution, setResolution] = useState<'720p' | '1080p'>(projectResolution);
   const [fps, setFps] = useState<30 | 60>(projectFps);
+  const [motionBlur, setMotionBlur] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<HumanizedError | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [fileSizeMb, setFileSizeMb] = useState<number | null>(null);
+  const [etaLabel, setEtaLabel] = useState<string>('');
+  const [customFilename, setCustomFilename] = useState('');
   const startTimeRef = useRef<number>(0);
   const [elapsedSec, setElapsedSec] = useState(0);
+
+  // Derive core variant label for the badge (updates after FFmpeg loads).
+  const [coreLabel, setCoreLabel] = useState<string>('');
 
   useEffect(() => {
     if (phase !== 'rendering') return;
     const id = window.setInterval(() => {
       setElapsedSec((Date.now() - startTimeRef.current) / 1000);
+      // Refresh the core variant badge while rendering (it may have just loaded).
+      const v = getActiveCoreVariant();
+      const tc = getActiveCoreThreadCount();
+      setCoreLabel(v === 'mt' ? `MT (${tc} threads)` : 'ST (single thread)');
     }, 200);
     return () => window.clearInterval(id);
   }, [phase]);
+
+  // Update core badge on dialog open (in case FFmpeg was already loaded).
+  useEffect(() => {
+    const v = getActiveCoreVariant();
+    const tc = getActiveCoreThreadCount();
+    if (v === 'mt') {
+      setCoreLabel(`MT (${tc} threads)`);
+    }
+    // If ST but not loaded yet, leave blank — it will update during render.
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -49,12 +155,17 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
     return t?.kind === 'video';
   }).length;
 
+  const isExportingRef = useRef(false);
+
   const handleStart = async () => {
+    if (isExportingRef.current) return;
+    isExportingRef.current = true;
     setPhase('rendering');
     setProgress(0);
     setStage('開始中');
     setLogs([]);
     setError(null);
+    setEtaLabel('');
     if (downloadUrl) {
       URL.revokeObjectURL(downloadUrl);
       setDownloadUrl(null);
@@ -68,13 +179,33 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           resolution,
           fps,
           aspectRatio,
+          motionBlur,
           onProgress: ({ stage: s, percent, log }) => {
-            setStage(s);
-            setProgress(percent);
+            // Update core label whenever we receive a stage update that
+            // mentions the variant (FFmpeg just finished loading).
+            if (s.includes('MT') || s.includes('ST')) {
+              const v = getActiveCoreVariant();
+              const tc = getActiveCoreThreadCount();
+              setCoreLabel(v === 'mt' ? `MT (${tc} threads)` : 'ST (single thread)');
+            }
+
+            // Extract ETA note from stage string if present.
+            const etaMatch = /残り約\s*(\d+)s/.exec(s);
+            if (etaMatch) {
+              setEtaLabel(`残り約 ${etaMatch[1]}s`);
+              // Strip ETA from stage label for cleaner display.
+              setStage(s.replace(/\s*—\s*残り約\s*\d+s/, '').trim());
+            } else {
+              setStage(s);
+            }
+
+            if (percent >= 0) {
+              setProgress(percent);
+            }
             if (log) {
               setLogs((prev) => {
                 const next = [...prev, log];
-                return next.length > 60 ? next.slice(next.length - 60) : next;
+                return next.length > 80 ? next.slice(next.length - 80) : next;
               });
             }
           },
@@ -85,28 +216,66 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
       setFileSizeMb(blob.size / (1024 * 1024));
       setPhase('done');
     } catch (e) {
-      setError(e instanceof Error ? e.message : '不明なエラー');
+      const rawMsg = e instanceof Error ? e.message : '不明なエラー';
+      setError(humanizeError(rawMsg));
       setPhase('error');
+      // Drop the cached FFmpeg singleton so a retry rebuilds it from
+      // scratch. An exec failure (OOM, filter-graph deadlock, WASM
+      // corruption) can leave the handle alive but unusable; without a
+      // reset, every subsequent attempt would hit the same dead handle.
+      resetFFmpeg();
+    } finally {
+      isExportingRef.current = false;
     }
   };
 
-  const filename = `fps-clip-${Date.now()}.mp4`;
+  const handleRetry = () => {
+    setError(null);
+    setPhase('idle');
+    // Schedule the actual start on the next tick so the UI reflects the
+    // phase change before re-entering the rendering branch.
+    window.setTimeout(() => {
+      void handleStart();
+    }, 0);
+  };
+
+  // Build the download filename: prefer customFilename, fallback to project name,
+  // then a timestamp.
+  const safeProjectName = (projectName ?? '').replace(/[\\/:*?"<>|]/g, '_').trim();
+  const defaultName = safeProjectName
+    ? `${safeProjectName}.mp4`
+    : `fps-clip-${Date.now()}.mp4`;
+  const downloadFilename = customFilename.trim() || defaultName;
 
   return (
     <div className={styles.backdrop} role="dialog" aria-modal="true">
       <div className={styles.modal}>
         <div className={styles.header}>
-          <span className={styles.title}>📦 書き出し</span>
-          {phase !== 'rendering' ? (
-            <button
-              type="button"
-              className={styles.closeBtn}
-              onClick={onClose}
-              aria-label="閉じる"
-            >
-              ×
-            </button>
-          ) : null}
+          <span className={styles.title}>書き出し</span>
+          <div className={styles.headerRight}>
+            {coreLabel ? (
+              <span
+                className={
+                  coreLabel.startsWith('MT')
+                    ? styles.badgeMt
+                    : styles.badgeSt
+                }
+                title="FFmpeg コアモード"
+              >
+                {coreLabel}
+              </span>
+            ) : null}
+            {phase !== 'rendering' ? (
+              <button
+                type="button"
+                className={styles.closeBtn}
+                onClick={onClose}
+                aria-label="閉じる"
+              >
+                x
+              </button>
+            ) : null}
+          </div>
         </div>
 
         <div className={styles.body}>
@@ -162,14 +331,71 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                 </div>
               </div>
 
-              {error ? <div className={styles.error}>⚠ {error}</div> : null}
+              <div className={styles.optionRow}>
+                <span className={styles.optionLabel}>モーションブラー</span>
+                <div className={styles.btnGroup}>
+                  <button
+                    type="button"
+                    className={`${styles.optBtn} ${!motionBlur ? styles.optActive : ''}`}
+                    onClick={() => setMotionBlur(false)}
+                  >
+                    OFF（高速）
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.optBtn} ${motionBlur ? styles.optActive : ''}`}
+                    onClick={() => setMotionBlur(true)}
+                  >
+                    ON（低速）
+                  </button>
+                </div>
+              </div>
+
+              <div className={styles.optionRow}>
+                <span className={styles.optionLabel}>ファイル名</span>
+                <input
+                  type="text"
+                  className={styles.filenameInput}
+                  placeholder={defaultName}
+                  value={customFilename}
+                  onChange={(e) => setCustomFilename(e.target.value)}
+                  maxLength={120}
+                />
+              </div>
+
+              {error ? (
+                <div className={styles.error} role="alert">
+                  <div className={styles.errorHeader}>
+                    <span className={styles.errorIcon} aria-hidden="true">!</span>
+                    <div className={styles.errorTitle}>{error.message}</div>
+                  </div>
+                  {error.steps.length > 0 ? (
+                    <>
+                      <div className={styles.errorStepsLabel}>次に試すこと</div>
+                      <ol className={styles.errorSteps}>
+                        {error.steps.map((step, idx) => (
+                          <li key={idx} className={styles.errorStep}>
+                            {step}
+                          </li>
+                        ))}
+                      </ol>
+                    </>
+                  ) : null}
+                  {error.detail ? (
+                    <details className={styles.errorDetails}>
+                      <summary className={styles.errorSummary}>詳細を表示</summary>
+                      <pre className={styles.errorBody}>{error.detail}</pre>
+                    </details>
+                  ) : null}
+                </div>
+              ) : null}
             </>
           ) : null}
 
           {phase === 'rendering' ? (
             <>
               <div className={styles.progressLabel}>
-                <span>{stage}</span>
+                <span className={styles.stageText}>{stage}</span>
                 <span className={styles.progressNum}>{Math.round(progress * 100)}%</span>
               </div>
               <div className={styles.progressBar}>
@@ -178,7 +404,12 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                   style={{ width: `${progress * 100}%` }}
                 />
               </div>
-              <div className={styles.elapsed}>経過時間: {elapsedSec.toFixed(1)}s</div>
+              <div className={styles.timerRow}>
+                <span className={styles.elapsed}>経過: {elapsedSec.toFixed(1)}s</span>
+                {etaLabel ? (
+                  <span className={styles.eta}>{etaLabel}</span>
+                ) : null}
+              </div>
               {logs.length > 0 ? (
                 <pre className={styles.log}>{logs.slice(-12).join('\n')}</pre>
               ) : null}
@@ -193,19 +424,29 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                 {fileSizeMb !== null ? `${fileSizeMb.toFixed(1)} MB` : ''}
                 {elapsedSec > 0 ? ` / ${elapsedSec.toFixed(1)}s` : ''}
               </div>
+              <div className={styles.filenameRow}>
+                <input
+                  type="text"
+                  className={styles.filenameInput}
+                  value={customFilename}
+                  placeholder={defaultName}
+                  onChange={(e) => setCustomFilename(e.target.value)}
+                  maxLength={120}
+                />
+              </div>
               <a
                 className={styles.downloadBtn}
                 href={downloadUrl}
-                download={filename}
+                download={downloadFilename}
               >
-                ⬇ ダウンロード
+                ダウンロード
               </a>
             </div>
           ) : null}
         </div>
 
         <div className={styles.footer}>
-          {phase === 'idle' || phase === 'error' ? (
+          {phase === 'idle' ? (
             <>
               <button type="button" className={styles.btnCancel} onClick={onClose}>
                 キャンセル
@@ -217,6 +458,20 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                 disabled={totalClips === 0}
               >
                 書き出し開始
+              </button>
+            </>
+          ) : phase === 'error' ? (
+            <>
+              <button type="button" className={styles.btnCancel} onClick={onClose}>
+                閉じる
+              </button>
+              <button
+                type="button"
+                className={styles.btnPrimary}
+                onClick={handleRetry}
+                disabled={totalClips === 0}
+              >
+                再試行
               </button>
             </>
           ) : phase === 'done' ? (

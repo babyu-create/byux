@@ -1,0 +1,42 @@
+.splitter {
+  position: relative;
+  background: var(--border);
+  flex-shrink: 0;
+  touch-action: none;
+  transition: background var(--t-fast);
+  z-index: 5;
+}
+
+.splitter:hover,
+.dragging {
+  background: var(--accent) !important;
+}
+
+.splitter::after {
+  content: '';
+  position: absolute;
+  background: transparent;
+}
+
+/* Vertical splitter — thin column. Drags horizontally. */
+.vertical {
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+/* Expand hit area without changing visual width. */
+.vertical::after {
+  inset: 0 -3px;
+}
+
+/* Horizontal splitter — thin row. Drags vertically. */
+.horizontal {
+  height: 4px;
+  width: 100%;
+  cursor: row-resize;
+}
+
+.horizontal::after {
+  inset: -3px 0;
+}

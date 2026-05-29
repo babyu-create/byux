@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, dialog, session } = require('electron');
 const path = require('node:path');
 const { autoUpdater } = require('electron-updater');
 
@@ -55,7 +55,25 @@ ipcMain.handle('updater:check', async () => {
   }
 });
 
+// Inject COOP/COEP headers on every response so SharedArrayBuffer is
+// available — required by the multi-threaded ffmpeg.wasm build that
+// powers our export pipeline. Without these headers Chromium refuses
+// to instantiate SAB and the export falls back to single-thread (~3x
+// slower).
+function enableCrossOriginIsolation() {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Cross-Origin-Opener-Policy': ['same-origin'],
+        'Cross-Origin-Embedder-Policy': ['require-corp'],
+      },
+    });
+  });
+}
+
 function createWindow() {
+  enableCrossOriginIsolation();
   mainWindow = new BrowserWindow({
     width: 1600,
     height: 1000,

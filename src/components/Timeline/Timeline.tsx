@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useProjectStore, useTimelineDuration } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { clipDuration, timeToPx } from '../../lib/timeline';
@@ -14,11 +14,29 @@ import { TimelineToolbar } from './TimelineToolbar';
 import { TimelineScrollProvider } from '../../hooks/useTimelineAutoScroll';
 import styles from './Timeline.module.css';
 
+// Memoised track header list — only re-renders when tracks array changes identity
+const TrackHeaderList = memo(function TrackHeaderList({
+  trackIds,
+}: {
+  trackIds: string[];
+}) {
+  const tracks = useProjectStore((s) => s.tracks);
+  return (
+    <>
+      {trackIds.map((id) => {
+        const track = tracks.find((t) => t.id === id);
+        if (!track) return null;
+        return <TrackHeader key={id} track={track} />;
+      })}
+    </>
+  );
+});
+
 export function Timeline() {
   const tracks = useProjectStore((s) => s.tracks);
-  const clips = useProjectStore((s) => s.clips);
+  // NOTE: playhead is NOT subscribed here — Playhead component reads it directly.
+  // This prevents all of Timeline from re-rendering on every scrub frame.
   const zoom = useProjectStore((s) => s.zoom);
-  const playhead = useProjectStore((s) => s.playhead);
   const clearSelection = useProjectStore((s) => s.clearSelection);
   const removeSelectedClips = useProjectStore((s) => s.removeSelectedClips);
   const splitSelected = useProjectStore((s) => s.splitSelectedAtPlayhead);
@@ -39,8 +57,17 @@ export function Timeline() {
   const totalSec = Math.max(duration + 5, minDisplaySec);
   const totalWidth = timeToPx(totalSec, zoom);
 
+  // Stable track id list — only changes when tracks themselves change
+  const trackIds = useMemo(() => tracks.map((t) => t.id), [tracks]);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
+
+  // Stable callbacks so the keydown effect doesn't re-register on every render
+  const stableRemoveSelected = useCallback(() => removeSelectedClips(), [removeSelectedClips]);
+  const stableSplitSelected = useCallback(() => splitSelected(), [splitSelected]);
+  const stableZoomIn = useCallback(() => zoomIn(), [zoomIn]);
+  const stableZoomOut = useCallback(() => zoomOut(), [zoomOut]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -72,22 +99,22 @@ export function Timeline() {
         case 'clip.split':
           if (state.selectedClipIds.length > 0) {
             e.preventDefault();
-            splitSelected();
+            stableSplitSelected();
           }
           return;
         case 'clip.delete':
           if (state.selectedClipIds.length > 0) {
             e.preventDefault();
-            removeSelectedClips();
+            stableRemoveSelected();
           }
           return;
         case 'zoom.in':
           e.preventDefault();
-          zoomIn();
+          stableZoomIn();
           return;
         case 'zoom.out':
           e.preventDefault();
-          zoomOut();
+          stableZoomOut();
           return;
         case 'frame.prev':
           e.preventDefault();
@@ -201,13 +228,16 @@ export function Timeline() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [removeSelectedClips, splitSelected, zoomIn, zoomOut]);
+  }, [stableRemoveSelected, stableSplitSelected, stableZoomIn, stableZoomOut]);
 
-  const handleTrackAreaClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) {
-      clearSelection();
-    }
-  };
+  const handleTrackAreaClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.target === e.currentTarget) {
+        clearSelection();
+      }
+    },
+    [clearSelection],
+  );
 
   return (
     <TimelineScrollProvider value={{ scrollRef }}>
@@ -215,9 +245,7 @@ export function Timeline() {
       <TimelineToolbar />
       <div className={styles.body}>
         <div className={styles.trackHeaders}>
-          {tracks.map((track) => (
-            <TrackHeader key={track.id} track={track} />
-          ))}
+          <TrackHeaderList trackIds={trackIds} />
         </div>
 
         <div className={styles.scroll} ref={scrollRef}>
@@ -232,14 +260,13 @@ export function Timeline() {
               {tracks.map((track) => (
                 <Track
                   key={track.id}
-                  track={track}
-                  clips={clips.filter((c) => c.trackId === track.id)}
+                  trackId={track.id}
                   zoom={zoom}
                   totalSec={totalSec}
                   assetsById={assetsById}
                 />
               ))}
-              <Playhead time={playhead} zoom={zoom} />
+              <Playhead zoom={zoom} />
               <SnapGuide zoom={zoom} />
             </div>
           </div>

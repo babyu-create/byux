@@ -37,6 +37,11 @@
   color: var(--text);
 }
 
+.aspectBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .aspectActive {
   background: var(--accent) !important;
   color: var(--text-inverse) !important;
@@ -53,15 +58,164 @@
   white-space: nowrap;
 }
 
+.hudBtn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: all var(--t-fast);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hudBtn:hover {
+  color: var(--text);
+  border-color: var(--border-strong, var(--border));
+}
+
+.hudBtnOn {
+  color: var(--text-inverse);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Compound cluster: HUD preset picker + preview boost slider sit together
+   in the toolbar. Kept as a single inline-flex so the toolbar reserves
+   one block of space and the elements line up vertically when wrapped.
+   On narrow viewports the cluster wraps to a second row, keeping the
+   aspect-ratio picker on its own visual lane. */
+.blurControls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-left: 10px;
+  margin-left: 2px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.blurLabel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.hudPresetGroup {
+  display: inline-flex;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.hudPresetBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  transition: background var(--t-fast), color var(--t-fast);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hudPresetBtn:hover {
+  color: var(--text);
+}
+
+.hudPresetBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.hudPresetBtn + .hudPresetBtn {
+  /* Light vertical divider between adjacent preset buttons. */
+  box-shadow: -1px 0 0 var(--border) inset;
+}
+
+.hudPresetChip {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  /* Subtle ring so a pale chip still reads on the panel surface. */
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.hudPresetActive {
+  background: var(--accent) !important;
+  color: var(--text-inverse) !important;
+}
+
+.hudPresetActive .hudPresetChip {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
+}
+
+.previewBoostLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.previewBoostText {
+  min-width: 78px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.previewBoostSlider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-panel-2, var(--bg-panel));
+  cursor: pointer;
+  outline: none;
+}
+
+.previewBoostSlider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: grab;
+  border: 2px solid var(--bg-elevated);
+}
+
+.previewBoostSlider::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: grab;
+  border: 2px solid var(--bg-elevated);
+}
+
 .stage {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
-  background:
-    linear-gradient(transparent 50%, rgba(0, 0, 0, 0.02) 50%) 0 0 / 24px 24px,
-    var(--bg-app);
+  /* Edge-to-edge — no padding/gutter around the preview frame. */
+  padding: 0;
+  background: var(--bg-app);
   overflow: hidden;
   min-height: 0;
   container-type: size;
@@ -70,10 +224,17 @@
 
 .frame {
   position: relative;
-  background: #000;
-  border-radius: var(--radius);
+  /* Use the app surface color rather than pure black. With motion blur on,
+     the canvas overlay uses object-fit:contain — if there is any sub-pixel
+     aspect mismatch between the canvas backing-store and the frame box,
+     pure-black gaps would leak through as visible "black bars". Using the
+     surrounding app color makes any such gaps invisible. */
+  background: var(--bg-app);
+  /* Edge-to-edge — drop the rounded corners and shadow so the frame
+     reaches the panel walls without visual gutter. */
+  border-radius: 0;
   overflow: hidden;
-  box-shadow: var(--shadow-lg);
+  box-shadow: none;
 }
 
 /* Compute the largest box of the requested aspect that fits inside the stage,
@@ -93,17 +254,16 @@
   height: 100%;
   object-fit: contain;
   cursor: pointer;
-  background: #000;
+  /* Match .frame so any object-fit:contain letterbox is invisible. */
+  background: var(--bg-app);
   transform-origin: center center;
   will-change: transform, filter;
 }
 
-.fxSvg {
-  position: absolute;
-  width: 0;
-  height: 0;
-  pointer-events: none;
-}
+/* Motion blur is rendered by MotionBlurCanvas (WebGL overlay) — the
+   <video> stays effect-free so the canvas can sample its raw frames.
+   Keep the .video selector free of filter so the canvas owns the visuals
+   while motion blur is active. */
 
 .fadeOverlay {
   position: absolute;
@@ -190,11 +350,18 @@
   color: var(--text);
 }
 
+.iconBtn:focus-visible,
+.playBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .playBtn {
   width: 36px;
   height: 36px;
   background: var(--accent);
   color: var(--text-inverse);
+  transition: background var(--t-fast), transform var(--t-fast);
 }
 
 .playBtn:hover {

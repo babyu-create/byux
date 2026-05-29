@@ -70,13 +70,18 @@ export function ClipEffectsSection({ clip }: ClipEffectsSectionProps) {
           >
             <span className={styles.toggleIcon}>≋</span>
             <span>モーションブラー</span>
-            <span className={styles.toggleHint}>動きに残像を付与 (書き出し時 重め)</span>
+            <span className={styles.toggleHint}>
+              フリック検出型（動いてる時だけ残像、エイム合わせ中は鮮明）
+            </span>
           </button>
         </div>
         {motionBlur ? (
           <div className={styles.controls}>
-            <label className={styles.row}>
+            <div className={styles.intensityRow}>
               <span className={styles.rowLabel}>強さ</span>
+              <span className={styles.intensityDescriptor} aria-hidden="true">
+                弱
+              </span>
               <input
                 type="range"
                 min={5}
@@ -88,11 +93,18 @@ export function ClipEffectsSection({ clip }: ClipEffectsSectionProps) {
                     intensity: parseInt(e.target.value, 10),
                   })
                 }
+                aria-label="モーションブラー強度 (5から100)"
+                aria-valuemin={5}
+                aria-valuemax={100}
+                aria-valuenow={motionBlur.intensity ?? 40}
               />
+              <span className={styles.intensityDescriptor} aria-hidden="true">
+                強
+              </span>
               <span className={styles.rowValue}>
                 {(motionBlur.intensity ?? 40).toFixed(0)}
               </span>
-            </label>
+            </div>
           </div>
         ) : null}
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ACTIONS,
   formatKey,
@@ -11,7 +11,12 @@ interface HelpDialogProps {
   onClose: () => void;
 }
 
-const STATIC_GROUPS: { title: string; items: { keys: string[]; label: string }[] }[] = [
+interface StaticEntry {
+  keys: string[];
+  label: string;
+}
+
+const STATIC_GROUPS: { title: string; items: StaticEntry[] }[] = [
   {
     title: 'プロジェクト',
     items: [
@@ -21,16 +26,44 @@ const STATIC_GROUPS: { title: string; items: { keys: string[]; label: string }[]
   },
 ];
 
+/** Lowercase-includes match across label and key string for a single row. */
+function matchesQuery(query: string, label: string, keys: string): boolean {
+  if (!query) return true;
+  const q = query.toLowerCase().trim();
+  if (!q) return true;
+  return label.toLowerCase().includes(q) || keys.toLowerCase().includes(q);
+}
+
 export function HelpDialog({ onClose }: HelpDialogProps) {
   const [bindings, setBindings] = useState(() => getBindings());
+  const [query, setQuery] = useState('');
   useEffect(() => subscribeBindings(() => setBindings({ ...getBindings() })), []);
 
-  // Group dynamic actions by their group name
-  const grouped = ACTIONS.reduce<Record<string, typeof ACTIONS>>((acc, a) => {
-    if (!acc[a.group]) acc[a.group] = [];
-    acc[a.group].push(a);
-    return acc;
-  }, {});
+  // Group dynamic actions by their group name, applying the query filter
+  // along the way. Memoize so typing doesn't re-trigger the full reduce
+  // on every render.
+  const grouped = useMemo(() => {
+    return ACTIONS.reduce<Record<string, typeof ACTIONS>>((acc, a) => {
+      const keys = formatKey(bindings[a.id]);
+      if (!matchesQuery(query, a.label, keys)) return acc;
+      if (!acc[a.group]) acc[a.group] = [];
+      acc[a.group].push(a);
+      return acc;
+    }, {});
+  }, [bindings, query]);
+
+  const filteredStatic = useMemo(() => {
+    return STATIC_GROUPS.map((g) => ({
+      ...g,
+      items: g.items.filter((item) =>
+        matchesQuery(query, item.label, item.keys.join(' + ')),
+      ),
+    })).filter((g) => g.items.length > 0);
+  }, [query]);
+
+  const totalHits =
+    Object.values(grouped).reduce((n, list) => n + list.length, 0) +
+    filteredStatic.reduce((n, g) => n + g.items.length, 0);
 
   return (
     <div className={styles.backdrop} role="dialog" aria-modal="true" onClick={onClose}>
@@ -46,7 +79,34 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
             ×
           </button>
         </div>
+
+        <div className={styles.searchRow}>
+          <input
+            type="text"
+            className={styles.searchInput}
+            placeholder="検索 (例: 再生 / Space / フェード)"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-label="ショートカットを検索"
+            autoFocus
+          />
+          {query ? (
+            <button
+              type="button"
+              className={styles.searchClear}
+              onClick={() => setQuery('')}
+              aria-label="検索をクリア"
+              title="クリア"
+            >
+              ×
+            </button>
+          ) : null}
+        </div>
+
         <div className={styles.body}>
+          {totalHits === 0 ? (
+            <div className={styles.empty}>該当するショートカットがありません</div>
+          ) : null}
           {Object.entries(grouped).map(([group, items]) => (
             <section key={group} className={styles.group}>
               <h3 className={styles.groupTitle}>{group}</h3>
@@ -71,7 +131,7 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
               </div>
             </section>
           ))}
-          {STATIC_GROUPS.map((g) => (
+          {filteredStatic.map((g) => (
             <section key={g.title} className={styles.group}>
               <h3 className={styles.groupTitle}>{g.title}</h3>
               <div className={styles.list}>

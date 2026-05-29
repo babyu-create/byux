@@ -93,7 +93,15 @@ export const useMediaStore = create<MediaStoreState>((set) => ({
 }));
 
 export const useSelectedAsset = (): MediaAsset | null => {
-  const { assets, selectedAssetId } = useMediaStore();
-  if (!selectedAssetId) return null;
-  return assets.find((a) => a.id === selectedAssetId) ?? null;
+  // Subscribe to the primitives (id + array) and derive locally. Returning
+  // `s.assets.find(...)` directly from a zustand selector triggers a new
+  // ref on every store update (the assets array gets replaced whenever
+  // any asset is mutated, including unrelated waveform updates), causing
+  // every consumer of useSelectedAsset to re-render. The two narrow
+  // selectors below let Object.is compare a string and an array ref,
+  // which only change when actually relevant.
+  const selectedId = useMediaStore((s) => s.selectedAssetId);
+  const assets = useMediaStore((s) => s.assets);
+  if (!selectedId) return null;
+  return assets.find((a) => a.id === selectedId) ?? null;
 };

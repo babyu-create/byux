@@ -48,7 +48,7 @@
   background: var(--bg-elevated);
   text-align: center;
   cursor: pointer;
-  transition: all var(--t-fast);
+  transition: border-color var(--t-fast), background var(--t-fast), transform var(--t-fast);
 }
 
 .dropZone:hover {
@@ -56,10 +56,22 @@
   background: var(--accent-soft);
 }
 
+.dropZone:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Stronger feedback while a file is being dragged over the zone. A thicker
+   solid border + box-shadow ring make it obvious "drop here" — the geometry
+   should not shift around, so we add the highlight via shadow not by
+   bumping border width (which would reflow the icon below). */
 .dropZoneActive {
   border-color: var(--accent) !important;
+  border-style: solid !important;
   background: var(--accent-soft) !important;
-  transform: scale(0.99);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent),
+    inset 0 0 0 1px var(--accent);
 }
 
 .dropZoneIcon {
@@ -68,6 +80,21 @@
   color: var(--text-dim);
   margin-bottom: 4px;
   line-height: 1;
+  transition: transform var(--t-fast), color var(--t-fast), font-size var(--t-fast);
+}
+
+/* While dragging: pop the + icon and tint it with the accent so the user
+   visually targets where to release. */
+.dropZoneIconActive {
+  color: var(--accent);
+  font-size: 32px;
+  transform: scale(1.08);
+  animation: dropPulse 0.9s ease-in-out infinite;
+}
+
+@keyframes dropPulse {
+  0%, 100% { transform: scale(1.04); }
+  50%      { transform: scale(1.14); }
 }
 
 .dropZoneTextStrong {
@@ -190,6 +217,19 @@
   color: var(--text-inverse);
 }
 
+.addBtn:focus-visible,
+.removeBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  /* When focused via keyboard, ensure visibility regardless of hover state. */
+  opacity: 1;
+}
+
+/* Keep actions visible when buttons receive keyboard focus, not just on hover. */
+.item:focus-within .itemActions {
+  opacity: 1;
+}
+
 .item:hover {
   background: var(--bg-elevated);
 }
@@ -257,6 +297,7 @@
   margin-top: 2px;
   font-size: 11px;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
 }
 

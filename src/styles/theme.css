@@ -166,18 +166,50 @@
 :root[data-rgb-cycle='normal'] { animation-duration: 8s;  }
 :root[data-rgb-cycle='fast']   { animation-duration: 3s;  }
 
-:root[data-rgb-cycle] {
+/* Per-target attribute scopes. Each rule only applies when both the parent
+   data-rgb-cycle attribute (driving the animation) AND the corresponding
+   data-rgb-<target> attribute are present, so the user can pick which
+   layers of the UI participate in the hue cycle. */
+
+:root[data-rgb-cycle][data-rgb-accent] {
   --accent:        hsl(var(--rgb-hue) 100% 60%);
   --accent-hover:  hsl(var(--rgb-hue) 100% 68%);
   --accent-soft:   hsl(var(--rgb-hue) 100% 60% / 0.22);
   --playhead:      hsl(var(--rgb-hue) 100% 60%);
   --beat-line:     hsl(var(--rgb-hue) 100% 60% / 0.45);
-  --clip-video:    hsl(calc(var(--rgb-hue) + 120deg) 100% 60%);
-  --clip-video-bg: hsl(calc(var(--rgb-hue) + 120deg) 100% 60% / 0.22);
-  --clip-overlay:  hsl(calc(var(--rgb-hue) + 60deg)  100% 60%);
-  --clip-overlay-bg: hsl(calc(var(--rgb-hue) + 60deg) 100% 60% / 0.22);
-  --clip-audio:    hsl(calc(var(--rgb-hue) + 240deg) 100% 60%);
-  --clip-audio-bg: hsl(calc(var(--rgb-hue) + 240deg) 100% 60% / 0.22);
+}
+
+:root[data-rgb-cycle][data-rgb-clip] {
+  --clip-video:      hsl(calc(var(--rgb-hue) + 120deg) 100% 60%);
+  --clip-video-bg:   hsl(calc(var(--rgb-hue) + 120deg) 100% 60% / 0.22);
+  --clip-overlay:    hsl(calc(var(--rgb-hue) + 60deg)  100% 60%);
+  --clip-overlay-bg: hsl(calc(var(--rgb-hue) + 60deg)  100% 60% / 0.22);
+  --clip-audio:      hsl(calc(var(--rgb-hue) + 240deg) 100% 60%);
+  --clip-audio-bg:   hsl(calc(var(--rgb-hue) + 240deg) 100% 60% / 0.22);
+}
+
+/* Surfaces — dark hue-tinted base (lightness 5-11%) so the room is "lit"
+   without crushing text legibility. */
+:root[data-rgb-cycle][data-rgb-bg] {
+  --bg-app:       hsl(var(--rgb-hue) 70% 5%);
+  --bg-panel:     hsl(var(--rgb-hue) 60% 8%);
+  --bg-panel-2:   hsl(var(--rgb-hue) 55% 11%);
+  --bg-timeline:  hsl(var(--rgb-hue) 65% 6%);
+  --bg-track:     hsl(var(--rgb-hue) 55% 9%);
+  --bg-track-alt: hsl(var(--rgb-hue) 55% 11%);
+  --bg-elevated:  hsl(var(--rgb-hue) 55% 10%);
+}
+
+/* Borders — lifted lightness so they pop against the dark hue-tinted bg.
+   Saturation is reduced so they read as structure, not accent. */
+:root[data-rgb-cycle][data-rgb-border] {
+  --border:        hsl(var(--rgb-hue) 55% 42%);
+  --border-soft:   hsl(var(--rgb-hue) 50% 30%);
+  --border-strong: hsl(var(--rgb-hue) 65% 55%);
+}
+
+:root[data-rgb-cycle][data-rgb-glow] {
+  --glow: 0 0 16px hsl(var(--rgb-hue) 100% 60% / 0.55);
 }
 
 @media (prefers-reduced-motion: reduce) {

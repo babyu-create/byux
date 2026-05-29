@@ -5,12 +5,15 @@ import {
   applyTheme,
   loadGamingColors,
   loadRgbCycle,
+  loadRgbTargets,
   loadTheme,
   saveGamingColors,
   saveRgbCycle,
+  saveRgbTargets,
   saveTheme,
   type GamingColors,
   type RgbCycleSpeed,
+  type RgbCycleTargets,
   type ThemeId,
 } from '../../lib/theme';
 import styles from './ThemeSettings.module.css';
@@ -42,15 +45,24 @@ const CYCLE_OPTIONS: { id: RgbCycleSpeed; label: string; hint: string }[] = [
   { id: 'fast', label: '高速', hint: '3秒/周' },
 ];
 
+const TARGET_OPTIONS: { key: keyof RgbCycleTargets; label: string; hint: string }[] = [
+  { key: 'accent', label: 'アクセント', hint: 'CTA / プレイヘッド / ビート線' },
+  { key: 'clip', label: 'クリップ', hint: '映像 / オーバーレイ / 音声' },
+  { key: 'bg', label: '背景', hint: 'パネル / トラック / タイムライン' },
+  { key: 'border', label: 'ボーダー', hint: '区切り線' },
+  { key: 'glow', label: 'グロー', hint: 'フォーカスハロー' },
+];
+
 export function ThemeSettings() {
   const [theme, setTheme] = useState<ThemeId>(() => loadTheme());
   const [colors, setColors] = useState<GamingColors>(() => loadGamingColors());
   const [cycle, setCycle] = useState<RgbCycleSpeed>(() => loadRgbCycle());
+  const [targets, setTargets] = useState<RgbCycleTargets>(() => loadRgbTargets());
 
-  // Re-apply whenever theme, colors, or cycle change so the user sees a live preview.
+  // Re-apply whenever theme, colors, cycle, or targets change for live preview.
   useEffect(() => {
-    applyTheme(theme, colors, cycle);
-  }, [theme, colors, cycle]);
+    applyTheme(theme, colors, cycle, targets);
+  }, [theme, colors, cycle, targets]);
 
   const changeTheme = (next: ThemeId) => {
     setTheme(next);
@@ -78,6 +90,12 @@ export function ThemeSettings() {
   const changeCycle = (next: RgbCycleSpeed) => {
     setCycle(next);
     saveRgbCycle(next);
+  };
+
+  const toggleTarget = (key: keyof RgbCycleTargets) => {
+    const next = { ...targets, [key]: !targets[key] };
+    setTargets(next);
+    saveRgbTargets(next);
   };
 
   return (
@@ -121,8 +139,34 @@ export function ThemeSettings() {
               ))}
             </div>
             <p className={styles.cycleNote}>
-              ※ サイクル中はアクセント/クリップ色がHSL連続変化（背景・カスタム配色は維持）
+              ※ ON にした要素だけがHSL連続変化。OFF 要素は下のカスタム配色 / ゲーミング既定色のまま静止
             </p>
+          </section>
+
+          <section className={styles.section}>
+            <h3 className={styles.sectionTitle}>サイクル対象</h3>
+            <div className={styles.targetGrid}>
+              {TARGET_OPTIONS.map((opt) => {
+                const on = targets[opt.key];
+                return (
+                  <label
+                    key={opt.key}
+                    className={`${styles.targetRow} ${on ? styles.targetOn : ''}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => toggleTarget(opt.key)}
+                      disabled={cycle === 'off'}
+                      className={styles.targetCheck}
+                      aria-label={opt.label}
+                    />
+                    <span className={styles.targetLabel}>{opt.label}</span>
+                    <span className={styles.targetHint}>{opt.hint}</span>
+                  </label>
+                );
+              })}
+            </div>
           </section>
 
           <section className={styles.section}>
@@ -161,21 +205,40 @@ export function ThemeSettings() {
               </button>
             </div>
             <div className={styles.colorGrid}>
-              {COLOR_FIELDS.map((field) => (
-                <label key={field.key} className={styles.colorRow}>
-                  <span className={styles.colorLabel}>{field.label}</span>
-                  <span className={styles.colorControls}>
-                    <input
-                      type="color"
-                      value={colors[field.key]}
-                      onChange={(e) => changeColor(field.key, e.target.value)}
-                      className={styles.colorPicker}
-                      aria-label={field.label}
-                    />
-                    <span className={styles.colorHex}>{colors[field.key].toUpperCase()}</span>
-                  </span>
-                </label>
-              ))}
+              {COLOR_FIELDS.map((field) => {
+                // Determine which rgb-cycle target group governs this field.
+                const cycleTarget: keyof RgbCycleTargets | null =
+                  field.key === 'accent' || field.key === 'playhead'
+                    ? 'accent'
+                    : field.key === 'clipVideo' || field.key === 'clipOverlay' || field.key === 'clipAudio'
+                    ? 'clip'
+                    : field.key === 'bgApp'
+                    ? 'bg'
+                    : null;
+                // Picker is locked while the keyframe owns that variable group.
+                const pickerDisabled =
+                  cycle !== 'off' && cycleTarget !== null && targets[cycleTarget];
+                return (
+                  <label
+                    key={field.key}
+                    className={`${styles.colorRow} ${pickerDisabled ? styles.colorRowCycling : ''}`}
+                  >
+                    <span className={styles.colorLabel}>{field.label}</span>
+                    <span className={styles.colorControls}>
+                      <input
+                        type="color"
+                        value={colors[field.key]}
+                        onChange={(e) => changeColor(field.key, e.target.value)}
+                        className={styles.colorPicker}
+                        aria-label={field.label}
+                        disabled={pickerDisabled}
+                        title={pickerDisabled ? 'RGB サイクル中は変更できません' : undefined}
+                      />
+                      <span className={styles.colorHex}>{colors[field.key].toUpperCase()}</span>
+                    </span>
+                  </label>
+                );
+              })}
             </div>
           </section>
         </>

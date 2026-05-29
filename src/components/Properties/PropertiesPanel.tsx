@@ -14,10 +14,14 @@ export function PropertiesPanel() {
   const asset = useSelectedAsset();
   const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
   const clips = useProjectStore((s) => s.clips);
+  const tracks = useProjectStore((s) => s.tracks);
   const selectedClip =
     selectedClipIds.length === 1
       ? (clips.find((c) => c.id === selectedClipIds[0]) ?? null)
       : null;
+  const selectedClipTrackKind = selectedClip
+    ? (tracks.find((t) => t.id === selectedClip.trackId)?.kind ?? null)
+    : null;
 
   return (
     <div className={styles.root}>
@@ -65,8 +69,7 @@ export function PropertiesPanel() {
               <div className={styles.markerSlot}>
                 <ClipEffectsSection clip={selectedClip} />
               </div>
-              {selectedClip.assetId &&
-              clips.find((c) => c.id === selectedClip.id)?.trackId !== 'track-audio' ? (
+              {selectedClip.assetId && selectedClipTrackKind !== 'audio' ? (
                 <div className={styles.markerSlot}>
                   <ClipOverlaysSection clip={selectedClip} />
                 </div>

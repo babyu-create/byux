@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import type { Clip as ClipType, MediaAsset, TrackKind } from '../../lib/types';
+import { memo, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import type { Clip as ClipType, IORange, KillMarker, MediaAsset, TrackKind } from '../../lib/types';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { useTimelineAutoScroll } from '../../hooks/useTimelineAutoScroll';
@@ -43,7 +43,7 @@ interface DragState {
   assetDuration: number;
 }
 
-export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
+export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
   const moveClip = useProjectStore((s) => s.moveClip);
   const trimClipStart = useProjectStore((s) => s.trimClipStart);
   const trimClipEnd = useProjectStore((s) => s.trimClipEnd);
@@ -214,33 +214,39 @@ export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
 
   const label = asset?.name ?? '(missing media)';
   const showThumbnail = asset?.kind === 'video' && pxPerSecond(zoom) > 24;
-  const allMarkers = useProjectStore((s) => s.markers);
-  const visibleMarkers = useMemo(
-    () =>
-      asset
-        ? allMarkers.filter(
-            (m) =>
-              m.assetId === asset.id &&
-              m.time >= clip.trimStart - 1e-6 &&
-              m.time <= clip.trimEnd + 1e-6,
-          )
-        : [],
-    [allMarkers, asset, clip.trimStart, clip.trimEnd],
-  );
 
+  // Use narrowed selectors so this clip only re-renders when markers/ranges
+  // for THIS asset (within this trim window) actually change. We subscribe
+  // to the stable top-level arrays, then derive the filtered slice with
+  // useMemo locally. A direct `.filter(...)` inside the zustand selector
+  // would return a fresh array reference on every store tick — Object.is
+  // would mark the value as changed and trigger a render loop.
+  const assetId = asset?.id;
+  const trimStart = clip.trimStart;
+  const trimEnd = clip.trimEnd;
+
+  const allMarkers = useProjectStore((s) => s.markers);
   const allRanges = useProjectStore((s) => s.ioRanges);
-  const visibleRanges = useMemo(
-    () =>
-      asset
-        ? allRanges.filter(
-            (r) =>
-              r.assetId === asset.id &&
-              r.outTime > clip.trimStart - 1e-6 &&
-              r.inTime < clip.trimEnd + 1e-6,
-          )
-        : [],
-    [allRanges, asset, clip.trimStart, clip.trimEnd],
-  );
+
+  const visibleMarkers = useMemo<KillMarker[]>(() => {
+    if (!assetId) return [];
+    return allMarkers.filter(
+      (m) =>
+        m.assetId === assetId &&
+        m.time >= trimStart - 1e-6 &&
+        m.time <= trimEnd + 1e-6,
+    );
+  }, [allMarkers, assetId, trimStart, trimEnd]);
+
+  const visibleRanges = useMemo<IORange[]>(() => {
+    if (!assetId) return [];
+    return allRanges.filter(
+      (r) =>
+        r.assetId === assetId &&
+        r.outTime > trimStart - 1e-6 &&
+        r.inTime < trimEnd + 1e-6,
+    );
+  }, [allRanges, assetId, trimStart, trimEnd]);
 
   const pendingIn = useProjectStore((s) => s.pendingIn);
   const clipSpeed = clip.speed ?? 1;
@@ -324,4 +330,4 @@ export function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
       />
     </div>
   );
-}
+});

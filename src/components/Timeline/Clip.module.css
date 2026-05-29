@@ -13,6 +13,8 @@
     transform var(--t-fast);
   outline: none;
   border: 1.5px solid transparent;
+  /* Isolate each clip's layout/style from siblings */
+  contain: layout style;
 }
 
 .clip:active,
