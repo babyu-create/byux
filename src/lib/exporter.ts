@@ -576,7 +576,7 @@ export async function exportProject(
 
       options.onProgress?.({ stage: 'ストリームコピー中', percent: -1 });
       await ffmpeg.exec([
-        '-threads', '0',
+        '-threads', '1',
         '-i', entry.inputName,
         '-ss', clip.trimStart.toFixed(4),
         '-to', clip.trimEnd.toFixed(4),
@@ -650,14 +650,14 @@ export async function exportProject(
 
       options.onProgress?.({ stage: 'エンコード中', percent: -1 });
       await ffmpeg.exec([
-        '-threads', '0',
+        '-threads', '1',
         ...ffmpegInputArgs,
         '-filter_complex', filterComplex,
         '-map', '[vout]',
         '-map', '[aout]',
         '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-tune', 'fastdecode',
+        '-preset', 'superfast',
+        '-crf', '18',
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
         '-ar', '44100',
@@ -694,12 +694,12 @@ export async function exportProject(
 
         const blurredOutput = 'video_blurred.mp4';
         await ffmpeg.exec([
-          '-threads', '0',
+          '-threads', '1',
           '-i', videoOutput,
           '-vf', tblendVf,
           '-c:v', 'libx264',
-          '-preset', 'ultrafast',
-          '-tune', 'fastdecode',
+          '-preset', 'superfast',
+          '-crf', '18',
           '-pix_fmt', 'yuv420p',
           '-c:a', 'copy',
           '-movflags', '+faststart',
@@ -768,7 +768,7 @@ export async function exportProject(
         `${audioFilterParts.join(';')};${mixLabels.join('')}[0:a]amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=0[aout]`;
 
       await ffmpeg.exec([
-        '-threads', '0',
+        '-threads', '1',
         '-i', videoOutput,
         ...audioInputArgs,
         '-filter_complex', mixFilterComplex,

@@ -92,6 +92,13 @@ const FRAG_SRC = `
   const int SAMPLES_MAX = 48;
   const float HALF = 0.5;
 
+  // Baseline blur blend applied across the WHOLE frame when confident global
+  // (camera) motion is detected — see the note in main(). During a camera pan
+  // flat/low-contrast regions are moving too, but their frame-to-frame luma
+  // barely changes, so the per-pixel diff mask alone left them sharp and made
+  // the effect read as weak. This floor restores a body-of-frame blur.
+  const float GLOBAL_BLUR_FLOOR = 0.7;
+
   // Rec.601 luma — cheap motion proxy, robust to chroma noise.
   float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
@@ -211,13 +218,23 @@ const FRAG_SRC = `
     }
 
     // Per-pixel "is this moving?" mask from frame-to-frame luma change.
+    // Boosts genuinely high-contrast moving edges above the baseline.
     vec3 prev = texture2D(u_prevFrame, v_uv).rgb;
     float diff = abs(luma(cur.rgb) - luma(prev));
-    float maskStrength = smoothstep(u_maskLow, u_maskHigh, diff);
+    float diffMask = smoothstep(u_maskLow, u_maskHigh, diff);
 
-    // HUD wins. Multiplicative suppression forces the motion mask to zero
-    // inside the protected zones, even if the per-pixel diff would
-    // otherwise read as "moving" (e.g. animated minimap blips).
+    // Global camera motion means the ENTIRE scene is shifting, so flat /
+    // low-contrast regions are moving too even though their frame-to-frame
+    // luma barely changes. Relying on the diff mask alone left those areas
+    // sharp and made the blur read as weak. Add a baseline blend that scales
+    // with the detected global motion magnitude; the diff mask then layers
+    // extra blur onto high-motion edges on top of this floor.
+    float globalMotion = smoothstep(0.0015, 0.02, u_magnitude);
+    float maskStrength = max(diffMask, globalMotion * GLOBAL_BLUR_FLOOR);
+
+    // HUD wins. Multiplicative suppression forces the blend to zero inside
+    // the protected zones, even when global/diff motion would otherwise
+    // read as "moving" (e.g. animated minimap blips).
     maskStrength *= (1.0 - hudMask);
 
     // Motion clamp — cap line-integral length at 8% of UV space. Without
