@@ -275,12 +275,12 @@ const FRAG_SRC = `
 // dominant blur direction well — dense optical flow would be more
 // accurate for independent object motion but is out of reach for
 // real-time pure-JS browser playback.
-const SAMPLE_W = 80;
-const SAMPLE_H = 45;
+export const SAMPLE_W = 80;
+export const SAMPLE_H = 45;
 // Search up to ±16 sample-cells; a VALORANT flick can shift the frame
 // 20-30% in a single 60fps frame, so we need this much range.
 const SEARCH_RADIUS = 16;
-const MIN_PIXEL_SHIFT = 1.4; // below this, treat as zero motion
+export const MIN_PIXEL_SHIFT = 1.4; // below this, treat as zero motion
 // Skip bands fed into SAD. Including the static HUD / weapon area in
 // motion estimation drags the estimate toward zero ("most pixels haven't
 // moved"). Trim 10% off the top (scoreboard) and 42% off the bottom
@@ -299,7 +299,7 @@ const INNER_STRIDE_X = 2;
 // resolution for this tool) render at full resolution; only 1440p+ /
 // 4K sources drop to half-res. The previous 720 threshold dropped 1080p
 // to 540 backing-store, which over-softened a primary use case.
-const HALFRES_THRESHOLD_H = 1080;
+export const HALFRES_THRESHOLD_H = 1080;
 
 // Aim-hold detection — fps-aware. Instead of a hard SAD<600 cutoff
 // (which can pop in/out between frames), we keep a rolling history of
@@ -316,14 +316,14 @@ const SAD_FLOOR = 350; // never go lower than this — protects against
 // persists into the current frame's contribution. Creates the "tail"
 // effect on flick→hold transitions: the blur doesn't vanish the moment
 // the camera stops, it fades over ~2-3 frames.
-const VELOCITY_DECAY = 0.6;
+export const VELOCITY_DECAY = 0.6;
 
 // Adaptive sample count bounds. Low motion → 12 samples is plenty
 // (visibly indistinguishable from 32). High motion → up to 48 keeps the
 // trail smooth without banding. WebGL 1 requires the loop bound to be
 // a compile-time constant so SAMPLES_MAX in the shader matches this.
-const SAMPLES_MIN = 12;
-const SAMPLES_MAX = 48;
+export const SAMPLES_MIN = 12;
+export const SAMPLES_MAX = 48;
 
 // Dev-only logger. Compiles out in production builds so we don't ship
 // debug noise to end users but keep useful WebGL diagnostics during HMR.
@@ -342,7 +342,7 @@ function devError(...args: unknown[]): void {
 // canvas refuse to render after the magenta diagnostic optimised out every
 // uniform except u_frame: setup returned null → useEffect early-returned →
 // no RAF loop → opaque-black framebuffer.
-interface GlSetup {
+export interface GlSetup {
   gl: WebGLRenderingContext;
   program: WebGLProgram;
   buffer: WebGLBuffer;
@@ -376,7 +376,7 @@ function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLSha
   return sh;
 }
 
-function setupGl(canvas: HTMLCanvasElement): GlSetup | null {
+export function setupGl(canvas: HTMLCanvasElement): GlSetup | null {
   const gl = canvas.getContext('webgl', {
     alpha: false,
     antialias: false,
@@ -501,13 +501,13 @@ function computeSad(
   return sad;
 }
 
-interface SadHistoryState {
+export interface SadHistoryState {
   values: Float32Array;
   index: number;
   filled: number;
 }
 
-function makeSadHistory(): SadHistoryState {
+export function makeSadHistory(): SadHistoryState {
   return { values: new Float32Array(SAD_HISTORY), index: 0, filled: 0 };
 }
 
@@ -536,7 +536,7 @@ function pushSadHistory(hist: SadHistoryState, sad: number): void {
   if (hist.filled < SAD_HISTORY) hist.filled++;
 }
 
-function estimateGlobalMotion(
+export function estimateGlobalMotion(
   current: Uint8ClampedArray,
   previous: Uint8ClampedArray,
   hist: SadHistoryState,
@@ -622,7 +622,7 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-const HUD_PRESET_INDEX: Record<HudPreset, number> = {
+export const HUD_PRESET_INDEX: Record<HudPreset, number> = {
   valorant: 0,
   cs2: 1,
   apex: 2,
@@ -942,7 +942,7 @@ export function MotionBlurCanvas({
   );
 }
 
-function destroySetup(setup: GlSetup): void {
+export function destroySetup(setup: GlSetup): void {
   const { gl, program, buffer, curTexture, prevTexture } = setup;
   // No early-return on isContextLost. WebGL deleteXxx calls become no-ops
   // when the context is lost (per spec), but skipping them entirely is
