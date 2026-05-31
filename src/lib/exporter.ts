@@ -1281,10 +1281,13 @@ export async function exportProject(
       const totalMixInputs = mixLabels.length + 1;
       // normalize=0 keeps each source at its authored level (so BGM/SE volumes
       // are honored), but summing gameplay + BGM + SE can exceed 0 dBFS and
-      // hard-clip ("音割れ"). A brickwall limiter on the master tames peaks
-      // without squashing the mix.
+      // hard-clip ("音割れ"). A brickwall limiter on the master tames peaks.
+      // CRITICAL: level=false. alimiter's auto-level (default ON) RE-NORMALIZES
+      // the output back up to 0 dB after limiting — which re-introduces the
+      // distortion. With level=false it only attenuates peaks above `limit`,
+      // leaving ~1 dB of clean headroom.
       const mixFilterComplex =
-        `${audioFilterParts.join(';')};${mixLabels.join('')}[0:a]amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=0[amixed];[amixed]alimiter=limit=0.95:level=disabled[aout]`;
+        `${audioFilterParts.join(';')};${mixLabels.join('')}[0:a]amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=0[amixed];[amixed]alimiter=limit=0.9:level=false[aout]`;
 
       await ffmpeg.exec([
         '-threads', '1',
