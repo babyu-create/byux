@@ -1287,7 +1287,7 @@ export async function exportProject(
       // distortion. With level=false it only attenuates peaks above `limit`,
       // leaving ~1 dB of clean headroom.
       const mixFilterComplex =
-        `${audioFilterParts.join(';')};${mixLabels.join('')}[0:a]amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=0[amixed];[amixed]alimiter=limit=0.9:level=false[aout]`;
+        `${audioFilterParts.join(';')};${mixLabels.join('')}[0:a]amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=0[amixed];[amixed]alimiter=limit=0.9:level=0[aout]`;
 
       await ffmpeg.exec([
         '-threads', '1',
