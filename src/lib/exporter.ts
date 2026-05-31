@@ -17,19 +17,32 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import type { Clip, MediaAsset, Track } from './types';
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
+import { exportStrengthFromIntensity, type HudPreset } from './motionBlurCore';
+import { OffscreenMotionBlurRenderer } from './motionBlurExporter';
 
 export interface ExportOptions {
   resolution: '720p' | '1080p';
   fps: 30 | 60;
   aspectRatio: '16:9' | '9:16';
   /**
-   * Include motion-blur in export. Default off — even the lightweight
-   * `tblend` pass adds ~30% to encode time, and most users only want the
-   * preview's WebGL blur (which is unaffected by this flag). When enabled,
-   * the export applies tblend passes per clip; the number of passes is driven
-   * by the clip's motion-blur effect intensity (0-33: ×1, 34-66: ×2, 67-100: ×3).
+   * Include motion-blur in export. Default off. When enabled the export
+   * applies the SAME WebGL directional motion-blur the preview uses (per-frame
+   * GL pass), so the output matches what the user saw. If WebGL is unavailable
+   * or the clip is too long to process frame-by-frame, it falls back to the
+   * legacy `tblend` frame-average pass.
    */
   motionBlur?: boolean;
+  /**
+   * Blur strength (preview-equivalent units). When omitted, derived from the
+   * first motion-blur clip's stored intensity and speed via
+   * {@link exportStrengthFromIntensity} so it matches the preview.
+   */
+  motionBlurStrength?: number;
+  /** HUD positional-protect preset for the export blur. Defaults to 'valorant'. */
+  motionBlurHudPreset?: HudPreset;
+  /** HUD mask attenuation 0..1. Defaults to 1 (0 when preset is 'none'). */
+  motionBlurHudMaskStrength?: number;
   onProgress?: (info: { stage: string; percent: number; log?: string }) => void;
 }
 
@@ -234,10 +247,14 @@ export function buildAtempoChain(speed: number): string[] {
   return result;
 }
 
-// Only escapes single quotes — safe for -i filename arguments.
-// NOT a general filter-graph string escaper.
-function escapeConcatPath(value: string): string {
-  return value.replace(/'/g, "\\'");
+// Derive a SAFE virtual-filesystem extension from a user-supplied filename.
+// The raw extension flows into ffmpeg `-i` names and filter-graph strings, so
+// we strip everything but alphanumerics (a crafted name like `mp4];drawtext=...`
+// could otherwise perturb the graph) and cap the length.
+function safeExt(fileName: string, fallback: string): string {
+  const raw = fileName.split('.').pop() ?? fallback;
+  const cleaned = raw.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
+  return cleaned || fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,10 +317,12 @@ function canStreamCopy(
   if (asset.width !== width || asset.height !== height) return false;
 
   // MIME-type heuristic: MP4/MOV containers commonly carry H.264.
-  // We accept video/mp4 and video/quicktime as likely H.264 sources.
-  // If the MIME type is missing or unknown we fall back to re-encode.
+  // We accept ONLY video/mp4 and video/quicktime as likely H.264 sources.
+  // An empty/unknown MIME is NOT assumed H.264 — a .webm (VP9/AV1) dropped from
+  // the OS can report an empty type, and stream-copying it into an .mp4 wrapper
+  // would emit a broken file. Unknown → fall through to a safe re-encode.
   const mime = asset.file.type.toLowerCase();
-  const likelyH264 = mime === 'video/mp4' || mime === 'video/quicktime' || mime === '';
+  const likelyH264 = mime === 'video/mp4' || mime === 'video/quicktime';
   if (!likelyH264) return false;
 
   return true;
@@ -405,6 +424,342 @@ function tblendPassCount(intensity: number): number {
 /** Build the tblend vf string for a given pass count. */
 function buildTblendFilter(passCount: number): string {
   return Array.from({ length: passCount }, () => 'tblend=all_mode=average').join(',');
+}
+
+// ---------------------------------------------------------------------------
+// Motion-blur application (WebGL primary, tblend fallback)
+// ---------------------------------------------------------------------------
+
+/**
+ * Above this many frames we skip the per-frame WebGL pass (which materialises
+ * a PNG per frame in the WASM filesystem) and fall back to tblend. The tool's
+ * primary use case — short FPS kill clips — sits comfortably under this; the
+ * cap protects against OOM on long timelines.
+ *   1200 frames ≈ 20s @ 60fps ≈ 40s @ 30fps.
+ */
+const MAX_WEBGL_BLUR_FRAMES = 1200;
+
+// Dev-only motion-blur tracing. Compiled out of production builds (Vite
+// statically replaces import.meta.env.DEV), so these never run for end users.
+const MB_DEBUG = import.meta.env?.DEV ?? false;
+function mbLog(...args: unknown[]): void {
+  if (MB_DEBUG) console.info(...args);
+}
+
+interface MotionBlurParams {
+  width: number;
+  height: number;
+  targetFps: number;
+  totalVideoSeconds: number;
+  /** Stored 0..100 intensity of the first motion-blur clip. */
+  intensity: number;
+  /** Playback speed of that clip (for strength scaling). */
+  speed: number;
+  /** Explicit strength override (preview value); when undefined it's derived. */
+  strengthOverride?: number;
+  hudPreset: HudPreset;
+  hudMaskStrength: number;
+  onProgress?: ExportOptions['onProgress'];
+}
+
+// Candidate H.264 codec strings, most-capable first. We probe each with
+// VideoEncoder.isConfigSupported and use the first the platform accepts so a
+// 1080p60 export gets a high-enough level (avc1.640034 = High@5.2) while older
+// GPUs can still fall back to a baseline profile.
+const AVC_CODEC_CANDIDATES = [
+  'avc1.640034', // High @ L5.2
+  'avc1.64002A', // High @ L4.2 (1080p60)
+  'avc1.640028', // High @ L4.0 (1080p30)
+  'avc1.4D4028', // Main @ L4.0
+  'avc1.42E01E', // Baseline @ L3.0
+];
+
+/** Choose a target H.264 bitrate from the output geometry (bits/pixel·frame). */
+function pickBitrate(width: number, height: number, fps: number): number {
+  const raw = width * height * fps * 0.1;
+  return Math.round(Math.max(4_000_000, Math.min(24_000_000, raw)));
+}
+
+/** Return the first AVC codec string the platform's VideoEncoder supports. */
+async function pickAvcCodec(base: { width: number; height: number; bitrate: number; framerate: number }): Promise<string | null> {
+  for (const codec of AVC_CODEC_CANDIDATES) {
+    try {
+      const support = await VideoEncoder.isConfigSupported({ codec, ...base });
+      if (support.supported) return codec;
+    } catch {
+      // Unsupported descriptor — try the next candidate.
+    }
+  }
+  return null;
+}
+
+/** Resolve when `video` fires `event` once; reject on media error. */
+function videoOnce(video: HTMLVideoElement, event: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onOk = () => { cleanup(); resolve(); };
+    const onErr = () => { cleanup(); reject(new Error(`video "${event}" failed`)); };
+    const cleanup = () => {
+      video.removeEventListener(event, onOk);
+      video.removeEventListener('error', onErr);
+    };
+    video.addEventListener(event, onOk, { once: true });
+    video.addEventListener('error', onErr, { once: true });
+  });
+}
+
+/** Seek `video` to time `t` (seconds) and resolve once the frame is ready. */
+function seekVideo(video: HTMLVideoElement, t: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onSeeked = () => { cleanup(); resolve(); };
+    const onErr = () => { cleanup(); reject(new Error('video seek failed')); };
+    const cleanup = () => {
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('error', onErr);
+    };
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.addEventListener('error', onErr, { once: true });
+    try {
+      video.currentTime = t;
+    } catch (e) {
+      cleanup();
+      reject(e instanceof Error ? e : new Error(String(e)));
+    }
+  });
+}
+
+/**
+ * Apply the preview-matching WebGL directional motion blur to `videoInput`.
+ *
+ * Pipeline:
+ *   1. The finished (trimmed/scaled/concatenated) video is decoded NATIVELY by
+ *      a hidden <video> element — Chromium's hardware H.264 decoder. We seek to
+ *      each frame's mid-time and read it. (ffmpeg.wasm's image2 PNG extraction
+ *      hung indefinitely in MEMFS — never resolving — so it was removed.)
+ *   2. Each decoded frame runs through the shared shader
+ *      (OffscreenMotionBlurRenderer) and is fed straight into a WebCodecs
+ *      VideoEncoder; mp4-muxer assembles the encoded chunks in memory.
+ *   3. ffmpeg stream-copies the original audio onto the blurred video.
+ *
+ * Throws (→ caller falls back to tblend) if WebCodecs is unavailable, no AVC
+ * config is supported, the video can't be read, or a seek times out.
+ */
+async function applyWebglMotionBlur(
+  ffmpeg: FFmpeg,
+  videoInput: string,
+  params: MotionBlurParams,
+): Promise<string> {
+  const { width, height, targetFps, hudPreset, hudMaskStrength, onProgress } = params;
+  const strength = params.strengthOverride ??
+    exportStrengthFromIntensity(params.intensity, params.speed);
+
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    throw new Error('motion-blur: WebCodecs (VideoEncoder) 利用不可');
+  }
+
+  // Load the normalized video into a hidden <video> for native decode.
+  onProgress?.({ stage: 'モーションブラー: 動画を読み込み中', percent: -1 });
+  mbLog('[mb] reading normalized video for native decode');
+  const data = await ffmpeg.readFile(videoInput);
+  const u8 = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
+  // Blob rejects SharedArrayBuffer-backed views (the MT core hands those back),
+  // so copy to a plain ArrayBuffer ONLY in that case. The common single-thread
+  // path passes through copy-free — avoiding the old unconditional ~50-100 MB
+  // transient allocation per export.
+  const blobPart: BlobPart = u8.buffer instanceof ArrayBuffer
+    ? (u8 as Uint8Array<ArrayBuffer>)
+    : new Uint8Array(u8);
+  const url = URL.createObjectURL(new Blob([blobPart], { type: 'video/mp4' }));
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'auto';
+  video.src = url;
+  // Register the 'loadeddata' listener IMMEDIATELY (synchronously, before any
+  // await) — otherwise the event can fire during the pickAvcCodec await gap on
+  // a fast machine and we'd miss it, hit the 15s timeout, and silently fall
+  // back to tblend. videoOnce attaches its listener synchronously here.
+  const loadedPromise = videoOnce(video, 'loadeddata');
+
+  const bitrate = pickBitrate(width, height, targetFps);
+  const codec = await pickAvcCodec({ width, height, bitrate, framerate: targetFps });
+  mbLog(`[mb] codec=${codec} bitrate=${bitrate} ${width}x${height}@${targetFps}`);
+  if (!codec) {
+    // Swallow the dangling loadeddata promise so revoking the URL (which may
+    // fire a media 'error') doesn't surface as an unhandled rejection.
+    loadedPromise.catch(() => {});
+    URL.revokeObjectURL(url);
+    throw new Error('motion-blur: 対応する H.264 エンコーダ設定が見つかりません');
+  }
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: 'avc', width, height, frameRate: targetFps },
+    // in-memory faststart so the moov atom is at the front (web/QuickTime seek).
+    fastStart: 'in-memory',
+  });
+  let encoderError: Error | null = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => { encoderError = e instanceof Error ? e : new Error(String(e)); },
+  });
+  encoder.configure({ codec, width, height, bitrate, framerate: targetFps });
+  mbLog('[mb] encoder configured; loading video metadata');
+
+  const renderer = new OffscreenMotionBlurRenderer(width, height, {
+    strength,
+    hudPreset,
+    hudMaskStrength,
+  });
+
+  const frameDurUs = Math.round(1_000_000 / targetFps);
+  const gop = Math.max(1, targetFps * 2); // keyframe every ~2s
+
+  try {
+    // +faststart on the source encode keeps moov up front so this resolves
+    // quickly. Time-bounded so a bad file can't hang the export forever.
+    // (Listener was attached above, right after video.src, to avoid a race.)
+    await withTimeout(loadedPromise, 15000, '動画メタデータ読み込み');
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    if (duration === 0) {
+      throw new Error('motion-blur: 動画の長さを取得できませんでした');
+    }
+    const total = Math.max(1, Math.round(duration * targetFps));
+    mbLog(`[mb] native decode: duration=${duration.toFixed(2)}s total≈${total} frames`);
+
+    for (let i = 0; i < total; i++) {
+      if (encoderError) throw encoderError;
+      // Seek to the middle of frame i so we land squarely on it, not a boundary.
+      const t = (i + 0.5) / targetFps;
+      if (t >= duration) break;
+      await withTimeout(seekVideo(video, t), 10000, `フレーム seek #${i}`);
+
+      let frame: VideoFrame | null = null;
+      try {
+        const rgba = renderer.processFrame(video);
+        frame = new VideoFrame(rgba, {
+          format: 'RGBA',
+          codedWidth: width,
+          codedHeight: height,
+          timestamp: i * frameDurUs,
+          duration: frameDurUs,
+        });
+        encoder.encode(frame, { keyFrame: i % gop === 0 });
+      } finally {
+        if (frame) frame.close();
+      }
+
+      // Backpressure — don't let the encode queue grow unbounded (memory).
+      while (encoder.encodeQueueSize > 16) {
+        await new Promise<void>((r) => setTimeout(r, 4));
+        if (encoderError) throw encoderError;
+      }
+
+      if (i % 30 === 0) {
+        mbLog(`[mb] frame ${i + 1}/${total} queue=${encoder.encodeQueueSize}`);
+      }
+      if (i % 5 === 0 || i === total - 1) {
+        onProgress?.({
+          stage: `モーションブラー適用中 (${i + 1}/${total})`,
+          percent: Math.max(0, Math.min(0.85, (i + 1) / total * 0.85)),
+        });
+      }
+    }
+
+    mbLog('[mb] loop done; flushing encoder');
+    onProgress?.({ stage: 'モーションブラー: エンコード仕上げ中', percent: 0.88 });
+    await encoder.flush();
+    if (encoderError) throw encoderError;
+    muxer.finalize();
+    mbLog('[mb] encoder flushed + muxer finalized');
+  } finally {
+    renderer.dispose();
+    try { encoder.close(); } catch { /* already closed / errored */ }
+    video.removeAttribute('src');
+    try { video.load(); } catch { /* ignore */ }
+    URL.revokeObjectURL(url);
+  }
+
+  const videoBytes = new Uint8Array(muxer.target.buffer);
+  mbLog(`[mb] muxed video bytes=${videoBytes.length}; muxing audio`);
+
+  // Stream-copy the original audio onto the blurred video — no transcode, fast
+  // and lossless. `1:a:0?` makes the audio optional (silent sources export OK).
+  onProgress?.({ stage: 'モーションブラー: 音声を結合中', percent: 0.92 });
+  const MB_VIDEO = 'mb_video.mp4';
+  await ffmpeg.writeFile(MB_VIDEO, videoBytes);
+  const blurredOutput = 'video_blurred.mp4';
+  await ffmpeg.exec([
+    '-threads', '1',
+    '-i', MB_VIDEO,
+    '-i', videoInput,
+    '-map', '0:v:0',
+    '-map', '1:a:0?',
+    '-c', 'copy',
+    '-movflags', '+faststart',
+    '-y',
+    blurredOutput,
+  ]);
+  try { await ffmpeg.deleteFile(MB_VIDEO); } catch { /* ignore */ }
+  try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
+  mbLog('[mb] audio mux done; motion-blur complete');
+  return blurredOutput;
+}
+
+/** Legacy tblend frame-average blur — fallback when WebGL can't be used. */
+async function applyTblendMotionBlur(
+  ffmpeg: FFmpeg,
+  videoInput: string,
+  params: Pick<MotionBlurParams, 'intensity' | 'onProgress'>,
+): Promise<string> {
+  params.onProgress?.({ stage: 'モーションブラー適用中 (tblend)', percent: -1 });
+  const passCount = tblendPassCount(params.intensity);
+  const tblendVf = buildTblendFilter(passCount);
+  const blurredOutput = 'video_blurred.mp4';
+  await ffmpeg.exec([
+    '-threads', '1',
+    '-i', videoInput,
+    '-vf', tblendVf,
+    '-c:v', 'libx264',
+    '-preset', 'superfast',
+    '-crf', '18',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'copy',
+    '-movflags', '+faststart',
+    '-y',
+    blurredOutput,
+  ]);
+  try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
+  return blurredOutput;
+}
+
+/**
+ * Dispatch motion-blur application: prefer the WebGL preview-matching pass,
+ * fall back to tblend when the clip is too long or WebGL is unavailable.
+ * Returns the resulting video filename.
+ */
+async function applyMotionBlur(
+  ffmpeg: FFmpeg,
+  videoInput: string,
+  params: MotionBlurParams,
+): Promise<string> {
+  const estimatedFrames = Math.ceil(params.totalVideoSeconds * params.targetFps);
+  mbLog(`[mb] applyMotionBlur: ~${estimatedFrames} frames (cap ${MAX_WEBGL_BLUR_FRAMES})`);
+  if (estimatedFrames > MAX_WEBGL_BLUR_FRAMES) {
+    const msg = `[exporter] motion-blur: ~${estimatedFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — using tblend fallback`;
+    console.info(msg);
+    params.onProgress?.({ stage: 'モーションブラー: 長尺のため tblend を使用', percent: -1, log: msg });
+    return applyTblendMotionBlur(ffmpeg, videoInput, params);
+  }
+  try {
+    return await applyWebglMotionBlur(ffmpeg, videoInput, params);
+  } catch (err) {
+    const msg = `[exporter] motion-blur: WebGL パス失敗 (${err instanceof Error ? err.message : String(err)}) — tblend へフォールバック`;
+    console.error('[mb] WebGL path threw:', err);
+    console.warn(msg);
+    params.onProgress?.({ stage: 'モーションブラー: WebGL不可 → tblend', percent: -1, log: msg });
+    // Drop any intermediate the failed WebGL pass left behind.
+    try { await ffmpeg.deleteFile('mb_video.mp4'); } catch { /* ignore */ }
+    return applyTblendMotionBlur(ffmpeg, videoInput, params);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -537,8 +892,8 @@ export async function exportProject(
   for (const clip of videoClips) {
     const asset = assets.find((a) => a.id === clip.assetId);
     if (!asset || assetInputMap.has(asset.id)) continue;
-    const ext = asset.file.name.split('.').pop() ?? 'mp4';
-    const inputName = `vinput_${asset.id}.${escapeConcatPath(ext)}`;
+    const ext = safeExt(asset.file.name, 'mp4');
+    const inputName = `vinput_${asset.id}.${ext}`;
     const inputIndex = ffmpegInputArgs.length / 2;
     assetInputMap.set(asset.id, { index: inputIndex, inputName });
     ffmpegInputArgs.push('-i', inputName);
@@ -684,30 +1039,29 @@ export async function exportProject(
         progressState.totalDuration = totalVideoSeconds;
         options.onProgress?.({ stage: 'モーションブラー適用中', percent: -1 });
 
-        // Pick intensity from the first clip that has a motion-blur effect.
-        const mbEffect = videoClips
-          .flatMap((c) => c.effects)
-          .find((e) => e.type === 'motion-blur');
+        // Pick intensity + speed from the first clip that has a motion-blur
+        // effect (matches the legacy single-config behaviour).
+        const mbClip = videoClips.find((c) =>
+          c.effects.some((e) => e.type === 'motion-blur'),
+        );
+        const mbEffect = mbClip?.effects.find((e) => e.type === 'motion-blur');
         const mbIntensity = mbEffect?.intensity ?? 50;
-        const passCount = tblendPassCount(mbIntensity);
-        const tblendVf = buildTblendFilter(passCount);
+        const hudPreset = options.motionBlurHudPreset ?? 'valorant';
+        const hudMaskStrength = options.motionBlurHudMaskStrength ??
+          (hudPreset === 'none' ? 0 : 1);
 
-        const blurredOutput = 'video_blurred.mp4';
-        await ffmpeg.exec([
-          '-threads', '1',
-          '-i', videoOutput,
-          '-vf', tblendVf,
-          '-c:v', 'libx264',
-          '-preset', 'superfast',
-          '-crf', '18',
-          '-pix_fmt', 'yuv420p',
-          '-c:a', 'copy',
-          '-movflags', '+faststart',
-          '-y',
-          blurredOutput,
-        ]);
-        try { await ffmpeg.deleteFile(videoOutput); } catch { /* ignore */ }
-        videoOutput = blurredOutput;
+        videoOutput = await applyMotionBlur(ffmpeg, videoOutput, {
+          width,
+          height,
+          targetFps,
+          totalVideoSeconds,
+          intensity: mbIntensity,
+          speed: mbClip?.speed ?? 1,
+          strengthOverride: options.motionBlurStrength,
+          hudPreset,
+          hudMaskStrength,
+          onProgress: options.onProgress,
+        });
       }
     }
 
@@ -735,7 +1089,7 @@ export async function exportProject(
         const asset = assets.find((a) => a.id === clip.assetId);
         if (!asset) continue;
 
-        const ext = asset.file.name.split('.').pop() ?? 'mp3';
+        const ext = safeExt(asset.file.name, 'mp3');
         const inputName = `ainput_${asset.id}.${ext}`;
         if (!writtenAudioFilenames.has(asset.id)) {
           await ffmpeg.writeFile(inputName, await fetchFile(asset.file));
