@@ -71,6 +71,13 @@ export interface Clip {
   volume?: number;
   /** Whether the clip is individually muted regardless of volume. */
   muted?: boolean;
+  /**
+   * Stretch the source to FILL the output frame, ignoring aspect ratio
+   * (non-uniform scale). For VALORANT "stretched" gameplay recorded at a 4:3
+   * resolution (e.g. 1440x1080), this reproduces the wide in-game look by
+   * stretching to 16:9 instead of pillar-boxing. Off = preserve aspect (pad).
+   */
+  stretchToFill?: boolean;
   effects: ClipEffect[];
   overlays?: OverlayText[];
 }

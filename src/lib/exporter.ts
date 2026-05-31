@@ -295,6 +295,9 @@ function canStreamCopy(
   const asset = assets.find((a) => a.id === clip.assetId);
   if (!asset) return false;
 
+  // Stretch-to-fill requires a non-uniform scale → must re-encode.
+  if (clip.stretchToFill) return false;
+
   const speed = clip.speed ?? 1;
   if (Math.abs(speed - 1) > 1e-3) return false;
 
@@ -370,7 +373,12 @@ function buildClipFilters(spec: ClipFilterSpec): string {
 
   // Skip identity scale — even a no-op scale touches every pixel in WASM.
   const sourceMatchesOutput = asset.width === width && asset.height === height;
-  if (!sourceMatchesOutput) {
+  if (clip.stretchToFill) {
+    // Stretch-to-fill: scale to the exact output dimensions IGNORING aspect
+    // ratio (non-uniform). Reproduces VALORANT "stretched" play — a 4:3
+    // recording (e.g. 1440x1080) becomes a full 16:9 frame, wider, no bars.
+    vFilters.push(`scale=${width}:${height}`);
+  } else if (!sourceMatchesOutput) {
     vFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease`);
     vFilters.push(`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`);
   }

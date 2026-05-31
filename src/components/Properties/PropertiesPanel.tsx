@@ -5,6 +5,7 @@ import { KillMarkerSection } from './KillMarkerSection';
 import { IORangeSection } from './IORangeSection';
 import { ClipEffectsSection } from './ClipEffectsSection';
 import { ClipSpeedSection } from './ClipSpeedSection';
+import { ClipStretchSection } from './ClipStretchSection';
 import { ClipVolumeSection } from './ClipVolumeSection';
 import { ClipOverlaysSection } from './ClipOverlaysSection';
 import { BeatDetectionSection } from './BeatDetectionSection';
@@ -63,6 +64,11 @@ export function PropertiesPanel() {
               <div className={styles.markerSlot}>
                 <ClipSpeedSection clip={selectedClip} />
               </div>
+              {selectedClipTrackKind !== 'audio' ? (
+                <div className={styles.markerSlot}>
+                  <ClipStretchSection clip={selectedClip} />
+                </div>
+              ) : null}
               <div className={styles.markerSlot}>
                 <ClipVolumeSection clip={selectedClip} />
               </div>

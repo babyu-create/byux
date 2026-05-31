@@ -107,6 +107,10 @@ export function Preview() {
   const motionBlur =
     activeClip?.effects.find((e) => e.type === 'motion-blur') ?? null;
   const clipSpeed = activeClip?.speed ?? 1;
+  // Stretch-to-fill: object-fit:fill makes the <video> distort to the 16:9
+  // frame, matching the motion-blur canvas (which already fills) and the
+  // exported result. See Clip.stretchToFill.
+  const stretchActive = activeClip?.stretchToFill ?? false;
 
   // Preview-only multiplier on the canvas strength. Lets the user dial in
   // the look during preview without touching the per-clip intensity stored
@@ -525,6 +529,7 @@ export function Preview() {
                 ref={videoRef}
                 src={displayAsset?.url}
                 className={styles.video}
+                style={stretchActive ? { objectFit: 'fill' } : undefined}
                 playsInline
                 muted={videoTrackMuted}
                 onClick={togglePlay}

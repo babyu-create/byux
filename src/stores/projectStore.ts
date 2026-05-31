@@ -121,6 +121,7 @@ interface ProjectStoreState {
   ) => void;
   setClipSpeed: (clipId: string, speed: number) => void;
   setClipVolume: (clipId: string, volume: number) => void;
+  setClipStretch: (clipId: string, stretchToFill: boolean) => void;
   toggleClipMuted: (clipId: string) => void;
   addClipOverlay: (clipId: string, overlay: import('../lib/types').OverlayText) => void;
   updateClipOverlay: (
@@ -740,6 +741,20 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
         c.id === clipId ? { ...c, volume: clamped } : c,
       ),
     }));
+  },
+
+  setClipStretch: (clipId, stretchToFill) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      return {
+        clips: state.clips.map((c) =>
+          c.id === clipId ? { ...c, stretchToFill } : c,
+        ),
+      };
+    });
   },
 
   toggleClipMuted: (clipId) => {

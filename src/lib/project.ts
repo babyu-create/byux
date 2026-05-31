@@ -140,6 +140,7 @@ const clipSchema = z.object({
   speed: finiteNumber.optional(),
   volume: finiteNumber.optional(),
   muted: z.boolean().optional(),
+  stretchToFill: z.boolean().optional(),
   effects: z.array(clipEffectSchema),
   overlays: z.array(overlaySchema).optional(),
 });
