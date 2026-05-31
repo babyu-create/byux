@@ -1,4 +1,4 @@
-// Core domain types for the FPS Clip Editor.
+// Core domain types for Byux.
 
 export type TrackKind = 'video' | 'overlay' | 'audio';
 

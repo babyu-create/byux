@@ -7,7 +7,7 @@ ipcRenderer.on('updater', (_event, payload) => {
 });
 
 contextBridge.exposeInMainWorld('fce', {
-  appName: 'FPS Clip Editor',
+  appName: 'Byux',
   isElectron: true,
   updater: {
     onEvent(cb) {

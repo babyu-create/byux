@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { CheckCircle2 } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import {
@@ -423,7 +424,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
 
           {phase === 'done' && downloadUrl ? (
             <div className={styles.doneBlock}>
-              <div className={styles.doneIcon}>✓</div>
+              <div className={styles.doneIcon}><CheckCircle2 size={40} strokeWidth={1.8} aria-hidden="true" /></div>
               <div className={styles.doneText}>書き出し完了</div>
               <div className={styles.doneStats}>
                 {fileSizeMb !== null ? `${fileSizeMb.toFixed(1)} MB` : ''}

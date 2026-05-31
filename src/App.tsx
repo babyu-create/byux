@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { Keyboard, Settings, FolderOpen, Save, Download } from 'lucide-react';
 import { MediaLibrary } from './components/MediaLibrary/MediaLibrary';
 import { Preview } from './components/Preview/Preview';
 import { PropertiesPanel } from './components/Properties/PropertiesPanel';
@@ -78,7 +79,7 @@ function App() {
       assets: ms.assets,
     });
     downloadProjectFile(project);
-    ps.showMessage('success', '💾 プロジェクト保存');
+    ps.showMessage('success', 'プロジェクト保存');
   };
 
   const handleLoadClick = () => {
@@ -99,11 +100,11 @@ function App() {
       if (missingAssetIds.length > 0) {
         ps.showMessage(
           'info',
-          `📂 ロード完了 (${missingAssetIds.length}個のメディア未マッチ — 同名・同サイズのファイルを追加してください)`,
+          `ロード完了 (${missingAssetIds.length}個のメディア未マッチ — 同名・同サイズのファイルを追加してください)`,
           5000,
         );
       } else {
-        ps.showMessage('success', '📂 プロジェクトをロードしました');
+        ps.showMessage('success', 'プロジェクトをロードしました');
       }
     } catch (err) {
       ps.showMessage(
@@ -154,7 +155,7 @@ function App() {
       const ps = useProjectStore.getState();
       ps.showMessage(
         'success',
-        `🔗 ${matched}個のメディアを自動再リンク`,
+        `${matched}個のメディアを自動再リンク`,
         2500,
       );
     }
@@ -171,8 +172,8 @@ function App() {
     <div className={styles.app} style={layoutVars}>
       <header className={styles.header}>
         <div className={styles.brand}>
-          <span className={styles.logoMark}>FCE</span>
-          <span className={styles.logoText}>FPS Clip Editor</span>
+          <img src="/icon.png" className={styles.logoMark} alt="" aria-hidden="true" />
+          <span className={styles.logoText}>Byux</span>
           <span className={styles.versionTag}>v1.0</span>
         </div>
         <nav className={styles.headerNav}>
@@ -182,7 +183,8 @@ function App() {
             onClick={() => setHelpOpen(true)}
             title="ショートカット (?)"
           >
-            ⌨ ヘルプ
+            <Keyboard size={15} strokeWidth={2} aria-hidden="true" />
+            <span>ヘルプ</span>
           </button>
           <button
             type="button"
@@ -190,13 +192,16 @@ function App() {
             onClick={() => setSettingsOpen(true)}
             title="ショートカット設定"
           >
-            ⚙ 設定
+            <Settings size={15} strokeWidth={2} aria-hidden="true" />
+            <span>設定</span>
           </button>
           <button type="button" className={styles.navBtn} onClick={handleLoadClick}>
-            📂 ロード
+            <FolderOpen size={15} strokeWidth={2} aria-hidden="true" />
+            <span>ロード</span>
           </button>
           <button type="button" className={styles.navBtn} onClick={handleSaveProject}>
-            💾 保存
+            <Save size={15} strokeWidth={2} aria-hidden="true" />
+            <span>保存</span>
           </button>
           <button
             type="button"
@@ -204,7 +209,8 @@ function App() {
             onClick={() => setExportOpen(true)}
             disabled={!hasVideoClips}
           >
-            📦 書き出し
+            <Download size={15} strokeWidth={2.2} aria-hidden="true" />
+            <span>書き出し</span>
           </button>
           <input
             ref={fileInputRef}

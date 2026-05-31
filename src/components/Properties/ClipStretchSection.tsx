@@ -1,3 +1,4 @@
+import { MoveHorizontal } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import type { Clip } from '../../lib/types';
@@ -53,7 +54,9 @@ export function ClipStretchSection({ clip }: ClipStretchSectionProps) {
         onClick={() => setStretch(clip.id, !on)}
         aria-pressed={on}
       >
-        <span className={styles.toggleIcon} aria-hidden="true">⇔</span>
+        <span className={styles.toggleIcon} aria-hidden="true">
+          <MoveHorizontal size={18} strokeWidth={2} />
+        </span>
         <span className={styles.toggleMain}>16:9 にフル引き伸ばし</span>
         <span className={styles.toggleHint}>
           VALORANT等の「引き伸ばし(stretched)」設定で 4:3 / 16:10 録画された映像を、

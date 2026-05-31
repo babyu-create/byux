@@ -4,6 +4,7 @@ import { useProjectStore, useTimelineDuration } from '../../stores/projectStore'
 import { clipDuration } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
 import type { Clip, MediaAsset } from '../../lib/types';
+import { Rewind, FastForward, Play, Pause, EyeOff, Clapperboard } from 'lucide-react';
 import { MotionBlurCanvas, type HudPreset } from './MotionBlurCanvas';
 import { shapeStrength } from '../../lib/motionBlurCore';
 import { OverlayLayer } from './OverlayLayer';
@@ -424,7 +425,9 @@ export function Preview() {
     return (
       <div className={styles.root}>
         <div className={styles.empty}>
-          <div className={styles.emptyIcon}>🎮</div>
+          <div className={styles.emptyIcon}>
+            <Clapperboard size={44} strokeWidth={1.4} aria-hidden="true" />
+          </div>
           <div className={styles.emptyText}>左パネルから動画を追加してください</div>
           <div className={styles.emptyHint}>VALORANT等のFPS録画ファイル (.mp4) に対応</div>
         </div>
@@ -572,7 +575,9 @@ export function Preview() {
             <div className={styles.gap}>
               {isHidden ? (
                 <>
-                  <div className={styles.gapIcon}>👁</div>
+                  <div className={styles.gapIcon}>
+                    <EyeOff size={30} strokeWidth={1.6} aria-hidden="true" />
+                  </div>
                   <div className={styles.gapText}>映像トラック非表示</div>
                 </>
               ) : inGap ? (
@@ -601,7 +606,7 @@ export function Preview() {
             aria-label="5秒戻る"
             title="5秒戻る (Shift+←)"
           >
-            <span className={styles.iconSm}>⏪</span>
+            <Rewind size={16} strokeWidth={2} aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -611,7 +616,11 @@ export function Preview() {
             title={isPlaying ? '一時停止 (Space)' : '再生 (Space)'}
             disabled={totalForDisplay === 0}
           >
-            <span className={styles.playIcon}>{isPlaying ? '❚❚' : '▶'}</span>
+            {isPlaying ? (
+              <Pause size={20} strokeWidth={0} fill="currentColor" aria-hidden="true" />
+            ) : (
+              <Play size={20} strokeWidth={0} fill="currentColor" aria-hidden="true" />
+            )}
           </button>
           <button
             type="button"
@@ -620,7 +629,7 @@ export function Preview() {
             aria-label="5秒進む"
             title="5秒進む (Shift+→)"
           >
-            <span className={styles.iconSm}>⏩</span>
+            <FastForward size={16} strokeWidth={2} aria-hidden="true" />
           </button>
         </div>
 

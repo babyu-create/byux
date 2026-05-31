@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Sun, Moon, Gamepad2, RotateCcw, type LucideIcon } from 'lucide-react';
 import {
   DEFAULT_GAMING_COLORS,
   GAMING_PRESETS,
@@ -18,10 +19,10 @@ import {
 } from '../../lib/theme';
 import styles from './ThemeSettings.module.css';
 
-const THEMES: { id: ThemeId; label: string; description: string; icon: string }[] = [
-  { id: 'light', label: 'ライト', description: '昼間向け、明るく落ち着いた配色', icon: '☀' },
-  { id: 'dark', label: 'ダーク', description: '夜間向け、目に優しい暗色', icon: '🌙' },
-  { id: 'gaming', label: 'ゲーミング', description: 'RGB配色を自由にカスタマイズ', icon: '🎮' },
+const THEMES: { id: ThemeId; label: string; description: string; Icon: LucideIcon }[] = [
+  { id: 'light', label: 'ライト', description: '昼間向け、明るく落ち着いた配色', Icon: Sun },
+  { id: 'dark', label: 'ダーク', description: '夜間向け、目に優しい暗色', Icon: Moon },
+  { id: 'gaming', label: 'ゲーミング', description: 'RGB配色を自由にカスタマイズ', Icon: Gamepad2 },
 ];
 
 interface ColorFieldDef {
@@ -111,7 +112,7 @@ export function ThemeSettings() {
               onClick={() => changeTheme(t.id)}
               aria-pressed={theme === t.id}
             >
-              <span className={styles.themeIcon}>{t.icon}</span>
+              <span className={styles.themeIcon}><t.Icon size={18} strokeWidth={2} aria-hidden="true" /></span>
               <span className={styles.themeLabel}>{t.label}</span>
               <span className={styles.themeDesc}>{t.description}</span>
             </button>
@@ -200,8 +201,10 @@ export function ThemeSettings() {
                 className={styles.resetLink}
                 onClick={resetGaming}
                 title="初期値に戻す"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
               >
-                ↺ リセット
+                <RotateCcw size={13} strokeWidth={2} aria-hidden="true" />
+                リセット
               </button>
             </div>
             <div className={styles.colorGrid}>

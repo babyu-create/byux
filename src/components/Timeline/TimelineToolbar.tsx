@@ -1,3 +1,4 @@
+import { Scissors, Trash2, Magnet, ZoomIn, ZoomOut } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { formatTimecode } from '../../lib/media';
@@ -59,7 +60,8 @@ export function TimelineToolbar() {
           disabled={!hasSelection}
           title="選択クリップを分割 (J)"
         >
-          ✂ 分割
+          <Scissors size={14} strokeWidth={2} aria-hidden="true" />
+          <span>分割</span>
         </button>
         <button
           type="button"
@@ -68,7 +70,8 @@ export function TimelineToolbar() {
           disabled={!hasSelection}
           title="選択クリップを削除 (Delete)"
         >
-          🗑 削除
+          <Trash2 size={14} strokeWidth={2} aria-hidden="true" />
+          <span>削除</span>
         </button>
         <button
           type="button"
@@ -76,13 +79,14 @@ export function TimelineToolbar() {
           onClick={toggleSnap}
           title="スナップ ON/OFF"
         >
-          ◇ スナップ
+          <Magnet size={14} strokeWidth={2} aria-hidden="true" />
+          <span>スナップ</span>
         </button>
       </div>
 
       <div className={styles.zoomGroup}>
-        <button type="button" className={styles.zoomBtn} onClick={zoomOut} title="ズームアウト (-)">
-          −
+        <button type="button" className={styles.zoomBtn} onClick={zoomOut} title="ズームアウト (-)" aria-label="ズームアウト">
+          <ZoomOut size={15} strokeWidth={2} aria-hidden="true" />
         </button>
         <input
           type="range"
@@ -93,8 +97,8 @@ export function TimelineToolbar() {
           onChange={(e) => setZoom(2 ** parseFloat(e.target.value))}
           className={styles.zoomSlider}
         />
-        <button type="button" className={styles.zoomBtn} onClick={zoomIn} title="ズームイン (+)">
-          ＋
+        <button type="button" className={styles.zoomBtn} onClick={zoomIn} title="ズームイン (+)" aria-label="ズームイン">
+          <ZoomIn size={15} strokeWidth={2} aria-hidden="true" />
         </button>
         <span className={styles.zoomValue}>{Math.round(zoom * 100)}%</span>
       </div>

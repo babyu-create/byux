@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Sparkles, Download, CheckCircle2 } from 'lucide-react';
 import styles from './UpdateBanner.module.css';
 
 type UpdaterEvent =
@@ -52,7 +53,7 @@ export function UpdateBanner() {
   if (event.status === 'available') {
     return (
       <div className={styles.banner} data-state="available" role="status">
-        <span className={styles.icon}>🆕</span>
+        <span className={styles.icon}><Sparkles size={16} strokeWidth={2} aria-hidden="true" /></span>
         <span className={styles.text}>
           新しいバージョン <strong>v{event.version}</strong> のダウンロードを開始しました…
         </span>
@@ -72,7 +73,7 @@ export function UpdateBanner() {
     const percent = Math.round(event.percent);
     return (
       <div className={styles.banner} data-state="downloading" role="status">
-        <span className={styles.icon}>⬇</span>
+        <span className={styles.icon}><Download size={16} strokeWidth={2} aria-hidden="true" /></span>
         <span className={styles.text}>
           ダウンロード中... <strong>{percent}%</strong>
         </span>
@@ -86,7 +87,7 @@ export function UpdateBanner() {
   if (event.status === 'downloaded') {
     return (
       <div className={styles.banner} data-state="downloaded" role="status">
-        <span className={styles.icon}>✓</span>
+        <span className={styles.icon}><CheckCircle2 size={16} strokeWidth={2} aria-hidden="true" /></span>
         <span className={styles.text}>
           <strong>v{event.version}</strong> ダウンロード完了。再起動して適用しますか？
         </span>

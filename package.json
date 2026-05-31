@@ -1,6 +1,6 @@
 {
   "name": "highlight-maker",
-  "productName": "FPS Clip Editor",
+  "productName": "Byux",
   "private": true,
   "version": "1.0.1",
   "license": "MIT",
@@ -45,6 +45,7 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "electron-updater": "^6.8.3",
+    "lucide-react": "^1.17.0",
     "mp4-muxer": "^5.2.2",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
@@ -74,7 +75,7 @@
   },
   "build": {
     "appId": "com.fceditor.app",
-    "productName": "FPS Clip Editor",
+    "productName": "Byux",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -107,7 +108,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "FPS Clip Editor",
+      "shortcutName": "Byux",
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "portable": {

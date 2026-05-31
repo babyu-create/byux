@@ -20,10 +20,10 @@
   --text-muted: #a1a1a6;
   --text-inverse: #ffffff;
 
-  /* Accent (CapCut signature red) */
-  --accent: #ff3b30;
-  --accent-hover: #e0322a;
-  --accent-soft: rgba(255, 59, 48, 0.12);
+  /* Accent (brand azure — matches the app icon #01ADFD) */
+  --accent: #0490d8;
+  --accent-hover: #0379b8;
+  --accent-soft: rgba(10, 174, 253, 0.12);
 
   /* Semantic */
   --success: #34c759;
@@ -39,8 +39,8 @@
   --clip-audio-bg: rgba(74, 222, 128, 0.18);
 
   /* Beat marker */
-  --beat-line: rgba(255, 59, 48, 0.4);
-  --playhead: #ff3b30;
+  --beat-line: rgba(10, 174, 253, 0.4);
+  --playhead: #0490d8;
 
   /* Layout */
   --panel-padding: 12px;
@@ -66,29 +66,30 @@
   --glow: 0 0 0 transparent;
 }
 
-/* Dark theme — neutral, low-glare */
+/* Dark theme — neutral near-black surfaces (no blue tint), low-glare */
 :root[data-theme='dark'] {
-  --bg-app: #0f0f12;
-  --bg-panel: #16161a;
-  --bg-panel-2: #1d1d22;
-  --bg-timeline: #131316;
-  --bg-track: #18181c;
-  --bg-track-alt: #1c1c20;
-  --bg-elevated: #1a1a1f;
-  --bg-overlay: rgba(0, 0, 0, 0.72);
+  --bg-app: #0a0a0a;
+  --bg-panel: #141414;
+  --bg-panel-2: #1c1c1c;
+  --bg-timeline: #0d0d0d;
+  --bg-track: #151515;
+  --bg-track-alt: #191919;
+  --bg-elevated: #171717;
+  --bg-overlay: rgba(0, 0, 0, 0.74);
 
-  --border: #2a2a30;
-  --border-soft: #222227;
-  --border-strong: #3a3a42;
+  /* Borders lifted toward white for clearer structure on the blacker bg. */
+  --border: #3a3a3a;
+  --border-soft: #2b2b2b;
+  --border-strong: #4e4e4e;
 
-  --text: #ececf0;
-  --text-dim: #a0a0a8;
-  --text-muted: #6a6a72;
-  --text-inverse: #0f0f12;
+  --text: #ededed;
+  --text-dim: #a2a2a2;
+  --text-muted: #6c6c6c;
+  --text-inverse: #0a0a0a;
 
-  --accent: #ff3b30;
-  --accent-hover: #ff5a4f;
-  --accent-soft: rgba(255, 59, 48, 0.18);
+  --accent: #0aaefd;
+  --accent-hover: #3fc0ff;
+  --accent-soft: rgba(10, 174, 253, 0.18);
 
   --clip-video: #5b9dff;
   --clip-video-bg: rgba(91, 157, 255, 0.22);
@@ -97,8 +98,8 @@
   --clip-audio: #4ade80;
   --clip-audio-bg: rgba(74, 222, 128, 0.22);
 
-  --beat-line: rgba(255, 59, 48, 0.45);
-  --playhead: #ff3b30;
+  --beat-line: rgba(10, 174, 253, 0.45);
+  --playhead: #0aaefd;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow: 0 2px 10px rgba(0, 0, 0, 0.5);

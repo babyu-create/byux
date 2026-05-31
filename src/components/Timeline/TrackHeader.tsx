@@ -1,4 +1,5 @@
 import { memo, useCallback } from 'react';
+import { Eye, EyeOff, Lock, LockOpen, Volume2, VolumeX } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import type { Track } from '../../lib/types';
 import styles from './TrackHeader.module.css';
@@ -44,7 +45,7 @@ export const TrackHeader = memo(function TrackHeader({ track }: TrackHeaderProps
           aria-label={track.hidden ? '表示する' : '非表示にする'}
           title={track.hidden ? '表示する' : '非表示にする'}
         >
-          {track.hidden ? '⌐' : '◉'}
+          {track.hidden ? <EyeOff size={14} aria-hidden="true" /> : <Eye size={14} aria-hidden="true" />}
         </button>
         <button
           type="button"
@@ -53,7 +54,7 @@ export const TrackHeader = memo(function TrackHeader({ track }: TrackHeaderProps
           aria-label={track.locked ? 'ロック解除' : 'ロック'}
           title={track.locked ? 'ロック解除' : 'ロック'}
         >
-          {track.locked ? '🔒' : '🔓'}
+          {track.locked ? <Lock size={14} aria-hidden="true" /> : <LockOpen size={14} aria-hidden="true" />}
         </button>
         <button
           type="button"
@@ -70,7 +71,7 @@ export const TrackHeader = memo(function TrackHeader({ track }: TrackHeaderProps
               : track.muted ? '音声ON' : '音声OFF'
           }
         >
-          {track.muted ? '🔇' : '🔊'}
+          {track.muted ? <VolumeX size={14} aria-hidden="true" /> : <Volume2 size={14} aria-hidden="true" />}
         </button>
       </div>
     </div>

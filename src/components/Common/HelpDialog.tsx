@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Keyboard } from 'lucide-react';
 import {
   ACTIONS,
   formatKey,
@@ -69,7 +70,10 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
     <div className={styles.backdrop} role="dialog" aria-modal="true" onClick={onClose}>
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div className={styles.header}>
-          <span className={styles.title}>⌨ ショートカット</span>
+          <span className={styles.title} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <Keyboard size={16} strokeWidth={2} aria-hidden="true" />
+            ショートカット
+          </span>
           <button
             type="button"
             className={styles.closeBtn}

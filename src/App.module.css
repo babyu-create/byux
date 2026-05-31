@@ -25,18 +25,12 @@
 }
 
 .logoMark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--text-inverse);
-  font-family: var(--font-en);
-  font-weight: 700;
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  object-fit: cover;
+  display: block;
+  flex: 0 0 auto;
 }
 
 .logoText {
@@ -63,7 +57,10 @@
 }
 
 .navBtn {
-  padding: 6px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
@@ -77,6 +74,9 @@
 }
 
 .exportBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 14px;
   border-radius: var(--radius-sm);
   background: var(--accent);

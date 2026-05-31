@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Loader2, RefreshCw, Music } from 'lucide-react';
 import { useMediaStore } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { detectBeats } from '../../lib/audio';
@@ -52,7 +53,22 @@ export function BeatDetectionSection({ asset }: BeatDetectionSectionProps) {
           onClick={runDetection}
           disabled={isAnalyzing}
         >
-          {isAnalyzing ? '🔄 解析中…' : beatCount > 0 ? '🔁 再検出' : '🎵 ビート検出'}
+          {isAnalyzing ? (
+            <>
+              <Loader2 size={15} strokeWidth={2} className={styles.spin} aria-hidden="true" />
+              <span>解析中…</span>
+            </>
+          ) : beatCount > 0 ? (
+            <>
+              <RefreshCw size={15} strokeWidth={2} aria-hidden="true" />
+              <span>再検出</span>
+            </>
+          ) : (
+            <>
+              <Music size={15} strokeWidth={2} aria-hidden="true" />
+              <span>ビート検出</span>
+            </>
+          )}
         </button>
         {beatCount > 0 ? (
           <button type="button" className={styles.secondaryBtn} onClick={clearBeats}>

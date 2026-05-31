@@ -1,15 +1,17 @@
+import { CheckCircle2, AlertTriangle, Info } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import styles from './Toast.module.css';
 
-const ICON_BY_KIND: Record<'success' | 'error' | 'info', string> = {
-  success: '✓',
-  error: '!',
-  info: 'i',
-};
+const ICON_BY_KIND = {
+  success: CheckCircle2,
+  error: AlertTriangle,
+  info: Info,
+} as const;
 
 export function Toast() {
   const message = useProjectStore((s) => s.transientMessage);
   if (!message) return null;
+  const Icon = ICON_BY_KIND[message.kind];
   return (
     <div
       className={styles.root}
@@ -21,7 +23,7 @@ export function Toast() {
       key={message.key}
     >
       <span className={styles.icon} aria-hidden="true">
-        {ICON_BY_KIND[message.kind]}
+        <Icon size={16} strokeWidth={2.2} />
       </span>
       <span className={styles.text}>{message.text}</span>
       {/* Progress bar: width animates from 100% to 0% over the message's

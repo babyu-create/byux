@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Scissors } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { formatTimecode } from '../../lib/media';
 import {
@@ -123,7 +124,8 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
           onClick={beginCut}
           disabled={ranges.length === 0}
         >
-          ✂ レンジから一括カット
+          <Scissors size={15} strokeWidth={2} aria-hidden="true" />
+          <span>レンジから一括カット</span>
         </button>
 
         {resultMessage ? <div className={styles.toast}>{resultMessage}</div> : null}

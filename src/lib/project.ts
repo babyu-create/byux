@@ -205,11 +205,11 @@ export function parseProjectFile(text: string): ProjectFile {
   // App/version checks first so the common "wrong file" case gets a friendly
   // message instead of a wall of schema errors.
   if (typeof raw !== 'object' || raw === null) {
-    throw new Error('FPS Clip Editor のプロジェクトファイルではありません');
+    throw new Error('Byux のプロジェクトファイルではありません');
   }
   const app = (raw as { app?: unknown }).app;
   if (app !== 'highlight-maker' && app !== 'fps-clip-editor') {
-    throw new Error('FPS Clip Editor のプロジェクトファイルではありません');
+    throw new Error('Byux のプロジェクトファイルではありません');
   }
   const version = (raw as { version?: unknown }).version;
   if (version !== 1) {

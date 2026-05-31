@@ -1,4 +1,5 @@
 import { useRef, useState, type DragEvent, type ChangeEvent } from 'react';
+import { Plus, Music } from 'lucide-react';
 import { useMediaStore } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { formatDuration, formatFileSize } from '../../lib/media';
@@ -85,7 +86,7 @@ export function MediaLibrary() {
           className={`${styles.dropZoneIcon} ${isDragging ? styles.dropZoneIconActive : ''}`}
           aria-hidden="true"
         >
-          ＋
+          <Plus size={26} strokeWidth={2} />
         </div>
         <div className={styles.dropZoneTextStrong}>
           {isImporting
@@ -205,7 +206,7 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
         {asset.kind === 'video' ? (
           <video src={asset.url} muted preload="metadata" className={styles.thumbVideo} />
         ) : (
-          <div className={styles.thumbAudio}>♪</div>
+          <div className={styles.thumbAudio}><Music size={22} strokeWidth={1.8} aria-hidden="true" /></div>
         )}
       </div>
       <div className={styles.itemMeta}>
@@ -226,7 +227,7 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
           aria-label="タイムラインに追加"
           title="タイムラインに追加"
         >
-          ＋
+          <Plus size={16} strokeWidth={2.4} aria-hidden="true" />
         </button>
         <button
           type="button"

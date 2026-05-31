@@ -64,7 +64,7 @@ const WaveformCanvas = memo(function WaveformCanvas({
 
     const accent = getCssVar('--clip-audio') || 'rgba(74, 222, 128, 0.85)';
     const accentBg = getCssVar('--clip-audio-bg') || 'rgba(74, 222, 128, 0.18)';
-    const beatColor = getCssVar('--beat-line') || 'rgba(255, 59, 48, 0.7)';
+    const beatColor = getCssVar('--beat-line') || 'rgba(10, 174, 253, 0.7)';
 
     const assetById = new Map<string, MediaAsset>(assets.map((a) => [a.id, a]));
 

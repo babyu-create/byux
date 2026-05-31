@@ -141,7 +141,7 @@ export function Timeline() {
           }
           const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
           state.addKillMarker(ac.assetId, sourceTime);
-          state.showMessage('success', `🎯 キルマーカー @ ${formatTimecode(sourceTime)}`);
+          state.showMessage('success', `キルマーカー @ ${formatTimecode(sourceTime)}`);
           return;
         }
         case 'marker.deleteNear': {
@@ -176,7 +176,7 @@ export function Timeline() {
           }
           const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
           state.setIoIn(ac.assetId, sourceTime);
-          state.showMessage('success', `🟢 開始 IN @ ${formatTimecode(sourceTime)}`);
+          state.showMessage('success', `開始 IN @ ${formatTimecode(sourceTime)}`);
           return;
         }
         case 'range.out': {
@@ -190,9 +190,9 @@ export function Timeline() {
           const wasPending = !!state.pendingIn;
           const id = state.setIoOut(ac.assetId, sourceTime);
           if (wasPending && id) {
-            state.showMessage('success', `✂ レンジ完成 → ${formatTimecode(sourceTime)}`);
+            state.showMessage('success', `レンジ完成 → ${formatTimecode(sourceTime)}`);
           } else {
-            state.showMessage('info', `🟢 開始 IN @ ${formatTimecode(sourceTime)} (Dで終了)`);
+            state.showMessage('info', `開始 IN @ ${formatTimecode(sourceTime)} (Dで終了)`);
           }
           return;
         }
@@ -218,7 +218,7 @@ export function Timeline() {
           const id = state.extractCurrentRange();
           state.showMessage(
             id ? 'success' : 'error',
-            id ? '✂ 即カット完了' : 'まずAキーで開始マークを設定',
+            id ? '即カット完了' : 'まずAキーで開始マークを設定',
           );
           return;
         }

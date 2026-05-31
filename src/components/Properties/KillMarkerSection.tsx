@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Target } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { formatTimecode } from '../../lib/media';
@@ -187,7 +188,8 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
           onClick={beginAutoClip}
           disabled={sortedMarkers.length === 0}
         >
-          🎯 マーカーから自動切り出し
+          <Target size={15} strokeWidth={2} aria-hidden="true" />
+          <span>マーカーから自動切り出し</span>
         </button>
 
         {resultMessage ? <div className={styles.toast}>{resultMessage}</div> : null}

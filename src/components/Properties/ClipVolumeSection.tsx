@@ -1,3 +1,4 @@
+import { Volume1, Volume2, VolumeX } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import type { Clip } from '../../lib/types';
 import styles from './ClipVolumeSection.module.css';
@@ -32,7 +33,13 @@ export function ClipVolumeSection({ clip }: ClipVolumeSectionProps) {
           aria-pressed={muted}
           title={muted ? 'ミュート解除' : 'ミュート'}
         >
-          {muted ? '🔇' : volume === 0 ? '🔇' : volume < 0.5 ? '🔈' : volume < 1 ? '🔉' : '🔊'}
+          {muted || volume === 0 ? (
+            <VolumeX size={15} strokeWidth={2} aria-hidden="true" />
+          ) : volume < 1 ? (
+            <Volume1 size={15} strokeWidth={2} aria-hidden="true" />
+          ) : (
+            <Volume2 size={15} strokeWidth={2} aria-hidden="true" />
+          )}
         </button>
         <input
           type="range"

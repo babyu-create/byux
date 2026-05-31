@@ -107,7 +107,7 @@ function createWindow() {
     height: 1000,
     minWidth: 1200,
     minHeight: 720,
-    title: 'FPS Clip Editor',
+    title: 'Byux',
     backgroundColor: '#ffffff',
     autoHideMenuBar: true,
     show: false,
