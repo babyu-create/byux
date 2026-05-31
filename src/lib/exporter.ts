@@ -817,10 +817,19 @@ async function applyOverlayPass(
   ffmpeg: FFmpeg,
   videoInput: string,
   specs: OverlaySpec[],
+  totalDuration: number,
+  targetFps: number,
 ): Promise<string> {
   const out = 'video_overlaid.mp4';
+  // Each overlay PNG is looped but BOUNDED with -t so it's a FINITE input.
+  // An unbounded `-loop 1` image is an infinite stream that makes the overlay
+  // graph hang at frame 0 in ffmpeg.wasm (same failure mode as image2). -t
+  // (slightly longer than the video) + matching -framerate keeps it finite.
+  const imgDur = (Math.max(0.1, totalDuration) + 1).toFixed(3);
   const inputArgs: string[] = ['-i', videoInput];
-  for (const s of specs) inputArgs.push('-loop', '1', '-i', s.name);
+  for (const s of specs) {
+    inputArgs.push('-framerate', String(targetFps), '-loop', '1', '-t', imgDur, '-i', s.name);
+  }
 
   // Chain: [0:v][1:v]overlay…[ov0]; [ov0][2:v]overlay…[ov1]; … → [ovout].
   // Commas inside between() are escaped (\,) so the filtergraph parser doesn't
@@ -846,7 +855,6 @@ async function applyOverlayPass(
     '-crf', '18',
     '-pix_fmt', 'yuv420p',
     '-c:a', 'copy',
-    '-shortest',
     '-movflags', '+faststart',
     '-y',
     out,
@@ -1200,7 +1208,7 @@ export async function exportProject(
       if (overlaySpecs.length > 0) {
         options.onProgress?.({ stage: 'テキスト合成中', percent: -1 });
         try {
-          videoOutput = await applyOverlayPass(ffmpeg, videoOutput, overlaySpecs);
+          videoOutput = await applyOverlayPass(ffmpeg, videoOutput, overlaySpecs, totalVideoSeconds, targetFps);
         } catch (err) {
           // Never let text compositing fail the whole export — degrade to no
           // text (the prior behaviour) instead of throwing.
@@ -1271,8 +1279,12 @@ export async function exportProject(
       }
 
       const totalMixInputs = mixLabels.length + 1;
+      // normalize=0 keeps each source at its authored level (so BGM/SE volumes
+      // are honored), but summing gameplay + BGM + SE can exceed 0 dBFS and
+      // hard-clip ("音割れ"). A brickwall limiter on the master tames peaks
+      // without squashing the mix.
       const mixFilterComplex =
-        `${audioFilterParts.join(';')};${mixLabels.join('')}[0:a]amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=0[aout]`;
+        `${audioFilterParts.join(';')};${mixLabels.join('')}[0:a]amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=0[amixed];[amixed]alimiter=limit=0.95:level=disabled[aout]`;
 
       await ffmpeg.exec([
         '-threads', '1',
