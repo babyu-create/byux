@@ -81,9 +81,12 @@ function isThemeId(v: string | null): v is ThemeId {
 }
 
 export function loadTheme(): ThemeId {
-  if (typeof window === 'undefined') return 'light';
+  // Default to dark — a video editor's chrome should recede so footage pops,
+  // and dark is the pro-tool convention (Premiere/DaVinci/CapCut). Users who
+  // previously chose light keep their saved preference.
+  if (typeof window === 'undefined') return 'dark';
   const raw = window.localStorage.getItem(THEME_KEY);
-  return isThemeId(raw) ? raw : 'light';
+  return isThemeId(raw) ? raw : 'dark';
 }
 
 export function saveTheme(theme: ThemeId): void {

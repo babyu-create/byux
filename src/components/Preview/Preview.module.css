@@ -419,13 +419,15 @@
   justify-content: center;
   gap: 8px;
   color: var(--text-muted);
+  /* Calm "video monitor" canvas: a soft center glow fading to near-black at
+     the edges — reads like the screen footage will play on, instead of the
+     old busy diagonal stripes. */
   background:
-    repeating-linear-gradient(
-      45deg,
-      var(--bg-panel) 0px,
-      var(--bg-panel) 12px,
-      var(--bg-panel-2) 12px,
-      var(--bg-panel-2) 24px
+    radial-gradient(
+      120% 120% at 50% 42%,
+      var(--bg-panel-2) 0%,
+      var(--bg-timeline) 58%,
+      #08080b 100%
     );
 }
 
