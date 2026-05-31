@@ -20,6 +20,7 @@ import type { Clip, MediaAsset, Track } from './types';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { exportStrengthFromIntensity, type HudPreset } from './motionBlurCore';
 import { OffscreenMotionBlurRenderer } from './motionBlurExporter';
+import { rasterizeOverlays } from './overlayRaster';
 
 export interface ExportOptions {
   resolution: '720p' | '1080p';
@@ -303,6 +304,9 @@ function canStreamCopy(
 
   // Stretch-to-fill requires a non-uniform scale → must re-encode.
   if (clip.stretchToFill) return false;
+
+  // Text overlays are composited via a filter pass → can't stream-copy.
+  if (clip.overlays && clip.overlays.length > 0) return false;
 
   const speed = clip.speed ?? 1;
   if (Math.abs(speed - 1) > 1e-3) return false;
@@ -791,6 +795,71 @@ async function applyMotionBlur(
 }
 
 // ---------------------------------------------------------------------------
+// Text-overlay pass
+// ---------------------------------------------------------------------------
+
+interface OverlaySpec {
+  /** WASM-FS filename of the full-frame RGBA overlay PNG. */
+  name: string;
+  /** Output-timeline window (seconds) the overlay is visible. */
+  start: number;
+  end: number;
+}
+
+/**
+ * Composite pre-rasterized overlay PNGs onto `videoInput`, each gated to its
+ * clip's output time window. Runs AFTER the motion-blur pass so text stays
+ * sharp. Each PNG is a full-frame transparent image (text already positioned),
+ * fed as a looped input and overlaid at 0:0 with an `enable` expression.
+ * Returns the new output filename.
+ */
+async function applyOverlayPass(
+  ffmpeg: FFmpeg,
+  videoInput: string,
+  specs: OverlaySpec[],
+): Promise<string> {
+  const out = 'video_overlaid.mp4';
+  const inputArgs: string[] = ['-i', videoInput];
+  for (const s of specs) inputArgs.push('-loop', '1', '-i', s.name);
+
+  // Chain: [0:v][1:v]overlay…[ov0]; [ov0][2:v]overlay…[ov1]; … → [ovout].
+  // Commas inside between() are escaped (\,) so the filtergraph parser doesn't
+  // read them as filter separators.
+  const parts: string[] = [];
+  let last = '[0:v]';
+  specs.forEach((s, k) => {
+    const next = k === specs.length - 1 ? '[ovout]' : `[ov${k}]`;
+    parts.push(
+      `${last}[${k + 1}:v]overlay=0:0:enable=between(t\\,${s.start.toFixed(3)}\\,${s.end.toFixed(3)})${next}`,
+    );
+    last = next;
+  });
+
+  await ffmpeg.exec([
+    '-threads', '1',
+    ...inputArgs,
+    '-filter_complex', parts.join(';'),
+    '-map', '[ovout]',
+    '-map', '0:a?',
+    '-c:v', 'libx264',
+    '-preset', 'superfast',
+    '-crf', '18',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'copy',
+    '-shortest',
+    '-movflags', '+faststart',
+    '-y',
+    out,
+  ]);
+
+  try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
+  for (const s of specs) {
+    try { await ffmpeg.deleteFile(s.name); } catch { /* ignore */ }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Main export function
 // ---------------------------------------------------------------------------
 
@@ -800,17 +869,41 @@ export async function exportProject(
 ): Promise<Blob> {
   const { clips, tracks, assets } = input;
   const videoTrack = tracks.find((t) => t.kind === 'video');
-  const audioTrack = tracks.find((t) => t.kind === 'audio');
+  const trackMutedById = (trackId: string): boolean =>
+    tracks.find((t) => t.id === trackId)?.muted ?? false;
+  const isAudioTrackId = (trackId: string): boolean =>
+    tracks.find((t) => t.id === trackId)?.kind === 'audio';
 
   const videoClips = clips
     .filter((c) => videoTrack && c.trackId === videoTrack.id)
     .sort((a, b) => a.start - b.start);
+  // Mix ALL audio tracks (BGM + SE + …), not just the first — previously the
+  // SE track's clips were silently dropped from the export.
   const audioClips = clips
-    .filter((c) => audioTrack && c.trackId === audioTrack.id)
+    .filter((c) => isAudioTrackId(c.trackId))
     .sort((a, b) => a.start - b.start);
 
   if (videoClips.length === 0) {
     throw new Error('映像クリップがありません');
+  }
+
+  // Secondary video tracks (e.g. 映像サブ / PiP) are NOT yet composited into
+  // the export (true multi-video-track compositing is planned). Warn instead
+  // of silently dropping so the user knows those clips won't appear.
+  const droppedVideoClips = clips.filter(
+    (c) =>
+      tracks.find((t) => t.id === c.trackId)?.kind === 'video' &&
+      videoTrack &&
+      c.trackId !== videoTrack.id,
+  );
+  if (droppedVideoClips.length > 0) {
+    const msg = `[exporter] WARNING: ${droppedVideoClips.length} clip(s) on a secondary video track are not yet composited into the export.`;
+    console.warn(msg);
+    options.onProgress?.({
+      stage: `映像サブトラックの${droppedVideoClips.length}クリップは書き出し未対応（メイン映像トラックに移動してください）`,
+      percent: -1,
+      log: msg,
+    });
   }
 
   const { width, height } = getResolution(options.resolution, options.aspectRatio);
@@ -826,24 +919,8 @@ export async function exportProject(
     : 'ST (single thread)';
   options.onProgress?.({ stage: `FFmpeg 起動: ${variantLabel}`, percent: -1 });
 
-  // Warn about preview-only overlays.
-  const clipsWithOverlays = videoClips.filter(
-    (c) => c.overlays && c.overlays.length > 0,
-  );
-  if (clipsWithOverlays.length > 0) {
-    const names = clipsWithOverlays
-      .map((c) => c.overlays!.map((o) => `"${o.text.slice(0, 20)}"`).join(', '))
-      .join('; ');
-    const warnMsg =
-      `[exporter] WARNING: ${clipsWithOverlays.length} clip(s) have overlay text that will NOT appear in the export. ` +
-      `Affected: ${names}. (drawtext filter not yet implemented)`;
-    console.warn(warnMsg);
-    options.onProgress?.({
-      stage: `オーバーレイ ${clipsWithOverlays.length}件はプレビュー専用（書き出し非対応）`,
-      percent: -1,
-      log: warnMsg,
-    });
-  }
+  // Text overlays ARE exported (rasterized → composited after the blur pass);
+  // see the overlay pass below. No more "preview-only" warning.
 
   // -------------------------------------------------------------------------
   // Stream-copy fast path check
@@ -976,6 +1053,9 @@ export async function exportProject(
       const clipFilterFragments: string[] = [];
       const vLabels: string[] = [];
       const aLabels: string[] = [];
+      // Output-timeline placement of each INCLUDED clip (clips are concatenated
+      // back-to-back), used to time-gate the text-overlay pass below.
+      const includedTimeline: Array<{ clip: Clip; start: number; end: number }> = [];
 
       let skippedCount = 0;
       for (let i = 0; i < videoClips.length; i++) {
@@ -996,6 +1076,11 @@ export async function exportProject(
         const aLabel = `[ca${i}]`;
         vLabels.push(vLabel);
         aLabels.push(aLabel);
+        const durOut = (clip.trimEnd - clip.trimStart) / Math.max(0.01, clip.speed ?? 1);
+        const startOut = includedTimeline.length
+          ? includedTimeline[includedTimeline.length - 1].end
+          : 0;
+        includedTimeline.push({ clip, start: startOut, end: startOut + durOut });
 
         clipFilterFragments.push(
           buildClipFilters({
@@ -1092,6 +1177,41 @@ export async function exportProject(
           onProgress: options.onProgress,
         });
       }
+
+      // ---------------------------------------------------------------------
+      // Text-overlay pass (after blur → text stays sharp). Rasterize each
+      // clip's overlays in the browser (exact preview fonts) and composite
+      // them onto their output time window.
+      // ---------------------------------------------------------------------
+      const overlaySpecs: OverlaySpec[] = [];
+      for (const seg of includedTimeline) {
+        if (!seg.clip.overlays || seg.clip.overlays.length === 0) continue;
+        const vi = videoClips.indexOf(seg.clip);
+        const tokens = {
+          n: String(vi >= 0 ? vi + 1 : 1),
+          total: String(videoClips.length),
+        };
+        const png = await rasterizeOverlays(seg.clip.overlays, width, height, tokens);
+        if (!png) continue;
+        const name = `ovl_${overlaySpecs.length}.png`;
+        await ffmpeg.writeFile(name, png);
+        overlaySpecs.push({ name, start: seg.start, end: seg.end });
+      }
+      if (overlaySpecs.length > 0) {
+        options.onProgress?.({ stage: 'テキスト合成中', percent: -1 });
+        try {
+          videoOutput = await applyOverlayPass(ffmpeg, videoOutput, overlaySpecs);
+        } catch (err) {
+          // Never let text compositing fail the whole export — degrade to no
+          // text (the prior behaviour) instead of throwing.
+          const m = `[exporter] overlay pass failed (${err instanceof Error ? err.message : String(err)}) — exporting without text`;
+          console.warn(m);
+          options.onProgress?.({ stage: 'テキスト合成に失敗（テキスト無しで継続）', percent: -1, log: m });
+          for (const s of overlaySpecs) {
+            try { await ffmpeg.deleteFile(s.name); } catch { /* ignore */ }
+          }
+        }
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -1099,10 +1219,15 @@ export async function exportProject(
     // Video stream is stream-copied (no re-encode).
     // -----------------------------------------------------------------------
     let finalOutput = videoOutput;
-    const playableAudioClips = audioClips.filter((c) =>
-      assets.some((a) => a.id === c.assetId),
+    // Playable = has a loaded asset and is not muted (by the clip or its track).
+    // Spans ALL audio tracks (BGM + SE), each positioned by its own start.
+    const playableAudioClips = audioClips.filter(
+      (c) =>
+        assets.some((a) => a.id === c.assetId) &&
+        !(c.muted ?? false) &&
+        !trackMutedById(c.trackId),
     );
-    if (playableAudioClips.length > 0 && !audioTrack?.muted) {
+    if (playableAudioClips.length > 0) {
       progressState.phase = 'mix';
       progressState.totalDuration = totalVideoSeconds;
       progressState.startEpoch = Date.now();
@@ -1127,9 +1252,8 @@ export async function exportProject(
         audioInputArgs.push('-i', inputName);
 
         const speed = clip.speed ?? 1;
-        const trackMutedA = audioTrack?.muted ?? false;
-        const clipMutedA = clip.muted ?? false;
-        const vol = clipMutedA || trackMutedA ? 0 : (clip.volume ?? 1);
+        // Already filtered to non-muted, so volume is just the clip's level.
+        const vol = clip.volume ?? 1;
         const startMs = Math.round(clip.start * 1000);
 
         const filters: string[] = [
@@ -1187,6 +1311,16 @@ export async function exportProject(
     }
     try { await ffmpeg.deleteFile('video_only.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_blurred.mp4'); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile('video_overlaid.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('final.mp4'); } catch { /* ignore */ }
+    // Purge any leftover overlay PNGs.
+    try {
+      const left = await ffmpeg.listDir('/');
+      for (const e of left) {
+        if (!e.isDir && e.name.startsWith('ovl_') && e.name.endsWith('.png')) {
+          try { await ffmpeg.deleteFile(e.name); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
   }
 }
