@@ -1,6 +1,7 @@
-import { memo, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { memo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import type { Clip as ClipType, IORange, KillMarker, MediaAsset, TrackKind } from '../../lib/types';
 import { useProjectStore } from '../../stores/projectStore';
+import { useShallow } from 'zustand/react/shallow';
 import { useMediaStore } from '../../stores/mediaStore';
 import { useTimelineAutoScroll } from '../../hooks/useTimelineAutoScroll';
 import {
@@ -19,6 +20,11 @@ import { AudioWaveform } from './AudioWaveform';
 import styles from './Clip.module.css';
 
 const SNAP_THRESHOLD_PX = 8;
+
+// Stable empty arrays so the "no markers/ranges for this clip" selector result
+// is referentially constant across renders (keeps useShallow from re-rendering).
+const EMPTY_MARKERS: KillMarker[] = [];
+const EMPTY_RANGES: IORange[] = [];
 
 interface ClipProps {
   clip: ClipType;
@@ -215,38 +221,41 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
   const label = asset?.name ?? '(missing media)';
   const showThumbnail = asset?.kind === 'video' && pxPerSecond(zoom) > 24;
 
-  // Use narrowed selectors so this clip only re-renders when markers/ranges
-  // for THIS asset (within this trim window) actually change. We subscribe
-  // to the stable top-level arrays, then derive the filtered slice with
-  // useMemo locally. A direct `.filter(...)` inside the zustand selector
-  // would return a fresh array reference on every store tick — Object.is
-  // would mark the value as changed and trigger a render loop.
+  // Filter markers/ranges to THIS asset+trim-window inside the selector and
+  // shallow-compare the result (useShallow). Adding a kill marker replaces the
+  // whole `markers` array, but useShallow keeps this clip from re-rendering
+  // unless ITS visible slice actually changed — so pressing M no longer
+  // re-renders every clip on the timeline. The stable EMPTY sentinels keep the
+  // common "no markers for this clip" result referentially identical.
   const assetId = asset?.id;
   const trimStart = clip.trimStart;
   const trimEnd = clip.trimEnd;
 
-  const allMarkers = useProjectStore((s) => s.markers);
-  const allRanges = useProjectStore((s) => s.ioRanges);
+  const visibleMarkers = useProjectStore(
+    useShallow((s): KillMarker[] => {
+      if (!assetId) return EMPTY_MARKERS;
+      const f = s.markers.filter(
+        (m) =>
+          m.assetId === assetId &&
+          m.time >= trimStart - 1e-6 &&
+          m.time <= trimEnd + 1e-6,
+      );
+      return f.length === 0 ? EMPTY_MARKERS : f;
+    }),
+  );
 
-  const visibleMarkers = useMemo<KillMarker[]>(() => {
-    if (!assetId) return [];
-    return allMarkers.filter(
-      (m) =>
-        m.assetId === assetId &&
-        m.time >= trimStart - 1e-6 &&
-        m.time <= trimEnd + 1e-6,
-    );
-  }, [allMarkers, assetId, trimStart, trimEnd]);
-
-  const visibleRanges = useMemo<IORange[]>(() => {
-    if (!assetId) return [];
-    return allRanges.filter(
-      (r) =>
-        r.assetId === assetId &&
-        r.outTime > trimStart - 1e-6 &&
-        r.inTime < trimEnd + 1e-6,
-    );
-  }, [allRanges, assetId, trimStart, trimEnd]);
+  const visibleRanges = useProjectStore(
+    useShallow((s): IORange[] => {
+      if (!assetId) return EMPTY_RANGES;
+      const f = s.ioRanges.filter(
+        (r) =>
+          r.assetId === assetId &&
+          r.outTime > trimStart - 1e-6 &&
+          r.inTime < trimEnd + 1e-6,
+      );
+      return f.length === 0 ? EMPTY_RANGES : f;
+    }),
+  );
 
   const pendingIn = useProjectStore((s) => s.pendingIn);
   const clipSpeed = clip.speed ?? 1;
