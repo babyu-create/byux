@@ -24,9 +24,11 @@ export interface ClipEffect {
   /** Fade duration in seconds (fade-in / fade-out). */
   duration?: number;
   /**
-   * Motion blur strength (0–100). Drives:
-   *   - preview: CSS blur radius proportional to playback speed
-   *   - export: number of frames mixed by the tmix filter
+   * Motion blur intensity (0–100). Shaped by shapeStrength() into the WebGL
+   * directional-blur shader's strength multiplier — identically for the live
+   * preview (MotionBlurCanvas) and the export renderer (motionBlurExporter via
+   * WebCodecs). Higher = longer motion trails. (Legacy CSS-blur / ffmpeg tmix
+   * behaviour no longer applies; tblend is only a fallback path.)
    */
   intensity?: number;
 }

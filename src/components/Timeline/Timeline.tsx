@@ -139,7 +139,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start);
+          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
           state.addKillMarker(ac.assetId, sourceTime);
           state.showMessage('success', `🎯 キルマーカー @ ${formatTimecode(sourceTime)}`);
           return;
@@ -151,7 +151,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start);
+          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
           const removed = state.removeNearestMarker(ac.assetId, sourceTime, 1.0);
           state.showMessage(
             removed ? 'success' : 'info',
@@ -174,7 +174,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start);
+          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
           state.setIoIn(ac.assetId, sourceTime);
           state.showMessage('success', `🟢 開始 IN @ ${formatTimecode(sourceTime)}`);
           return;
@@ -186,7 +186,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start);
+          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
           const wasPending = !!state.pendingIn;
           const id = state.setIoOut(ac.assetId, sourceTime);
           if (wasPending && id) {
@@ -205,7 +205,7 @@ export function Timeline() {
           e.preventDefault();
           const ac = findVideoActiveClip();
           if (!ac) return;
-          const sourceTime = ac.trimStart + (state.playhead - ac.start);
+          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
           const removed = state.removeNearestRange(ac.assetId, sourceTime);
           state.showMessage(
             removed ? 'success' : 'info',

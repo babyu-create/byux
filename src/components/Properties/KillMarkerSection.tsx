@@ -73,7 +73,10 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
     });
     let sourceTime = 0;
     if (activeClip) {
-      sourceTime = activeClip.trimStart + (playhead - activeClip.start);
+      // Convert timeline time → source time: multiply the timeline offset by the
+      // clip's playback speed (a 2× clip covers 2 source-seconds per timeline-
+      // second). Mirrors extractCurrentRange / jumpToAdjacentMarker in the store.
+      sourceTime = activeClip.trimStart + (playhead - activeClip.start) * (activeClip.speed ?? 1);
     }
     addMarker(asset.id, sourceTime);
   };

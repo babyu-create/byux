@@ -102,6 +102,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const projectFps = useProjectStore((s) => s.fps);
   const projectResolution = useProjectStore((s) => s.resolution);
   const projectName = useProjectStore((s) => s.name);
+  const hudPreset = useProjectStore((s) => s.hudPreset);
   const assets = useMediaStore((s) => s.assets);
 
   const [resolution, setResolution] = useState<'720p' | '1080p'>(projectResolution);
@@ -180,6 +181,10 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           fps,
           aspectRatio,
           motionBlur,
+          // Carry the preview's HUD preset into the export so the blur matches
+          // what the user saw (otherwise it silently defaulted to 'valorant').
+          motionBlurHudPreset: hudPreset,
+          motionBlurHudMaskStrength: hudPreset === 'none' ? 0 : 1,
           onProgress: ({ stage: s, percent, log }) => {
             // Update core label whenever we receive a stage update that
             // mentions the variant (FFmpeg just finished loading).

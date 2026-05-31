@@ -55,20 +55,48 @@ ipcMain.handle('updater:check', async () => {
   }
 });
 
+// Production Content-Security-Policy. Locks the renderer down so an injected
+// string (overlay text, project file, etc.) can't execute as script.
+//   - 'wasm-unsafe-eval' (NOT 'unsafe-eval') is required to instantiate
+//     ffmpeg.wasm / WebCodecs WASM; it permits WASM compilation only, not JS eval.
+//   - worker-src blob: covers the ffmpeg-core.worker.js spawned from a blob URL.
+//   - blob:/data: on img/media/connect cover object-URL video + canvas frames
+//     and the locally-fetched ffmpeg core files.
+//   - Google Fonts origins are whitelisted because index.html pulls them.
+// NOTE: only applied in production. Vite's dev server needs inline/eval + a
+// websocket for HMR, and Electron's missing-CSP warning is auto-suppressed in
+// packaged builds anyway. After changing this, smoke-test a packaged build
+// (npm run package:win) — a too-strict CSP shows as a blank window.
+const PROD_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "worker-src 'self' blob:",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' blob: data:",
+  "media-src 'self' blob:",
+  "connect-src 'self' blob: data:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'none'",
+].join('; ');
+
 // Inject COOP/COEP headers on every response so SharedArrayBuffer is
 // available — required by the multi-threaded ffmpeg.wasm build that
 // powers our export pipeline. Without these headers Chromium refuses
 // to instantiate SAB and the export falls back to single-thread (~3x
-// slower).
+// slower). In production we also attach the CSP above.
 function enableCrossOriginIsolation() {
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Cross-Origin-Opener-Policy': ['same-origin'],
-        'Cross-Origin-Embedder-Policy': ['require-corp'],
-      },
-    });
+    const responseHeaders = {
+      ...details.responseHeaders,
+      'Cross-Origin-Opener-Policy': ['same-origin'],
+      'Cross-Origin-Embedder-Policy': ['require-corp'],
+    };
+    if (!isDev) {
+      responseHeaders['Content-Security-Policy'] = [PROD_CSP];
+    }
+    callback({ responseHeaders });
   });
 }
 
@@ -87,7 +115,10 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // sandbox: true is safe here — preload.cjs only uses contextBridge +
+      // ipcRenderer, both available in the sandbox. Keeps an XSS in the
+      // renderer from reaching Node even if isolation is ever breached.
+      sandbox: true,
       webSecurity: true,
     },
   });
@@ -102,12 +133,28 @@ function createWindow() {
     }
   });
 
+  // Never open a second renderer window. http(s) links go to the OS browser;
+  // everything else (javascript:, file:, custom schemes) is denied outright.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http')) {
+    if (url.startsWith('https://') || url.startsWith('http://')) {
       shell.openExternal(url);
-      return { action: 'deny' };
     }
-    return { action: 'allow' };
+    return { action: 'deny' };
+  });
+
+  // Block the main window from navigating away from its own origin (defense in
+  // depth against an injected location change loading a local/remote page).
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    let allowed = false;
+    try {
+      const parsed = new URL(navigationUrl);
+      allowed = isDev
+        ? parsed.origin === new URL(VITE_DEV_URL).origin
+        : parsed.protocol === 'file:';
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) event.preventDefault();
   });
 
   if (isDev) {
@@ -142,6 +189,11 @@ process.on('uncaughtException', (err) => {
   // eslint-disable-next-line no-console
   console.error('[main] uncaught', err);
   if (!isDev) {
-    dialog.showErrorBox('予期しないエラー', err?.message ?? String(err));
+    // Generic user-facing text — don't surface internal paths / stack details
+    // in the dialog (they go to the console log instead).
+    dialog.showErrorBox(
+      '予期しないエラー',
+      'アプリケーションで予期しないエラーが発生しました。お手数ですが再起動してください。',
+    );
   }
 });

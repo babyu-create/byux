@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { Clip, IORange, KillMarker, PendingIn, Track } from '../lib/types';
+import type { HudPreset } from '../lib/motionBlurCore';
 import {
   clamp,
   clipDuration,
@@ -30,6 +31,13 @@ interface ProjectStoreState {
   playhead: number;
   zoom: number;
   snapEnabled: boolean;
+  /**
+   * HUD positional-protect preset for motion blur (game-specific). Lives at
+   * project scope — not Preview-local — so the export uses the SAME preset the
+   * user selected in the preview toolbar (otherwise export silently defaulted
+   * to 'valorant').
+   */
+  hudPreset: HudPreset;
   snapIndicator: { time: number; type: string } | null;
   isPlaying: boolean;
   preRollSec: number;
@@ -65,6 +73,7 @@ interface ProjectStoreState {
   zoomIn: () => void;
   zoomOut: () => void;
   toggleSnap: () => void;
+  setHudPreset: (preset: HudPreset) => void;
   splitSelectedAtPlayhead: () => void;
   setIsPlaying: (playing: boolean) => void;
   togglePlay: () => void;
@@ -148,6 +157,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   playhead: 0,
   zoom: 1,
   snapEnabled: true,
+  hudPreset: 'valorant',
   snapIndicator: null,
   isPlaying: false,
   preRollSec: 3,
@@ -355,6 +365,8 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   zoomIn: () => set((s) => ({ zoom: clamp(s.zoom * 1.4, MIN_ZOOM, MAX_ZOOM) })),
   zoomOut: () => set((s) => ({ zoom: clamp(s.zoom / 1.4, MIN_ZOOM, MAX_ZOOM) })),
   toggleSnap: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
+
+  setHudPreset: (hudPreset) => set({ hudPreset }),
 
   splitSelectedAtPlayhead: () => {
     const { selectedClipIds, playhead, splitClipAt } = get();

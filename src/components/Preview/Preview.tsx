@@ -5,26 +5,13 @@ import { clipDuration } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
 import type { Clip, MediaAsset } from '../../lib/types';
 import { MotionBlurCanvas, type HudPreset } from './MotionBlurCanvas';
+import { shapeStrength } from '../../lib/motionBlurCore';
 import { OverlayLayer } from './OverlayLayer';
 import styles from './Preview.module.css';
 
-/**
- * Gamma curve for the preview-only motion-blur strength multiplier.
- * The underlying intensity stored on the clip is the linear 0..100 from
- * the effects panel. Players experience that as "nothing happens 0-30,
- * then it pops between 70-90, then breaks". A gamma curve >1 pushes
- * more perceptible change into the middle of the range so dragging
- * 40 → 60 actually feels like a doubling, not a tiny nudge. We cap the
- * peak below the old 1.5x ceiling so high-intensity values stop short
- * of the regime where the line integral exceeds the actual scene shift.
- */
-const STRENGTH_GAMMA = 0.6;       // <1 → boost the low end
-const STRENGTH_PEAK = 1.25;       // tighter cap than the previous 1.5
-function shapeStrength(intensity01: number): number {
-  // intensity01 is the slider in 0..1; pow(x, gamma) with gamma<1 gives
-  // a curve that rises fast then plateaus, which is what the eye wants.
-  return Math.pow(Math.max(0, Math.min(1, intensity01)), STRENGTH_GAMMA) * STRENGTH_PEAK;
-}
+// Motion-blur strength shaping (shapeStrength + gamma/peak constants) now lives
+// in lib/motionBlurCore.ts so the preview and the export renderer map a clip's
+// authored intensity to the SAME shader strength. Imported above.
 
 const HUD_PRESET_LABELS: Record<HudPreset, string> = {
   valorant: 'VALORANT',
@@ -190,7 +177,10 @@ export function Preview() {
   // luma-diff mask handles the entire workload — appropriate for non-FPS
   // footage where the hard-coded HUD rectangles would falsely protect
   // moving content.
-  const [hudPreset, setHudPreset] = useState<HudPreset>('valorant');
+  // HUD preset lives in the store (project scope) so the export uses the same
+  // preset the user picks here — see projectStore.hudPreset.
+  const hudPreset = useProjectStore((s) => s.hudPreset);
+  const setHudPreset = useProjectStore((s) => s.setHudPreset);
 
 
   // Sync audio element to active audio clip + playhead (similar to video).

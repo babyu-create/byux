@@ -2,6 +2,7 @@
 // File-based assets cannot be embedded; instead we record asset metadata and
 // match by name+size when reloading.
 
+import { z } from 'zod';
 import type {
   Clip,
   IORange,
@@ -88,15 +89,141 @@ export function downloadProjectFile(project: ProjectFile, filename?: string): vo
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// --- Structural validation -------------------------------------------------
+// A project file is untrusted input (hand-edited, from another version, or a
+// different tool). Its fields flow straight into React state and the ffmpeg
+// filter-graph builder, so we validate the shape before trusting it instead of
+// casting blindly — a missing array or a NaN trim used to throw deep in
+// loadProject with no actionable message (or silently corrupt the graph).
+
+// zod v4 dropped chainable .finite(); use a refine that rejects NaN/Infinity.
+const finiteNumber = z.number().refine((n) => Number.isFinite(n), {
+  message: '有限の数値が必要です',
+});
+
+// IDs (asset/clip/track/range) are app-generated UUIDs or fixed track slugs.
+// Constrain them to a safe alphabet so a hand-edited file can't smuggle
+// filter-graph metacharacters into anything that later builds an ffmpeg arg.
+const idString = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'IDの形式が不正です');
+
+const clipEffectSchema = z.object({
+  type: z.enum(['fade-in', 'fade-out', 'motion-blur']),
+  duration: finiteNumber.optional(),
+  intensity: finiteNumber.optional(),
+});
+
+const overlaySchema = z.object({
+  id: idString,
+  text: z.string(),
+  fontSize: finiteNumber,
+  color: z.string(),
+  position: z.enum([
+    'top-left', 'top-center', 'top-right',
+    'center',
+    'bottom-left', 'bottom-center', 'bottom-right',
+  ]),
+  weight: finiteNumber.optional(),
+  italic: z.boolean().optional(),
+  outline: z.boolean().optional(),
+  outlineColor: z.string().optional(),
+  fontFamily: z.string().optional(),
+  background: z.string().optional(),
+});
+
+const clipSchema = z.object({
+  id: idString,
+  trackId: idString,
+  assetId: idString,
+  start: finiteNumber,
+  trimStart: finiteNumber,
+  trimEnd: finiteNumber,
+  speed: finiteNumber.optional(),
+  volume: finiteNumber.optional(),
+  muted: z.boolean().optional(),
+  effects: z.array(clipEffectSchema),
+  overlays: z.array(overlaySchema).optional(),
+});
+
+const trackSchema = z.object({
+  id: idString,
+  kind: z.enum(['video', 'overlay', 'audio']),
+  label: z.string(),
+  locked: z.boolean(),
+  muted: z.boolean(),
+  hidden: z.boolean(),
+});
+
+const markerSchema = z.object({
+  id: idString,
+  assetId: idString,
+  time: finiteNumber,
+  label: z.string().optional(),
+});
+
+const ioRangeSchema = z.object({
+  id: idString,
+  assetId: idString,
+  inTime: finiteNumber,
+  outTime: finiteNumber,
+  label: z.string().optional(),
+});
+
+const assetRefSchema = z.object({
+  id: idString,
+  name: z.string(),
+  size: finiteNumber,
+  kind: z.enum(['video', 'audio']),
+  duration: finiteNumber,
+});
+
+const projectFileSchema = z.object({
+  version: z.literal(1),
+  app: z.enum(['highlight-maker', 'fps-clip-editor']),
+  name: z.string(),
+  aspectRatio: z.enum(['16:9', '9:16']),
+  fps: z.union([z.literal(30), z.literal(60)]),
+  resolution: z.enum(['720p', '1080p']),
+  tracks: z.array(trackSchema),
+  clips: z.array(clipSchema),
+  markers: z.array(markerSchema),
+  ioRanges: z.array(ioRangeSchema),
+  preRollSec: finiteNumber,
+  postRollSec: finiteNumber,
+  assets: z.array(assetRefSchema),
+  createdAt: z.string(),
+});
+
 export function parseProjectFile(text: string): ProjectFile {
-  const obj = JSON.parse(text) as ProjectFile;
-  if (obj.app !== 'highlight-maker' && obj.app !== 'fps-clip-editor') {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error('プロジェクトファイルの JSON 解析に失敗しました');
+  }
+
+  // App/version checks first so the common "wrong file" case gets a friendly
+  // message instead of a wall of schema errors.
+  if (typeof raw !== 'object' || raw === null) {
     throw new Error('FPS Clip Editor のプロジェクトファイルではありません');
   }
-  if (obj.version !== 1) {
-    throw new Error(`未対応のプロジェクトバージョン: ${obj.version}`);
+  const app = (raw as { app?: unknown }).app;
+  if (app !== 'highlight-maker' && app !== 'fps-clip-editor') {
+    throw new Error('FPS Clip Editor のプロジェクトファイルではありません');
   }
-  return obj;
+  const version = (raw as { version?: unknown }).version;
+  if (version !== 1) {
+    throw new Error(`未対応のプロジェクトバージョン: ${String(version)}`);
+  }
+
+  const result = projectFileSchema.safeParse(raw);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const where = issue?.path.length ? issue.path.join('.') : '(ルート)';
+    throw new Error(
+      `プロジェクトファイルの形式が不正です: ${where} — ${issue?.message ?? '不明なエラー'}`,
+    );
+  }
+  return result.data as ProjectFile;
 }
 
 export interface ApplyResult {
