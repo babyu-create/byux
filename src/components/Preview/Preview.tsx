@@ -209,7 +209,14 @@ export function Preview() {
       ? activeAudioClip.trimStart + (playhead - activeAudioClip.start) * speed
       : 0;
     const clamped = Math.max(0, Math.min(activeAudioAsset.duration, target));
-    if (Math.abs(audio.currentTime - clamped) > 1 / 30) {
+    // Reseeking the <audio> element re-buffers it (audible click). During
+    // playback the element runs on its own clock and the playhead follows the
+    // video (the master), so correcting the few-ms drift EVERY frame produced
+    // continuous clicks that sounded like the BGM was distorting. Mirror the
+    // video: tight sync only while scrubbing; while playing, reseek only on a
+    // genuine jump (clip change / manual seek), not normal clock drift.
+    const drift = Math.abs(audio.currentTime - clamped);
+    if (drift > (isPlaying ? 0.35 : 1 / 30)) {
       audio.currentTime = clamped;
     }
     audio.playbackRate = Math.max(0.0625, Math.min(4, speed));
