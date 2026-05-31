@@ -1137,6 +1137,7 @@ export async function exportProject(
         '-crf', '18',
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
+        '-b:a', '256k',
         '-ar', '44100',
         '-ac', '2',
         '-movflags', '+faststart',
@@ -1279,15 +1280,13 @@ export async function exportProject(
       }
 
       const totalMixInputs = mixLabels.length + 1;
-      // normalize=0 keeps each source at its authored level (so BGM/SE volumes
-      // are honored), but summing gameplay + BGM + SE can exceed 0 dBFS and
-      // hard-clip ("音割れ"). A brickwall limiter on the master tames peaks.
-      // CRITICAL: level=false. alimiter's auto-level (default ON) RE-NORMALIZES
-      // the output back up to 0 dB after limiting — which re-introduces the
-      // distortion. With level=false it only attenuates peaks above `limit`,
-      // leaving ~1 dB of clean headroom.
+      // normalize=1: amix divides the summed signal by the input count, so the
+      // master can NEVER exceed the loudest input → mathematically clip-proof,
+      // with no dependency on a limiter filter (alimiter's auto-level kept
+      // re-clipping). [0:a] (the gameplay/video audio) is listed FIRST so
+      // duration=first tracks the VIDEO length, not the first BGM clip.
       const mixFilterComplex =
-        `${audioFilterParts.join(';')};${mixLabels.join('')}[0:a]amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=0[amixed];[amixed]alimiter=limit=0.9:level=0[aout]`;
+        `${audioFilterParts.join(';')};[0:a]${mixLabels.join('')}amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=1[aout]`;
 
       await ffmpeg.exec([
         '-threads', '1',
@@ -1298,6 +1297,7 @@ export async function exportProject(
         '-map', '[aout]',
         '-c:v', 'copy',
         '-c:a', 'aac',
+        '-b:a', '256k',
         '-ar', '44100',
         '-ac', '2',
         '-movflags', '+faststart',
