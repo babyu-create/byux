@@ -63,14 +63,14 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
   return (
     <div className={styles.root}>
       <div className={styles.header}>
-        <span className={styles.title}>I/O レンジ</span>
+        <span className={styles.title}>A/D レンジ</span>
         <span className={styles.count}>{ranges.length}</span>
       </div>
 
       <div className={styles.list}>
         {ranges.length === 0 && !isPending ? (
           <div className={styles.empty}>
-            再生中に <kbd>I</kbd> → <kbd>O</kbd> でレンジ追加
+            再生中に <kbd>A</kbd> → <kbd>D</kbd> でレンジ追加
           </div>
         ) : (
           <>
@@ -100,10 +100,10 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
             ))}
             {isPending && pendingIn ? (
               <div className={`${styles.row} ${styles.pending}`}>
-                <span className={styles.idx}>I</span>
+                <span className={styles.idx}>IN</span>
                 <span className={styles.time}>{formatTimecode(pendingIn.time)} – ...</span>
                 <span className={styles.pendingHint}>
-                  <kbd>O</kbd>を押して終了
+                  <kbd>D</kbd>を押して終了
                 </span>
               </div>
             ) : null}
@@ -131,7 +131,7 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
 
       {confirmOpen ? (
         <ConfirmDialog
-          title="I/Oレンジから一括カット"
+          title="A/Dレンジから一括カット"
           message={`元クリップ (${asset.name}) を削除して、${ranges.length}本のレンジクリップに置き換えます。よろしいですか？`}
           confirmLabel="生成する"
           cancelLabel="キャンセル"

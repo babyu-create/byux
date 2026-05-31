@@ -35,7 +35,7 @@ export function TimelineToolbar() {
       {pendingIn ? (
         <div
           className={styles.pendingBadge}
-          title={`開始マーク: ${pendingAssetName}\nO キーで終了マーク確定 / Shift+I で解除`}
+          title={`開始マーク: ${pendingAssetName}\nD キーで終了マーク確定 / Shift+A で解除`}
         >
           <span className={styles.pendingDot} />
           <span className={styles.pendingLabel}>IN</span>

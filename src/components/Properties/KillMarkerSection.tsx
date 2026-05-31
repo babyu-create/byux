@@ -124,7 +124,7 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
       <div className={styles.list}>
         {sortedMarkers.length === 0 ? (
           <div className={styles.empty}>
-            動画再生中に <kbd>K</kbd> キーで追加
+            動画再生中に <kbd>W</kbd> キーで追加
           </div>
         ) : (
           sortedMarkers.map((m, idx) => (

@@ -33,11 +33,11 @@ export const IORangeBar = memo(function IORangeBar({
       style={{ left: leftPx, width: widthPx }}
       onClick={handleClick}
       onPointerDown={(e) => e.stopPropagation()}
-      title="I/O レンジ"
+      title="A/D レンジ"
     >
       <div className={styles.bar} />
-      <div className={styles.bracketLeft}>I</div>
-      <div className={styles.bracketRight}>O</div>
+      <div className={styles.bracketLeft}>A</div>
+      <div className={styles.bracketRight}>D</div>
     </div>
   );
 });

@@ -40,17 +40,17 @@ export const ACTIONS: ActionDef[] = [
   { id: 'clip.delete', group: 'クリップ', label: '選択クリップを削除', defaultKey: 'delete' },
   { id: 'zoom.in', group: 'クリップ', label: 'ズームイン', defaultKey: '=' },
   { id: 'zoom.out', group: 'クリップ', label: 'ズームアウト', defaultKey: '-' },
-  // Kill markers
-  { id: 'marker.add', group: 'キルマーカー', label: '現在位置にマーカー追加', defaultKey: 'k' },
-  { id: 'marker.deleteNear', group: 'キルマーカー', label: '近傍のマーカー削除', defaultKey: 'shift+k' },
+  // Kill markers — default bound to W (rests under the FPS left hand on WASD).
+  { id: 'marker.add', group: 'キルマーカー', label: '現在位置にマーカー追加', defaultKey: 'w' },
+  { id: 'marker.deleteNear', group: 'キルマーカー', label: '近傍のマーカー削除', defaultKey: 'shift+w' },
   { id: 'marker.prev', group: 'キルマーカー', label: '前のマーカーへジャンプ', defaultKey: '[' },
   { id: 'marker.next', group: 'キルマーカー', label: '次のマーカーへジャンプ', defaultKey: ']' },
-  // I/O range cuts
-  { id: 'range.in', group: 'I/Oレンジ', label: '開始マーク (IN)', defaultKey: 'i' },
-  { id: 'range.out', group: 'I/Oレンジ', label: '終了マーク (OUT)', defaultKey: 'o' },
-  { id: 'range.clearIn', group: 'I/Oレンジ', label: '開始マーククリア', defaultKey: 'shift+i' },
-  { id: 'range.deleteNear', group: 'I/Oレンジ', label: '近傍のレンジ削除', defaultKey: 'shift+o' },
-  { id: 'range.extract', group: 'I/Oレンジ', label: '即カット', defaultKey: 'x' },
+  // A/D range cuts — IN on A, OUT on D (FPS strafe keys; were I/O).
+  { id: 'range.in', group: 'A/Dレンジ', label: '開始マーク (IN)', defaultKey: 'a' },
+  { id: 'range.out', group: 'A/Dレンジ', label: '終了マーク (OUT)', defaultKey: 'd' },
+  { id: 'range.clearIn', group: 'A/Dレンジ', label: '開始マーククリア', defaultKey: 'shift+a' },
+  { id: 'range.deleteNear', group: 'A/Dレンジ', label: '近傍のレンジ削除', defaultKey: 'shift+d' },
+  { id: 'range.extract', group: 'A/Dレンジ', label: '即カット', defaultKey: 'x' },
 ];
 
 export const DEFAULT_BINDINGS: Record<ActionId, string> = ACTIONS.reduce(

@@ -192,7 +192,7 @@ export function Timeline() {
           if (wasPending && id) {
             state.showMessage('success', `✂ レンジ完成 → ${formatTimecode(sourceTime)}`);
           } else {
-            state.showMessage('info', `🟢 開始 IN @ ${formatTimecode(sourceTime)} (Oで終了)`);
+            state.showMessage('info', `🟢 開始 IN @ ${formatTimecode(sourceTime)} (Dで終了)`);
           }
           return;
         }
@@ -218,7 +218,7 @@ export function Timeline() {
           const id = state.extractCurrentRange();
           state.showMessage(
             id ? 'success' : 'error',
-            id ? '✂ 即カット完了' : 'まずIキーで開始マークを設定',
+            id ? '✂ 即カット完了' : 'まずAキーで開始マークを設定',
           );
           return;
         }
