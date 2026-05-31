@@ -73,6 +73,35 @@
   color: var(--text);
 }
 
+.iconNavBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  transition: background var(--t-fast), color var(--t-fast), opacity var(--t-fast);
+}
+
+.iconNavBtn:hover:not(:disabled) {
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
+.iconNavBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.navDivider {
+  width: 1px;
+  align-self: stretch;
+  margin: 6px 4px;
+  background: var(--border);
+}
+
 .exportBtn {
   display: inline-flex;
   align-items: center;

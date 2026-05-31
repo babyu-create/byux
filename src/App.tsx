@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { Keyboard, Settings, FolderOpen, Save, Download } from 'lucide-react';
+import { Keyboard, Settings, FolderOpen, Save, Download, Undo2, Redo2 } from 'lucide-react';
 import { MediaLibrary } from './components/MediaLibrary/MediaLibrary';
 import { Preview } from './components/Preview/Preview';
 import { PropertiesPanel } from './components/Properties/PropertiesPanel';
@@ -18,7 +18,7 @@ const SettingsDialog = lazy(() =>
 const ExportDialog = lazy(() =>
   import('./components/Export/ExportDialog').then((m) => ({ default: m.ExportDialog })),
 );
-import { useProjectStore } from './stores/projectStore';
+import { useProjectStore, undo, redo, useCanUndo, useCanRedo, clearHistory } from './stores/projectStore';
 import { useMediaStore } from './stores/mediaStore';
 import {
   buildAssetIdMap,
@@ -57,6 +57,8 @@ function App() {
       (c) => s.tracks.find((t) => t.id === c.trackId)?.kind === 'video',
     ),
   );
+  const canUndo = useCanUndo();
+  const canRedo = useCanRedo();
 
   const handleSaveProject = () => {
     const ps = useProjectStore.getState();
@@ -97,6 +99,7 @@ function App() {
       const ms = useMediaStore.getState();
       const { idMap, missingAssetIds } = buildAssetIdMap(project.assets, ms.assets);
       ps.loadProject(project, idMap);
+      clearHistory(); // a freshly loaded project is the new baseline
       if (missingAssetIds.length > 0) {
         ps.showMessage(
           'info',
@@ -121,9 +124,17 @@ function App() {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+      if (mod && key === 's') {
         e.preventDefault();
         handleSaveProject();
+      } else if (mod && key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        redo();
       } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
         e.preventDefault();
         setHelpOpen((v) => !v);
@@ -177,6 +188,27 @@ function App() {
           <span className={styles.versionTag}>v1.0</span>
         </div>
         <nav className={styles.headerNav}>
+          <button
+            type="button"
+            className={styles.iconNavBtn}
+            onClick={undo}
+            disabled={!canUndo}
+            title="元に戻す (Ctrl+Z)"
+            aria-label="元に戻す"
+          >
+            <Undo2 size={16} strokeWidth={2} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className={styles.iconNavBtn}
+            onClick={redo}
+            disabled={!canRedo}
+            title="やり直す (Ctrl+Shift+Z)"
+            aria-label="やり直す"
+          >
+            <Redo2 size={16} strokeWidth={2} aria-hidden="true" />
+          </button>
+          <span className={styles.navDivider} aria-hidden="true" />
           <button
             type="button"
             className={styles.navBtn}

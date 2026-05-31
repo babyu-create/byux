@@ -23,6 +23,44 @@
   overflow: hidden;
 }
 
+.reframeGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.reframeLabel {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.reframeSlider {
+  width: 96px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.reframeReset {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-2);
+  transition: color var(--t-fast), background var(--t-fast);
+}
+
+.reframeReset:hover {
+  color: var(--accent);
+}
+
 .aspectBtn {
   padding: 4px 10px;
   font-size: 11px;

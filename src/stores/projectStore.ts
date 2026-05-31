@@ -1,4 +1,5 @@
-import { create } from 'zustand';
+import { create, useStore } from 'zustand';
+import { temporal } from 'zundo';
 import type { Clip, IORange, KillMarker, PendingIn, Track } from '../lib/types';
 import type { HudPreset } from '../lib/motionBlurCore';
 import {
@@ -38,6 +39,12 @@ interface ProjectStoreState {
    * to 'valorant').
    */
   hudPreset: HudPreset;
+  /**
+   * Horizontal reframe for 9:16 vertical export, -1 (left) .. 0 (center) .. 1
+   * (right). When the 16:9 source is cropped to fill a vertical frame, this
+   * pans which slice is kept so the action/crosshair stays in view.
+   */
+  verticalReframe: number;
   snapIndicator: { time: number; type: string } | null;
   isPlaying: boolean;
   preRollSec: number;
@@ -74,6 +81,7 @@ interface ProjectStoreState {
   zoomOut: () => void;
   toggleSnap: () => void;
   setHudPreset: (preset: HudPreset) => void;
+  setVerticalReframe: (value: number) => void;
   splitSelectedAtPlayhead: () => void;
   setIsPlaying: (playing: boolean) => void;
   togglePlay: () => void;
@@ -145,7 +153,64 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 8;
 const MIN_CLIP_DURATION = 0.1;
 
-export const useProjectStore = create<ProjectStoreState>((set, get) => ({
+// --- Undo / redo (zundo temporal) ------------------------------------------
+// Only the editable "document" is undoable; ephemeral UI state (playhead,
+// zoom, selection, isPlaying, transient messages, export prefs) is excluded so
+// playback/scrubbing never pollute history.
+type DocState = Pick<
+  ProjectStoreState,
+  | 'name' | 'aspectRatio' | 'fps' | 'resolution'
+  | 'tracks' | 'clips' | 'markers' | 'ioRanges'
+  | 'preRollSec' | 'postRollSec'
+>;
+
+function partializeDoc(s: ProjectStoreState): DocState {
+  return {
+    name: s.name,
+    aspectRatio: s.aspectRatio,
+    fps: s.fps,
+    resolution: s.resolution,
+    tracks: s.tracks,
+    clips: s.clips,
+    markers: s.markers,
+    ioRanges: s.ioRanges,
+    preRollSec: s.preRollSec,
+    postRollSec: s.postRollSec,
+  };
+}
+
+// Reference equality per doc field — the store mutates immutably, so a changed
+// ref means a real edit. Lets temporal skip non-doc sets (playhead @60fps,
+// selection, …) cheaply without deep comparison.
+function docEqual(a: DocState, b: DocState): boolean {
+  return (
+    a.name === b.name &&
+    a.aspectRatio === b.aspectRatio &&
+    a.fps === b.fps &&
+    a.resolution === b.resolution &&
+    a.tracks === b.tracks &&
+    a.clips === b.clips &&
+    a.markers === b.markers &&
+    a.ioRanges === b.ioRanges &&
+    a.preRollSec === b.preRollSec &&
+    a.postRollSec === b.postRollSec
+  );
+}
+
+// Coalesce rapid edits (clip/slider drags fire ~60/s) into a single history
+// entry by debouncing when temporal records. 150ms groups per-frame drags
+// while staying well under human undo-reaction time.
+function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): (...args: A) => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return (...args: A) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+export const useProjectStore = create<ProjectStoreState>()(
+  temporal(
+    (set, get) => ({
   name: 'untitled',
   aspectRatio: '16:9',
   fps: 60,
@@ -159,6 +224,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   zoom: 1,
   snapEnabled: true,
   hudPreset: 'valorant',
+  verticalReframe: 0,
   snapIndicator: null,
   isPlaying: false,
   preRollSec: 3,
@@ -368,6 +434,9 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   toggleSnap: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
 
   setHudPreset: (hudPreset) => set({ hudPreset }),
+
+  setVerticalReframe: (value) =>
+    set({ verticalReframe: Math.max(-1, Math.min(1, value)) }),
 
   splitSelectedAtPlayhead: () => {
     const { selectedClipIds, playhead, splitClipAt } = get();
@@ -902,7 +971,15 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       activeClip.start + (target.time - activeClip.trimStart) / clipSpeed;
     set({ playhead: Math.max(0, newPlayhead), selectedMarkerId: target.id });
   },
-}));
+    }),
+    {
+      partialize: partializeDoc,
+      equality: docEqual,
+      limit: 100,
+      handleSet: (handleSet) => debounce(handleSet, 150),
+    },
+  ),
+);
 
 // Derive the reduced number INSIDE the selector so Zustand's Object.is
 // comparison runs on the scalar result rather than the clips array. The
@@ -913,3 +990,18 @@ export const useTimelineDuration = (): number =>
   useProjectStore((s) =>
     s.clips.reduce((max, c) => Math.max(max, c.start + clipDuration(c)), 0),
   );
+
+// --- Undo / redo public API -------------------------------------------------
+/** Revert the last document edit. */
+export const undo = (): void => useProjectStore.temporal.getState().undo();
+/** Re-apply the last undone edit. */
+export const redo = (): void => useProjectStore.temporal.getState().redo();
+/** Clear undo/redo history (e.g. after loading a project). */
+export const clearHistory = (): void => useProjectStore.temporal.getState().clear();
+
+/** Reactive: is there anything to undo? */
+export const useCanUndo = (): boolean =>
+  useStore(useProjectStore.temporal, (s) => s.pastStates.length > 0);
+/** Reactive: is there anything to redo? */
+export const useCanRedo = (): boolean =>
+  useStore(useProjectStore.temporal, (s) => s.futureStates.length > 0);

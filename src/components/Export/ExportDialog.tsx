@@ -104,6 +104,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const projectResolution = useProjectStore((s) => s.resolution);
   const projectName = useProjectStore((s) => s.name);
   const hudPreset = useProjectStore((s) => s.hudPreset);
+  const verticalReframe = useProjectStore((s) => s.verticalReframe);
   const assets = useMediaStore((s) => s.assets);
 
   const [resolution, setResolution] = useState<'720p' | '1080p'>(projectResolution);
@@ -186,6 +187,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           // what the user saw (otherwise it silently defaulted to 'valorant').
           motionBlurHudPreset: hudPreset,
           motionBlurHudMaskStrength: hudPreset === 'none' ? 0 : 1,
+          verticalReframe,
           onProgress: ({ stage: s, percent, log }) => {
             // Update core label whenever we receive a stage update that
             // mentions the variant (FFmpeg just finished loading).

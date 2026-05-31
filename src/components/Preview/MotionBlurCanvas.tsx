@@ -51,6 +51,12 @@ interface MotionBlurCanvasProps {
    * Optional — defaults to the canvas aspect when unset.
    */
   aspect?: number;
+  /**
+   * When set (a CSS object-position like "30% 50%"), the canvas is displayed
+   * with object-fit:cover at that position so the blur layer crops to match a
+   * vertical (9:16) cover-cropped video instead of stretching to the frame.
+   */
+  coverPosition?: string;
 }
 
 /**
@@ -93,6 +99,7 @@ export function MotionBlurCanvas({
   hudPreset = 'valorant',
   hudMaskStrength = 1,
   aspect,
+  coverPosition,
 }: MotionBlurCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // Refs so the RAF loop reads the latest values without re-running the effect.
@@ -364,6 +371,7 @@ export function MotionBlurCanvas({
     <canvas
       ref={canvasRef}
       className={styles.canvas}
+      style={coverPosition ? { objectFit: 'cover', objectPosition: coverPosition } : undefined}
       aria-hidden="true"
     />
   );

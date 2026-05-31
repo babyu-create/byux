@@ -48,6 +48,8 @@ export function Preview() {
   const setIsPlaying = useProjectStore((s) => s.setIsPlaying);
   const togglePlay = useProjectStore((s) => s.togglePlay);
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
+  const verticalReframe = useProjectStore((s) => s.verticalReframe);
+  const setVerticalReframe = useProjectStore((s) => s.setVerticalReframe);
   const totalDuration = useTimelineDuration();
 
   const videoTrack = useMemo(
@@ -112,6 +114,16 @@ export function Preview() {
   // frame, matching the motion-blur canvas (which already fills) and the
   // exported result. See Clip.stretchToFill.
   const stretchActive = activeClip?.stretchToFill ?? false;
+  // Vertical (9:16) preview fills by cropping the landscape source (object-fit
+  // cover) and pans with verticalReframe — mirrors the export crop so what you
+  // frame here is what you get.
+  const isVertical = aspectRatio === '9:16';
+  const reframePosition = `${(((verticalReframe + 1) / 2) * 100).toFixed(1)}% 50%`;
+  const videoStyle: React.CSSProperties | undefined = isVertical
+    ? { objectFit: 'cover', objectPosition: reframePosition }
+    : stretchActive
+      ? { objectFit: 'fill' }
+      : undefined;
 
   // Preview-only multiplier on the canvas strength. Lets the user dial in
   // the look during preview without touching the per-clip intensity stored
@@ -458,6 +470,30 @@ export function Preview() {
             9:16
           </button>
         </div>
+        {isVertical ? (
+          <div className={styles.reframeGroup} title="9:16クロップの横位置">
+            <span className={styles.reframeLabel}>横位置</span>
+            <input
+              type="range"
+              min={-1}
+              max={1}
+              step={0.02}
+              value={verticalReframe}
+              onChange={(e) => setVerticalReframe(parseFloat(e.target.value))}
+              className={styles.reframeSlider}
+              aria-label="9:16クロップの横位置 (左から右)"
+            />
+            <button
+              type="button"
+              className={styles.reframeReset}
+              onClick={() => setVerticalReframe(0)}
+              title="中央に戻す"
+              aria-label="中央に戻す"
+            >
+              中央
+            </button>
+          </div>
+        ) : null}
         {motionBlur && motionBlurStrength > 0 ? (
           <div className={styles.blurControls}>
             <span className={styles.blurLabel} aria-hidden="true">HUD</span>
@@ -532,7 +568,7 @@ export function Preview() {
                 ref={videoRef}
                 src={displayAsset?.url}
                 className={styles.video}
-                style={stretchActive ? { objectFit: 'fill' } : undefined}
+                style={videoStyle}
                 playsInline
                 muted={videoTrackMuted}
                 onClick={togglePlay}
@@ -545,6 +581,7 @@ export function Preview() {
                 hudPreset={hudPreset}
                 hudMaskStrength={hudPreset === 'none' ? 0 : 1}
                 aspect={aspectRatio === '9:16' ? 9 / 16 : 16 / 9}
+                coverPosition={isVertical ? reframePosition : undefined}
               />
               {fadeOpacity > 0 ? (
                 <div

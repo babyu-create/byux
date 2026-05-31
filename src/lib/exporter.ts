@@ -43,6 +43,12 @@ export interface ExportOptions {
   motionBlurHudPreset?: HudPreset;
   /** HUD mask attenuation 0..1. Defaults to 1 (0 when preset is 'none'). */
   motionBlurHudMaskStrength?: number;
+  /**
+   * Horizontal reframe (-1..1, 0=center) used only for a vertical (9:16)
+   * output: the landscape source is scaled to cover and cropped, and this
+   * pans which horizontal slice is kept. Ignored for landscape output.
+   */
+  verticalReframe?: number;
   onProgress?: (info: { stage: string; percent: number; log?: string }) => void;
 }
 
@@ -343,6 +349,8 @@ interface ClipFilterSpec {
   height: number;
   targetFps: number;
   videoTrackMuted: boolean;
+  /** Horizontal reframe -1..1 for vertical (portrait) crop-to-fill. */
+  reframe: number;
   vOutLabel: string;
   aOutLabel: string;
 }
@@ -356,7 +364,7 @@ interface ClipFilterSpec {
  */
 function buildClipFilters(spec: ClipFilterSpec): string {
   const { inputIndex, clip, asset, width, height, targetFps } = spec;
-  const { videoTrackMuted, vOutLabel, aOutLabel } = spec;
+  const { videoTrackMuted, reframe, vOutLabel, aOutLabel } = spec;
 
   const speed = clip.speed ?? 1;
   const clipMuted = clip.muted ?? false;
@@ -373,11 +381,23 @@ function buildClipFilters(spec: ClipFilterSpec): string {
 
   // Skip identity scale — even a no-op scale touches every pixel in WASM.
   const sourceMatchesOutput = asset.width === width && asset.height === height;
+  const outIsPortrait = height > width;
+  const srcW = asset.width ?? 0;
+  const srcH = asset.height ?? 0;
+  const srcWiderThanOut =
+    srcW > 0 && srcH > 0 && srcW / srcH > width / height + 1e-3;
   if (clip.stretchToFill) {
     // Stretch-to-fill: scale to the exact output dimensions IGNORING aspect
     // ratio (non-uniform). Reproduces VALORANT "stretched" play — a 4:3
     // recording (e.g. 1440x1080) becomes a full 16:9 frame, wider, no bars.
     vFilters.push(`scale=${width}:${height}`);
+  } else if (outIsPortrait && srcWiderThanOut) {
+    // Vertical (9:16) fill: scale the landscape source to COVER the portrait
+    // frame, then crop horizontally. `reframe` (-1..1) pans the kept slice so
+    // the crosshair/action stays in view (t: -1→left edge, 0→center, 1→right).
+    const t = ((Math.max(-1, Math.min(1, reframe)) + 1) / 2).toFixed(4);
+    vFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=increase`);
+    vFilters.push(`crop=${width}:${height}:(iw-ow)*${t}:(ih-oh)/2`);
   } else if (!sourceMatchesOutput) {
     vFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=decrease`);
     vFilters.push(`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`);
@@ -986,6 +1006,7 @@ export async function exportProject(
             height,
             targetFps,
             videoTrackMuted,
+            reframe: options.verticalReframe ?? 0,
             vOutLabel: vLabel,
             aOutLabel: aLabel,
           }),
