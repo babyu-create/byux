@@ -116,6 +116,14 @@ export function PropertiesPanel() {
               ) : null}
             </>
           ) : null}
+          {selectedClipIds.length > 1 ? (
+            // Multi-select: per-clip sliders make no sense, but the WHOLE point
+            // of presets is grading many clips identically — so keep an
+            // apply-only preset panel reachable (no single `clip` to save from).
+            <div className={styles.markerSlot}>
+              <ClipPresetsSection />
+            </div>
+          ) : null}
           {asset.kind === 'video' ? (
             <>
               <div className={styles.markerSlot}>

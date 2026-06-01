@@ -13,8 +13,12 @@ import {
 import styles from './ClipPresetsSection.module.css';
 
 interface ClipPresetsSectionProps {
-  /** The single selected clip whose look can be SAVED as a new preset. */
-  clip: Clip;
+  /**
+   * The single selected clip whose look can be SAVED as a new preset. Omitted in
+   * multi-select mode, where the panel becomes apply-only (you can't save the
+   * look of "many" clips, but you CAN apply a saved preset to all of them).
+   */
+  clip?: Clip;
 }
 
 /**
@@ -22,6 +26,12 @@ interface ClipPresetsSectionProps {
  * clip's look (transform / color grade / effects / text / transitions / speed)
  * as a named preset and one-click apply any saved preset to ALL selected clips.
  * The library is persisted to localStorage via lib/presets (pure, validated).
+ *
+ * Two modes:
+ * - single-select (`clip` provided): save the clip's look AND apply presets.
+ * - multi-select (`clip` omitted): apply-only — the whole point of presets is
+ *   grading many clips identically, so the apply path must stay reachable when
+ *   more than one clip is selected.
  */
 export function ClipPresetsSection({ clip }: ClipPresetsSectionProps) {
   const applyPresetToClips = useProjectStore((s) => s.applyPresetToClips);
@@ -38,12 +48,16 @@ export function ClipPresetsSection({ clip }: ClipPresetsSectionProps) {
     savePresets(next);
   }, []);
 
-  // A clip with a default (untouched) look has nothing worth saving.
-  const canSave = useMemo(() => !looksEmpty(extractClipLook(clip)), [clip]);
+  // A clip with a default (untouched) look has nothing worth saving. In
+  // multi-select mode there is no single clip, so saving is unavailable.
+  const canSave = useMemo(
+    () => (clip ? !looksEmpty(extractClipLook(clip)) : false),
+    [clip],
+  );
   const targetCount = selectedClipIds.length || 1;
 
   const handleSave = () => {
-    if (!canSave) {
+    if (!clip || !canSave) {
       showMessage('info', 'このクリップにはまだ保存できるルックがありません');
       return;
     }
@@ -54,7 +68,8 @@ export function ClipPresetsSection({ clip }: ClipPresetsSectionProps) {
   };
 
   const handleApply = (preset: ClipPreset) => {
-    const ids = selectedClipIds.length > 0 ? selectedClipIds : [clip.id];
+    const ids =
+      selectedClipIds.length > 0 ? selectedClipIds : clip ? [clip.id] : [];
     const applied = applyPresetToClips(ids, preset.look);
     if (applied > 0) {
       showMessage('success', `「${preset.name}」を${applied}クリップに適用`);
@@ -76,30 +91,36 @@ export function ClipPresetsSection({ clip }: ClipPresetsSectionProps) {
         </span>
       </div>
 
-      <div className={styles.saveRow}>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') handleSave();
-          }}
-          className={styles.nameInput}
-          placeholder="プリセット名（例: シネマ寄り）"
-          maxLength={60}
-          aria-label="プリセット名"
-        />
-        <button
-          type="button"
-          className={styles.saveBtn}
-          onClick={handleSave}
-          disabled={!canSave}
-          title={canSave ? 'このクリップのルックを保存' : '保存できるルックがありません'}
-        >
-          <Plus size={14} strokeWidth={2.4} aria-hidden="true" />
-          保存
-        </button>
-      </div>
+      {clip ? (
+        <div className={styles.saveRow}>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleSave();
+            }}
+            className={styles.nameInput}
+            placeholder="プリセット名（例: シネマ寄り）"
+            maxLength={60}
+            aria-label="プリセット名"
+          />
+          <button
+            type="button"
+            className={styles.saveBtn}
+            onClick={handleSave}
+            disabled={!canSave}
+            title={canSave ? 'このクリップのルックを保存' : '保存できるルックがありません'}
+          >
+            <Plus size={14} strokeWidth={2.4} aria-hidden="true" />
+            保存
+          </button>
+        </div>
+      ) : (
+        <div className={styles.applyAllNote}>
+          選択中の{targetCount}クリップに一括適用できます
+        </div>
+      )}
 
       {presets.length === 0 ? (
         <div className={styles.empty}>
