@@ -11,6 +11,7 @@ import { ClipColorSection } from './ClipColorSection';
 import { ClipTransitionSection } from './ClipTransitionSection';
 import { ClipVolumeSection } from './ClipVolumeSection';
 import { ClipOverlaysSection } from './ClipOverlaysSection';
+import { ClipPresetsSection } from './ClipPresetsSection';
 import { BeatDetectionSection } from './BeatDetectionSection';
 import { AudioDuckingSection } from './AudioDuckingSection';
 import styles from './PropertiesPanel.module.css';
@@ -106,6 +107,11 @@ export function PropertiesPanel() {
               {selectedClip.assetId && selectedClipTrackKind !== 'audio' ? (
                 <div className={styles.markerSlot}>
                   <ClipOverlaysSection clip={selectedClip} />
+                </div>
+              ) : null}
+              {selectedClipTrackKind !== 'audio' ? (
+                <div className={styles.markerSlot}>
+                  <ClipPresetsSection clip={selectedClip} />
                 </div>
               ) : null}
             </>

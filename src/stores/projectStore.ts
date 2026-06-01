@@ -3,6 +3,7 @@ import { temporal } from 'zundo';
 import type { Clip, IORange, KillMarker, PendingIn, Track } from '../lib/types';
 import type { HudPreset } from '../lib/motionBlurCore';
 import type { AudioDucking } from '../lib/audioDucking';
+import { applyClipLook } from '../lib/presets';
 import {
   clamp,
   clipDuration,
@@ -168,6 +169,16 @@ interface ProjectStoreState {
     clipIds: string[],
     overlay: import('../lib/types').OverlayText,
   ) => void;
+  /**
+   * Apply a saved clip-look preset (Phase P6) to one or more clips. The clips'
+   * identity / placement / audio are preserved; their visual look (transform,
+   * color grade, effects, text overlays, transitions, speed) is replaced by the
+   * preset's. Clips on locked tracks are skipped. See lib/presets.
+   */
+  applyPresetToClips: (
+    clipIds: string[],
+    look: import('../lib/presets').ClipLook,
+  ) => number;
   loadProject: (file: import('../lib/project').ProjectFile, idMap: Record<string, string>) => void;
   /** Pending asset references from a loaded project, used to auto-relink later. */
   expectedAssets: import('../lib/project').ProjectAssetRef[];
@@ -1011,6 +1022,24 @@ export const useProjectStore = create<ProjectStoreState>()(
           : c,
       ),
     }));
+  },
+
+  applyPresetToClips: (clipIds, look) => {
+    const targetIds = new Set(clipIds);
+    let applied = 0;
+    set((state) => {
+      const lockedTrackIds = new Set(
+        state.tracks.filter((t) => t.locked).map((t) => t.id),
+      );
+      const clips = state.clips.map((c) => {
+        if (!targetIds.has(c.id)) return c;
+        if (lockedTrackIds.has(c.trackId)) return c; // skip locked tracks
+        applied += 1;
+        return applyClipLook(c, look);
+      });
+      return applied > 0 ? { clips } : state;
+    });
+    return applied;
   },
 
   loadProject: (file, idMap) => {
