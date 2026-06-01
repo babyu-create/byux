@@ -138,6 +138,10 @@ interface ProjectStoreState {
     clipId: string,
     transform: import('../lib/types').ClipTransform,
   ) => void;
+  setClipColorGrade: (
+    clipId: string,
+    grade: import('../lib/types').ColorGrade | null,
+  ) => void;
   toggleClipMuted: (clipId: string) => void;
   addClipOverlay: (clipId: string, overlay: import('../lib/types').OverlayText) => void;
   updateClipOverlay: (
@@ -877,6 +881,28 @@ export const useProjectStore = create<ProjectStoreState>()(
         clips: state.clips.map((c) =>
           c.id === clipId ? { ...c, transform } : c,
         ),
+      };
+    });
+  },
+
+  setClipColorGrade: (clipId, grade) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      return {
+        clips: state.clips.map((c) => {
+          if (c.id !== clipId) return c;
+          if (grade === null) {
+            // Drop the grade entirely so the clip reverts to neutral and
+            // serialises back to a grade-free (backward-compatible) shape.
+            const { colorGrade: _drop, ...rest } = c;
+            void _drop;
+            return rest;
+          }
+          return { ...c, colorGrade: grade };
+        }),
       };
     });
   },

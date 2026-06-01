@@ -24,6 +24,31 @@ export interface ClipTransform {
   opacity?: Animatable;
 }
 
+/** One-click color-grade preset names. 'none' = neutral (no grade). */
+export type ColorGradePreset = 'none' | 'cinema' | 'vivid' | 'cool' | 'warm' | 'mono';
+
+/**
+ * Lightweight per-clip color grade (Phase P2). A named one-click preset plus a
+ * few optional fine knobs, mapped by lib/colorGrade to a SINGLE CSS/Canvas2D
+ * `filter` string applied identically by the live Preview (CSS `filter:`) and
+ * the WebCodecs export (Canvas2D `ctx.filter`), so the look matches. Fine knobs
+ * are authored in [-100, 100] as a nudge around neutral (0 = no change). All
+ * fields optional so older projects without a grade stay valid (backward
+ * compatible).
+ */
+export interface ColorGrade {
+  /** Named preset (defaults to 'none'). */
+  preset?: ColorGradePreset;
+  /** Exposure / brightness nudge, -100..100 (0 = unchanged). */
+  exposure?: number;
+  /** Contrast nudge, -100..100 (0 = unchanged). */
+  contrast?: number;
+  /** Saturation nudge, -100..100 (0 = unchanged, -100 = grayscale-ish). */
+  saturation?: number;
+  /** Temperature shift, -100 (cool) .. 100 (warm), 0 = neutral. */
+  temperature?: number;
+}
+
 export interface MediaAsset {
   id: string;
   name: string;
@@ -110,6 +135,8 @@ export interface Clip {
   stretchToFill?: boolean;
   /** Animatable transform (position / scale / rotation / opacity). */
   transform?: ClipTransform;
+  /** One-click color grade / LUT-style preset + fine knobs (see lib/colorGrade). */
+  colorGrade?: ColorGrade;
   effects: ClipEffect[];
   overlays?: OverlayText[];
 }

@@ -57,28 +57,44 @@ export class OffscreenTransformRenderer {
    * was composited into (already at output resolution, top-left origin). The
    * caller feeds it to a VideoFrame; the canvas is reused next call.
    *
+   * `filter` is an optional CSS-syntax filter string (from lib/colorGrade →
+   * gradeToFilter) applied as Canvas2D `ctx.filter` while drawing the frame, so
+   * the export bakes the EXACT same color grade the preview shows as a CSS
+   * `filter`. Pass undefined / 'none' for an ungraded clip (no filter applied).
+   * The black background fill is drawn UNFILTERED so a grade never tints the
+   * letterbox / uncovered areas — only the footage pixels are graded.
+   *
    * The source frame MUST already be at the output resolution (the export
    * normalises clips to the output geometry before this pass), so the matrix
    * maps frame-pixels → frame-pixels directly.
    */
-  drawFrame(source: TransformFrameSource, t: ResolvedTransform): HTMLCanvasElement {
+  drawFrame(
+    source: TransformFrameSource,
+    t: ResolvedTransform,
+    filter?: string,
+  ): HTMLCanvasElement {
     if (this.disposed) throw new Error('OffscreenTransformRenderer: used after dispose()');
     const { ctx } = this;
     // Black background so uncovered areas (scale<1, translate off-frame) match
-    // the preview's frame background instead of leaving stale pixels.
+    // the preview's frame background instead of leaving stale pixels. Drawn
+    // before any filter so the grade only touches the footage, not the bars.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
+    ctx.filter = 'none';
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, this.width, this.height);
 
     const [a, b, c, d, e, f] = transformToMatrix(t, this.width, this.height);
     ctx.setTransform(a, b, c, d, e, f);
     ctx.globalAlpha = Math.max(0, Math.min(1, t.opacity));
+    // Apply the color-grade filter only to the footage draw (CSS-equivalent).
+    ctx.filter = filter && filter !== 'none' ? filter : 'none';
     ctx.drawImage(source, 0, 0, this.width, this.height);
 
     // Restore defaults so a partial-failure next call can't inherit state.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
+    ctx.filter = 'none';
     return this.canvas;
   }
 

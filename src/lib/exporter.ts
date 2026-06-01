@@ -26,6 +26,7 @@ import {
   sampleClipTransform,
   type ResolvedTransform,
 } from './clipTransform';
+import { clipHasColorGrade, colorGradeFilter } from './colorGrade';
 import {
   hasSpeedRamp,
   makeRampSampler,
@@ -318,6 +319,10 @@ function canStreamCopy(
   // An animated/positioned clip transform is baked per-frame (WebCodecs pass)
   // → can't stream-copy.
   if (clipHasTransform(clip.transform)) return false;
+
+  // A color grade is baked per-frame (shares the WebCodecs transform pass)
+  // → can't stream-copy.
+  if (clipHasColorGrade(clip.colorGrade)) return false;
 
   // Text overlays are composited via a filter pass → can't stream-copy.
   if (clip.overlays && clip.overlays.length > 0) return false;
@@ -847,6 +852,24 @@ export function clipTransformAtOutputTime(
 }
 
 /**
+ * Resolve the CSS/Canvas2D color-grade filter string that applies at
+ * output-timeline time `tOut`. The grade is per-clip and NOT keyframed, so this
+ * just finds the owning segment and maps its clip's grade to a filter string
+ * (lib/colorGrade), exactly mirroring the preview (CSS `filter` on the footage
+ * layer). Returns 'none' outside any segment or for an ungraded clip.
+ */
+export function colorGradeFilterAtOutputTime(
+  segments: TransformSegment[],
+  tOut: number,
+): string {
+  let seg = segments.find((s) => tOut >= s.start - 1e-6 && tOut < s.end - 1e-6);
+  if (!seg && segments.length > 0) {
+    seg = segments[segments.length - 1];
+  }
+  return colorGradeFilter(seg?.clip.colorGrade);
+}
+
+/**
  * Apply the preview-matching clip transform to `videoInput` per frame.
  *
  * Pipeline mirrors applyWebglMotionBlur: decode each frame natively from a
@@ -925,9 +948,10 @@ async function applyTransformPass(
       await withTimeout(seekVideo(video, t), 10000, `フレーム seek #${i}`);
 
       const resolved = clipTransformAtOutputTime(segments, t);
+      const filter = colorGradeFilterAtOutputTime(segments, t);
       let frame: VideoFrame | null = null;
       try {
-        const canvas = renderer.drawFrame(video, resolved);
+        const canvas = renderer.drawFrame(video, resolved, filter);
         frame = new VideoFrame(canvas, {
           timestamp: i * frameDurUs,
           duration: frameDurUs,
@@ -1620,21 +1644,24 @@ export async function exportProject(
       }
 
       // ---------------------------------------------------------------------
-      // Clip-transform pass (after blur, before text → text stays anchored to
-      // the frame, untransformed, exactly like the preview overlay layers).
-      // Bakes the animated position/scale/rotation/opacity per frame via
-      // WebCodecs so the export matches the preview. Skipped entirely when no
-      // included clip has a transform (zero cost for the common case).
+      // Clip-transform + color-grade pass (after blur, before text → text stays
+      // anchored to the frame, untransformed/ungraded, like the preview overlay
+      // layers). Bakes the animated position/scale/rotation/opacity AND the
+      // one-click color grade per frame via WebCodecs (Canvas2D matrix +
+      // ctx.filter) so the export matches the preview. Skipped entirely when no
+      // included clip has a transform OR a color grade (zero cost for the
+      // common case).
       //
       // LIMITATION: this is a WebCodecs (per-frame decode→canvas→encode) pass,
       // like the motion-blur one. There is no ffmpeg-filter equivalent here, so
       // for very long timelines (> MAX_WEBGL_BLUR_FRAMES) or when WebCodecs is
-      // unavailable we SKIP the transform (export the untransformed footage)
-      // rather than ship a tblend-style approximation — a clip transform can't
-      // be reproduced by tblend at all. The preview still shows it correctly.
+      // unavailable we SKIP the pass (export the untransformed/ungraded footage)
+      // rather than ship an approximation. The preview still shows it correctly.
       // ---------------------------------------------------------------------
-      const transformSegments: TransformSegment[] = includedTimeline.filter((seg) =>
-        clipHasTransform(seg.clip.transform),
+      const transformSegments: TransformSegment[] = includedTimeline.filter(
+        (seg) =>
+          clipHasTransform(seg.clip.transform) ||
+          clipHasColorGrade(seg.clip.colorGrade),
       );
       if (transformSegments.length > 0) {
         const transformFrames = Math.ceil(totalVideoSeconds * targetFps);
@@ -1642,13 +1669,13 @@ export async function exportProject(
           const msg = `[exporter] clip transform: ~${transformFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping transform (preview-only for this export)`;
           console.warn(msg);
           options.onProgress?.({
-            stage: 'トランスフォーム: 長尺のためスキップ（プレビューのみ）',
+            stage: 'トランスフォーム/カラー: 長尺のためスキップ（プレビューのみ）',
             percent: -1,
             log: msg,
           });
         } else {
           try {
-            options.onProgress?.({ stage: 'トランスフォーム適用中', percent: -1 });
+            options.onProgress?.({ stage: 'トランスフォーム/カラー適用中', percent: -1 });
             videoOutput = await applyTransformPass(ffmpeg, videoOutput, {
               width,
               height,

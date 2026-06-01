@@ -9,6 +9,7 @@ import { MotionBlurCanvas, type HudPreset } from './MotionBlurCanvas';
 import { shapeStrength } from '../../lib/motionBlurCore';
 import { OverlayLayer } from './OverlayLayer';
 import { sampleClipTransform, transformToCss } from '../../lib/clipTransform';
+import { colorGradeFilter } from '../../lib/colorGrade';
 import {
   hasSpeedRamp,
   makeRampSampler,
@@ -245,6 +246,16 @@ export function Preview() {
       opacity: Math.max(0, Math.min(1, r.opacity)),
     };
   }, [activeClip, playhead]);
+
+  // One-click color grade (Phase P2) → a single CSS `filter` applied to the
+  // footage layer (the <video> AND the MotionBlurCanvas together, since both
+  // live inside .footageLayer). The export bakes the SAME filter string per
+  // frame (lib/colorGrade → OffscreenTransformRenderer.ctx.filter) for parity.
+  // 'none' (neutral grade) leaves the layer un-filtered.
+  const footageFilter = useMemo(() => {
+    const f = colorGradeFilter(activeClip?.colorGrade);
+    return f === 'none' ? undefined : f;
+  }, [activeClip?.colorGrade]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -662,10 +673,15 @@ export function Preview() {
               <div
                 className={styles.footageLayer}
                 style={
-                  footageTransform
+                  footageTransform || footageFilter
                     ? {
-                        transform: footageTransform.transform,
-                        opacity: footageTransform.opacity,
+                        ...(footageTransform
+                          ? {
+                              transform: footageTransform.transform,
+                              opacity: footageTransform.opacity,
+                            }
+                          : null),
+                        ...(footageFilter ? { filter: footageFilter } : null),
                       }
                     : undefined
                 }

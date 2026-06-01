@@ -155,6 +155,17 @@ const speedRampSchema = z.object({
   easing: z.enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold']).optional(),
 });
 
+// Optional one-click color grade (preset + fine knobs). Persisted but OPTIONAL
+// so older projects without a grade stay valid (backward compatible). Fine
+// knobs are validated as finite numbers; the colorGrade resolver clamps them.
+const colorGradeSchema = z.object({
+  preset: z.enum(['none', 'cinema', 'vivid', 'cool', 'warm', 'mono']).optional(),
+  exposure: finiteNumber.optional(),
+  contrast: finiteNumber.optional(),
+  saturation: finiteNumber.optional(),
+  temperature: finiteNumber.optional(),
+});
+
 const clipSchema = z.object({
   id: idString,
   trackId: idString,
@@ -168,6 +179,7 @@ const clipSchema = z.object({
   muted: z.boolean().optional(),
   stretchToFill: z.boolean().optional(),
   transform: clipTransformSchema.optional(),
+  colorGrade: colorGradeSchema.optional(),
   effects: z.array(clipEffectSchema),
   overlays: z.array(overlaySchema).optional(),
 });

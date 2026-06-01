@@ -7,6 +7,7 @@ import { ClipEffectsSection } from './ClipEffectsSection';
 import { ClipSpeedSection } from './ClipSpeedSection';
 import { ClipStretchSection } from './ClipStretchSection';
 import { ClipTransformSection } from './ClipTransformSection';
+import { ClipColorSection } from './ClipColorSection';
 import { ClipVolumeSection } from './ClipVolumeSection';
 import { ClipOverlaysSection } from './ClipOverlaysSection';
 import { BeatDetectionSection } from './BeatDetectionSection';
@@ -73,6 +74,11 @@ export function PropertiesPanel() {
               {selectedClipTrackKind !== 'audio' ? (
                 <div className={styles.markerSlot}>
                   <ClipTransformSection clip={selectedClip} />
+                </div>
+              ) : null}
+              {selectedClipTrackKind !== 'audio' ? (
+                <div className={styles.markerSlot}>
+                  <ClipColorSection clip={selectedClip} />
                 </div>
               ) : null}
               <div className={styles.markerSlot}>

@@ -3,6 +3,7 @@ import {
   buildAtempoChain,
   getResolution,
   clipTransformAtOutputTime,
+  colorGradeFilterAtOutputTime,
   rampFootageSeekAtOutputTime,
   type TransformSegment,
 } from './exporter';
@@ -109,6 +110,47 @@ describe('clipTransformAtOutputTime', () => {
     ];
     // tOut slightly past the end → held at last keyframe value.
     expect(clipTransformAtOutputTime(segments, 1.5).scale).toBeCloseTo(2, 5);
+  });
+});
+
+describe('colorGradeFilterAtOutputTime', () => {
+  const makeClip = (id: string, colorGrade?: Clip['colorGrade']): Clip => ({
+    id,
+    trackId: 'track-video',
+    assetId: 'a1',
+    start: 0,
+    trimStart: 0,
+    trimEnd: 1,
+    colorGrade,
+    effects: [],
+  });
+
+  it("returns 'none' for an empty list / ungraded clip", () => {
+    expect(colorGradeFilterAtOutputTime([], 1)).toBe('none');
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0'), start: 0, end: 2 },
+    ];
+    expect(colorGradeFilterAtOutputTime(segments, 1)).toBe('none');
+  });
+
+  it('maps the grade of the segment containing the output time', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { preset: 'mono' }), start: 0, end: 2 },
+      { clip: makeClip('c1', { preset: 'vivid' }), start: 2, end: 4 },
+    ];
+    expect(colorGradeFilterAtOutputTime(segments, 1)).toContain('saturate(0)');
+    expect(colorGradeFilterAtOutputTime(segments, 3)).toContain('saturate');
+    // Different segments → different filter strings.
+    expect(colorGradeFilterAtOutputTime(segments, 1)).not.toBe(
+      colorGradeFilterAtOutputTime(segments, 3),
+    );
+  });
+
+  it('holds the last segment past the final end (last-frame safety)', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { preset: 'mono' }), start: 0, end: 1 },
+    ];
+    expect(colorGradeFilterAtOutputTime(segments, 1.5)).toContain('saturate(0)');
   });
 });
 

@@ -67,6 +67,32 @@ describe('parseProjectFile', () => {
     broken.clips[0].trimStart = 'oops';
     expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
   });
+
+  it('accepts an optional clip colorGrade and round-trips it', () => {
+    const p = validProject();
+    p.clips[0].colorGrade = {
+      preset: 'cinema',
+      exposure: 10,
+      contrast: -5,
+      saturation: 8,
+      temperature: 20,
+    };
+    const parsed = parseProjectFile(JSON.stringify(p));
+    expect(parsed.clips[0].colorGrade?.preset).toBe('cinema');
+    expect(parsed.clips[0].colorGrade?.temperature).toBe(20);
+  });
+
+  it('stays valid for a clip WITHOUT a colorGrade (backward compatible)', () => {
+    const parsed = parseProjectFile(JSON.stringify(validProject()));
+    expect(parsed.clips[0].colorGrade).toBeUndefined();
+  });
+
+  it('rejects an unknown colorGrade preset', () => {
+    const p = validProject();
+    const broken = JSON.parse(JSON.stringify(p));
+    broken.clips[0].colorGrade = { preset: 'teal-orange' };
+    expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
+  });
 });
 
 describe('buildAssetIdMap', () => {
