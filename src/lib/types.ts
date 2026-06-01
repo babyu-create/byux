@@ -1,6 +1,7 @@
 // Core domain types for Byux.
 
 import type { Animatable } from './keyframes';
+import type { SpeedRamp } from './speedRamp';
 
 export type TrackKind = 'video' | 'overlay' | 'audio';
 
@@ -88,6 +89,14 @@ export interface Clip {
   trimEnd: number;
   /** Playback speed multiplier (default 1.0). 0.5 = half speed, 2.0 = double. */
   speed?: number;
+  /**
+   * Optional time-varying speed ramp layered ON TOP of `speed` (e.g. slow-mo →
+   * fast acceleration). Modelled as a normalised velocity profile whose mean is
+   * 1, so it redistributes WHEN source is consumed without changing the clip's
+   * timeline duration (clipDuration still derives from the constant `speed`).
+   * Absent = constant `speed` (fully backward compatible). See lib/speedRamp.
+   */
+  speedRamp?: SpeedRamp;
   /** Clip-level volume multiplier (default 1.0). 0 = mute, 2.0 = +6dB boost. */
   volume?: number;
   /** Whether the clip is individually muted regardless of volume. */

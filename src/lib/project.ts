@@ -146,6 +146,15 @@ const clipTransformSchema = z.object({
   opacity: animatableSchema.optional(),
 });
 
+// Optional time-varying speed ramp (slow-mo → fast). Persisted but OPTIONAL so
+// older projects without a ramp stay valid (backward compatible). `from`/`to`
+// are relative velocity weights (> 0); easing reuses the keyframe easing set.
+const speedRampSchema = z.object({
+  from: finiteNumber,
+  to: finiteNumber,
+  easing: z.enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold']).optional(),
+});
+
 const clipSchema = z.object({
   id: idString,
   trackId: idString,
@@ -154,6 +163,7 @@ const clipSchema = z.object({
   trimStart: finiteNumber,
   trimEnd: finiteNumber,
   speed: finiteNumber.optional(),
+  speedRamp: speedRampSchema.optional(),
   volume: finiteNumber.optional(),
   muted: z.boolean().optional(),
   stretchToFill: z.boolean().optional(),

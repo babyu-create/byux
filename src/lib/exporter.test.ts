@@ -3,8 +3,10 @@ import {
   buildAtempoChain,
   getResolution,
   clipTransformAtOutputTime,
+  rampFootageSeekAtOutputTime,
   type TransformSegment,
 } from './exporter';
+import { SLOW_TO_FAST_PRESET } from './speedRamp';
 import type { Clip } from './types';
 
 describe('buildAtempoChain', () => {
@@ -107,5 +109,83 @@ describe('clipTransformAtOutputTime', () => {
     ];
     // tOut slightly past the end → held at last keyframe value.
     expect(clipTransformAtOutputTime(segments, 1.5).scale).toBeCloseTo(2, 5);
+  });
+});
+
+describe('rampFootageSeekAtOutputTime', () => {
+  const makeClip = (id: string, extra: Partial<Clip>): Clip => ({
+    id,
+    trackId: 'track-video',
+    assetId: 'a1',
+    start: 0,
+    trimStart: 0,
+    trimEnd: 1,
+    effects: [],
+    ...extra,
+  });
+
+  it('maps identity for non-ramped segments', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { trimStart: 0, trimEnd: 2 }), start: 0, end: 2 },
+    ];
+    expect(rampFootageSeekAtOutputTime(segments, 0)).toBeCloseTo(0, 5);
+    expect(rampFootageSeekAtOutputTime(segments, 1)).toBeCloseTo(1, 5);
+    expect(rampFootageSeekAtOutputTime(segments, 1.9)).toBeCloseTo(1.9, 5);
+  });
+
+  it('maps endpoints to the segment footage window for a ramp', () => {
+    // 2s source @ speed 1 → footage segment [0,2]. The ramp re-times WHICH
+    // footage frame is shown but endpoints still map to the window edges.
+    const segments: TransformSegment[] = [
+      {
+        clip: makeClip('c0', {
+          trimStart: 0,
+          trimEnd: 2,
+          speed: 1,
+          speedRamp: SLOW_TO_FAST_PRESET,
+        }),
+        start: 0,
+        end: 2,
+      },
+    ];
+    expect(rampFootageSeekAtOutputTime(segments, 0)).toBeCloseTo(0, 4);
+    // Near the end, the seek approaches the footage window end.
+    expect(rampFootageSeekAtOutputTime(segments, 2)).toBeCloseTo(2, 2);
+  });
+
+  it('slow→fast shows an earlier footage frame at the midpoint', () => {
+    const segments: TransformSegment[] = [
+      {
+        clip: makeClip('c0', {
+          trimStart: 0,
+          trimEnd: 2,
+          speed: 1,
+          speedRamp: SLOW_TO_FAST_PRESET,
+        }),
+        start: 0,
+        end: 2,
+      },
+    ];
+    // At output midpoint (t=1), a slow-start ramp has consumed less than half
+    // the footage → seek time < 1.
+    expect(rampFootageSeekAtOutputTime(segments, 1)).toBeLessThan(1);
+  });
+
+  it('offsets the seek into a later segment by its footage start', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { trimStart: 0, trimEnd: 2 }), start: 0, end: 2 },
+      {
+        clip: makeClip('c1', {
+          trimStart: 0,
+          trimEnd: 2,
+          speed: 1,
+          speedRamp: SLOW_TO_FAST_PRESET,
+        }),
+        start: 2,
+        end: 4,
+      },
+    ];
+    // Start of the ramped second segment maps to its footage start (=2).
+    expect(rampFootageSeekAtOutputTime(segments, 2)).toBeCloseTo(2, 3);
   });
 });

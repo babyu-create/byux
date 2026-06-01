@@ -128,6 +128,10 @@ interface ProjectStoreState {
     patch: Partial<import('../lib/types').ClipEffect>,
   ) => void;
   setClipSpeed: (clipId: string, speed: number) => void;
+  setClipSpeedRamp: (
+    clipId: string,
+    ramp: import('../lib/speedRamp').SpeedRamp | null,
+  ) => void;
   setClipVolume: (clipId: string, volume: number) => void;
   setClipStretch: (clipId: string, stretchToFill: boolean) => void;
   setClipTransform: (
@@ -803,6 +807,39 @@ export const useProjectStore = create<ProjectStoreState>()(
         clips: state.clips.map((c) =>
           c.id === clipId ? { ...c, speed: clamped } : c,
         ),
+      };
+    });
+  },
+
+  setClipSpeedRamp: (clipId, ramp) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      return {
+        clips: state.clips.map((c) => {
+          if (c.id !== clipId) return c;
+          if (ramp === null) {
+            // Drop the ramp entirely so the clip reverts to constant speed and
+            // serialises back to a ramp-free (backward-compatible) shape.
+            const { speedRamp: _drop, ...rest } = c;
+            void _drop;
+            return rest;
+          }
+          // Clamp the relative weights to a sane positive range so a
+          // hand-edited / extreme value can't drive playbackRate to 0.
+          const clampWeight = (n: number): number =>
+            Math.max(0.0625, Math.min(8, n));
+          return {
+            ...c,
+            speedRamp: {
+              from: clampWeight(ramp.from),
+              to: clampWeight(ramp.to),
+              easing: ramp.easing,
+            },
+          };
+        }),
       };
     });
   },

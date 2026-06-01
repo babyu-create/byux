@@ -9,7 +9,27 @@ import { MotionBlurCanvas, type HudPreset } from './MotionBlurCanvas';
 import { shapeStrength } from '../../lib/motionBlurCore';
 import { OverlayLayer } from './OverlayLayer';
 import { sampleClipTransform, transformToCss } from '../../lib/clipTransform';
+import {
+  hasSpeedRamp,
+  makeRampSampler,
+  type RampSampler,
+} from '../../lib/speedRamp';
 import styles from './Preview.module.css';
+
+/**
+ * Build a ramp sampler for a clip when (and only when) it has a real speed
+ * ramp, so preview playback and seeking use the same timeline↔source mapping
+ * the export uses. Returns null for constant-speed clips (zero overhead).
+ */
+function rampSamplerForClip(clip: Clip | null): RampSampler | null {
+  if (!clip || !hasSpeedRamp(clip.speedRamp)) return null;
+  return makeRampSampler(
+    clip.speedRamp,
+    clip.speed ?? 1,
+    clip.trimStart,
+    clip.trimEnd,
+  );
+}
 
 // Motion-blur strength shaping (shapeStrength + gamma/peak constants) now lives
 // in lib/motionBlurCore.ts so the preview and the export renderer map a clip's
@@ -111,6 +131,30 @@ export function Preview() {
   const motionBlur =
     activeClip?.effects.find((e) => e.type === 'motion-blur') ?? null;
   const clipSpeed = activeClip?.speed ?? 1;
+  // Ramp sampler for the active clip (null for constant-speed clips). Memoised
+  // on the clip's ramp/speed/trim so it isn't rebuilt every playhead tick.
+  const activeRampSampler = useMemo(
+    () => rampSamplerForClip(activeClip),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      activeClip?.id,
+      activeClip?.speed,
+      activeClip?.trimStart,
+      activeClip?.trimEnd,
+      activeClip?.speedRamp?.from,
+      activeClip?.speedRamp?.to,
+      activeClip?.speedRamp?.easing,
+    ],
+  );
+  // Instantaneous playback speed at the playhead — equals clipSpeed for a
+  // constant clip, or the ramped factor (× base speed) at this moment. Drives
+  // the speed badge and the motion-blur strength scaling so blur tracks the
+  // live speed (the export does the same per frame).
+  const instSpeed = useMemo(() => {
+    if (!activeClip) return 1;
+    if (!activeRampSampler) return clipSpeed;
+    return activeRampSampler.speedFactorAtLocalTime(playhead - activeClip.start);
+  }, [activeClip, activeRampSampler, clipSpeed, playhead]);
   // Stretch-to-fill: object-fit:fill makes the <video> distort to the 16:9
   // frame, matching the motion-blur canvas (which already fills) and the
   // exported result. See Clip.stretchToFill.
@@ -143,9 +187,11 @@ export function Preview() {
   const motionBlurStrength = useMemo(() => {
     if (!motionBlur) return 0;
     const intensity = Math.max(0, Math.min(100, motionBlur.intensity ?? 40));
-    const speedFactor = Math.max(0.5, Math.min(2, clipSpeed));
+    // Scale by the INSTANTANEOUS speed so a slow-mo→fast ramp visibly ramps the
+    // blur with it (the export bakes the same per-frame scaling).
+    const speedFactor = Math.max(0.5, Math.min(2, instSpeed));
     return shapeStrength(intensity / 100) * speedFactor * previewBlurBoost;
-  }, [motionBlur, clipSpeed, previewBlurBoost]);
+  }, [motionBlur, instSpeed, previewBlurBoost]);
 
   // Build template context (e.g. {n}/{total} for kill counter)
   const overlayContext = useMemo<Record<string, string>>(() => {
@@ -280,8 +326,14 @@ export function Preview() {
     if (isPlaying) return;
     let target = 0;
     if (activeClip) {
-      const speed = activeClip.speed ?? 1;
-      target = activeClip.trimStart + (playhead - activeClip.start) * speed;
+      const localT = playhead - activeClip.start;
+      if (activeRampSampler) {
+        // Ramped clip: timeline→source is the nonlinear ramp integral.
+        target = activeRampSampler.sourceTimeAtLocalTime(localT);
+      } else {
+        const speed = activeClip.speed ?? 1;
+        target = activeClip.trimStart + localT * speed;
+      }
     }
     target = Math.max(0, Math.min(displayAsset.duration, target));
     if (Math.abs(video.currentTime - target) > 1 / 120) {
@@ -292,7 +344,7 @@ export function Preview() {
         video.currentTime = target;
       }
     }
-  }, [playhead, activeClip, displayAsset, isPlaying]);
+  }, [playhead, activeClip, activeRampSampler, displayAsset, isPlaying]);
 
   // Auto-pause when no clip available at playhead while playing.
   useEffect(() => {
@@ -356,6 +408,12 @@ export function Preview() {
       if (current) {
         const localTime = v.currentTime;
         const speed = current.speed ?? 1;
+        // Ramped clips: drive playbackRate from the instantaneous factor and
+        // invert the (nonlinear) source→timeline map so the playhead tracks the
+        // video exactly. Constant clips keep the original linear mapping.
+        const sampler = hasSpeedRamp(current.speedRamp)
+          ? makeRampSampler(current.speedRamp, speed, current.trimStart, current.trimEnd)
+          : null;
         if (localTime >= current.trimEnd - 1e-3) {
           // Reached the end of this clip — advance to the next clip on the
           // same track, or stop playback if none.
@@ -373,6 +431,15 @@ export function Preview() {
             state.setIsPlaying(false);
             return;
           }
+        } else if (sampler) {
+          // Ramped: map the playing video's SOURCE time → timeline-local time,
+          // and set the instantaneous playback rate for the next frames.
+          const localTl = sampler.localTimeAtSourceTime(localTime);
+          state.setPlayhead(current.start + localTl);
+          v.playbackRate = Math.max(
+            0.0625,
+            Math.min(4, sampler.speedFactorAtLocalTime(localTl)),
+          );
         } else {
           // playhead = clip.start + (localTime - trimStart) / speed
           state.setPlayhead(
@@ -408,8 +475,10 @@ export function Preview() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !activeClip || !activeAsset) return;
-    const speed = activeClip.speed ?? 1;
-    const target = activeClip.trimStart + (playhead - activeClip.start) * speed;
+    const localT = playhead - activeClip.start;
+    const target = activeRampSampler
+      ? activeRampSampler.sourceTimeAtLocalTime(localT)
+      : activeClip.trimStart + localT * (activeClip.speed ?? 1);
     video.currentTime = Math.max(0, Math.min(activeAsset.duration, target));
     if (isPlaying) {
       video.play().catch(() => {
@@ -420,12 +489,14 @@ export function Preview() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClip?.id, activeAsset?.id]);
 
-  // Apply per-clip playback speed.
+  // Apply per-clip playback speed. For ramped clips the RAF loop refines the
+  // instantaneous rate each frame; this sets the current (instantaneous) value
+  // so scrubbing / the first play frame start at the right rate.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.playbackRate = Math.max(0.0625, Math.min(4, clipSpeed));
-  }, [clipSpeed, activeClip?.id]);
+    video.playbackRate = Math.max(0.0625, Math.min(4, instSpeed));
+  }, [instSpeed, activeClip?.id]);
 
   // Apply per-clip + per-track volume to the video element (game audio).
   useEffect(() => {
@@ -627,7 +698,11 @@ export function Preview() {
                   aria-hidden="true"
                 />
               ) : null}
-              {clipSpeed !== 1 ? (
+              {activeRampSampler ? (
+                <div className={styles.speedBadge} aria-hidden="true">
+                  {`${instSpeed.toFixed(1)}×`}
+                </div>
+              ) : clipSpeed !== 1 ? (
                 <div className={styles.speedBadge} aria-hidden="true">
                   {clipSpeed === 0.25
                     ? '¼×'

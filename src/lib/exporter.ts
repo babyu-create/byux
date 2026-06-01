@@ -26,6 +26,10 @@ import {
   sampleClipTransform,
   type ResolvedTransform,
 } from './clipTransform';
+import {
+  hasSpeedRamp,
+  makeRampSampler,
+} from './speedRamp';
 import { rasterizeOverlays } from './overlayRaster';
 
 export interface ExportOptions {
@@ -320,6 +324,9 @@ function canStreamCopy(
 
   const speed = clip.speed ?? 1;
   if (Math.abs(speed - 1) > 1e-3) return false;
+
+  // A speed ramp re-times frames (WebCodecs pass) → can't stream-copy.
+  if (hasSpeedRamp(clip.speedRamp)) return false;
 
   const hasFade = clip.effects.some(
     (e) => e.type === 'fade-in' || e.type === 'fade-out',
@@ -977,6 +984,198 @@ async function applyTransformPass(
 }
 
 // ---------------------------------------------------------------------------
+// Speed-remap (ramp) pass — preview/export parity for Clip.speedRamp
+// ---------------------------------------------------------------------------
+
+/**
+ * Map an OUTPUT-timeline time `tOut` to the position to SEEK within the already
+ * concatenated, CONSTANT-speed footage (`video_only.mp4`), so a clip's speed
+ * ramp is reproduced by re-timing which source frame is shown.
+ *
+ * The concat footage plays each clip at its constant `speed`, so within a
+ * segment the footage at output-local time `tLocal` shows source time
+ * `trimStart + tLocal * speed` (linear). The ramp instead WANTS source time
+ * `sampler.sourceTimeAtLocalTime(tLocal)`. Inverting the linear constant-speed
+ * map gives the footage-local time that shows that desired source:
+ *   footageLocal = (rampSource - trimStart) / speed
+ * which we add to the segment's footage start (= segment.start, since concat is
+ * back-to-back). Non-ramped segments map identity (footage already correct).
+ *
+ * Returned time is in the concatenated footage's own clock (seconds).
+ */
+export function rampFootageSeekAtOutputTime(
+  segments: TransformSegment[],
+  tOut: number,
+): number {
+  let seg = segments.find((s) => tOut >= s.start - 1e-6 && tOut < s.end - 1e-6);
+  if (!seg && segments.length > 0) {
+    seg = segments[segments.length - 1];
+  }
+  if (!seg) return tOut;
+  const tLocal = tOut - seg.start;
+  const clip = seg.clip;
+  if (!hasSpeedRamp(clip.speedRamp)) {
+    // Identity — footage already shows the right frame at this output time.
+    return seg.start + tLocal;
+  }
+  const speed = clip.speed ?? 1;
+  const sampler = makeRampSampler(
+    clip.speedRamp,
+    speed,
+    clip.trimStart,
+    clip.trimEnd,
+  );
+  const rampSource = sampler.sourceTimeAtLocalTime(tLocal);
+  const footageLocal = speed > 0 ? (rampSource - clip.trimStart) / speed : tLocal;
+  return seg.start + Math.max(0, footageLocal);
+}
+
+/** True when any included segment carries a real speed ramp. */
+function segmentsHaveRamp(segments: TransformSegment[]): boolean {
+  return segments.some((s) => hasSpeedRamp(s.clip.speedRamp));
+}
+
+/**
+ * Re-time the concatenated footage to bake each clip's speed ramp.
+ *
+ * Pipeline mirrors applyTransformPass / applyWebglMotionBlur: decode the
+ * finished footage natively from a hidden <video>, but instead of seeking to a
+ * linear time per output frame we seek to {@link rampFootageSeekAtOutputTime}
+ * so slow→fast ramps show the correct source frame at each moment. The decoded
+ * frame is fed straight into a WebCodecs VideoEncoder; the original audio is
+ * stream-copied back on (audio is NOT time-warped here — see the export
+ * LIMITATION note at the call site). Throws (→ caller skips) when WebCodecs is
+ * unavailable.
+ */
+async function applySpeedRampPass(
+  ffmpeg: FFmpeg,
+  videoInput: string,
+  params: {
+    width: number;
+    height: number;
+    targetFps: number;
+    segments: TransformSegment[];
+    onProgress?: ExportOptions['onProgress'];
+  },
+): Promise<string> {
+  const { width, height, targetFps, segments, onProgress } = params;
+
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    throw new Error('speed-ramp: WebCodecs (VideoEncoder) 利用不可');
+  }
+
+  onProgress?.({ stage: '速度リマップ: 動画を読み込み中', percent: -1 });
+  const data = await ffmpeg.readFile(videoInput);
+  const u8 = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
+  const blobPart: BlobPart = u8.buffer instanceof ArrayBuffer
+    ? (u8 as Uint8Array<ArrayBuffer>)
+    : new Uint8Array(u8);
+  const url = URL.createObjectURL(new Blob([blobPart], { type: 'video/mp4' }));
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'auto';
+  video.src = url;
+  const loadedPromise = videoOnce(video, 'loadeddata');
+
+  const bitrate = pickBitrate(width, height, targetFps);
+  const codec = await pickAvcCodec({ width, height, bitrate, framerate: targetFps });
+  if (!codec) {
+    loadedPromise.catch(() => {});
+    URL.revokeObjectURL(url);
+    throw new Error('speed-ramp: 対応する H.264 エンコーダ設定が見つかりません');
+  }
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: 'avc', width, height, frameRate: targetFps },
+    fastStart: 'in-memory',
+  });
+  let encoderError: Error | null = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => { encoderError = e instanceof Error ? e : new Error(String(e)); },
+  });
+  encoder.configure({ codec, width, height, bitrate, framerate: targetFps });
+
+  const frameDurUs = Math.round(1_000_000 / targetFps);
+  const gop = Math.max(1, targetFps * 2);
+
+  try {
+    await withTimeout(loadedPromise, 15000, '動画メタデータ読み込み');
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    if (duration === 0) {
+      throw new Error('speed-ramp: 動画の長さを取得できませんでした');
+    }
+    // Output length = the timeline length of the concatenated footage (the
+    // ramp preserves each clip's duration, so this is unchanged).
+    const total = Math.max(1, Math.round(duration * targetFps));
+    mbLog(`[sr] native decode: duration=${duration.toFixed(2)}s total≈${total} frames`);
+
+    for (let i = 0; i < total; i++) {
+      if (encoderError) throw encoderError;
+      const tOut = (i + 0.5) / targetFps;
+      if (tOut >= duration) break;
+      // Re-timed seek: which footage frame should appear at this output time.
+      const seekT = Math.max(0, Math.min(duration - 1e-3, rampFootageSeekAtOutputTime(segments, tOut)));
+      await withTimeout(seekVideo(video, seekT), 10000, `フレーム seek #${i}`);
+
+      let frame: VideoFrame | null = null;
+      try {
+        frame = new VideoFrame(video, {
+          timestamp: i * frameDurUs,
+          duration: frameDurUs,
+        });
+        encoder.encode(frame, { keyFrame: i % gop === 0 });
+      } finally {
+        if (frame) frame.close();
+      }
+
+      while (encoder.encodeQueueSize > 16) {
+        await new Promise<void>((r) => setTimeout(r, 4));
+        if (encoderError) throw encoderError;
+      }
+
+      if (i % 5 === 0 || i === total - 1) {
+        onProgress?.({
+          stage: `速度リマップ適用中 (${i + 1}/${total})`,
+          percent: Math.max(0, Math.min(0.85, ((i + 1) / total) * 0.85)),
+        });
+      }
+    }
+
+    onProgress?.({ stage: '速度リマップ: エンコード仕上げ中', percent: 0.88 });
+    await encoder.flush();
+    if (encoderError) throw encoderError;
+    muxer.finalize();
+  } finally {
+    try { encoder.close(); } catch { /* already closed / errored */ }
+    video.removeAttribute('src');
+    try { video.load(); } catch { /* ignore */ }
+    URL.revokeObjectURL(url);
+  }
+
+  const videoBytes = new Uint8Array(muxer.target.buffer);
+  onProgress?.({ stage: '速度リマップ: 音声を結合中', percent: 0.92 });
+  const SR_VIDEO = 'sr_video.mp4';
+  await ffmpeg.writeFile(SR_VIDEO, videoBytes);
+  const out = 'video_speedramped.mp4';
+  await ffmpeg.exec([
+    '-threads', '1',
+    '-i', SR_VIDEO,
+    '-i', videoInput,
+    '-map', '0:v:0',
+    '-map', '1:a:0?',
+    '-c', 'copy',
+    '-movflags', '+faststart',
+    '-y',
+    out,
+  ]);
+  try { await ffmpeg.deleteFile(SR_VIDEO); } catch { /* ignore */ }
+  try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Text-overlay pass
 // ---------------------------------------------------------------------------
 
@@ -1370,6 +1569,57 @@ export async function exportProject(
       }
 
       // ---------------------------------------------------------------------
+      // Speed-remap (ramp) pass — bake each clip's slow→fast speed ramp by
+      // re-timing which source frame appears at each output frame. Runs after
+      // the blur pass (so the blurred footage is re-timed) and BEFORE the
+      // transform pass (transform samples by OUTPUT time, which the ramp does
+      // not change — only which source frame shows). Skipped entirely when no
+      // included clip has a ramp (zero cost for the common case).
+      //
+      // LIMITATION (documented): this is a WebCodecs per-frame decode→encode
+      // pass like the others, so for very long timelines (> MAX_WEBGL_BLUR_
+      // FRAMES) or when WebCodecs is unavailable we SKIP it (export plays at the
+      // constant clip speed instead) rather than ship a wrong result — the
+      // preview still shows the ramp. Two further approximations vs the preview:
+      //   1. The AUDIO is not time-warped to the ramp (it keeps the
+      //      constant-speed atempo from the encode pass) — acceptable for FPS
+      //      kill montages where the ramp is a short visual slow-mo→punch.
+      //   2. Motion-blur strength in the export is scaled by the clip's AVERAGE
+      //      speed, not the instantaneous ramp speed (the preview scales by the
+      //      instantaneous value). The visual re-timing itself is exact.
+      // ---------------------------------------------------------------------
+      if (segmentsHaveRamp(includedTimeline)) {
+        const rampFrames = Math.ceil(totalVideoSeconds * targetFps);
+        if (rampFrames > MAX_WEBGL_BLUR_FRAMES) {
+          const msg = `[exporter] speed-ramp: ~${rampFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping ramp (constant speed for this export)`;
+          console.warn(msg);
+          options.onProgress?.({
+            stage: '速度リマップ: 長尺のためスキップ（一定速度で書き出し）',
+            percent: -1,
+            log: msg,
+          });
+        } else {
+          try {
+            options.onProgress?.({ stage: '速度リマップ適用中', percent: -1 });
+            videoOutput = await applySpeedRampPass(ffmpeg, videoOutput, {
+              width,
+              height,
+              targetFps,
+              segments: includedTimeline,
+              onProgress: options.onProgress,
+            });
+          } catch (err) {
+            // Never fail the whole export over the ramp pass — degrade to the
+            // constant-speed footage (still matches preview minus the ramp).
+            const m = `[exporter] speed-ramp pass failed (${err instanceof Error ? err.message : String(err)}) — exporting at constant speed`;
+            console.warn(m);
+            options.onProgress?.({ stage: '速度リマップに失敗（一定速度で継続）', percent: -1, log: m });
+            try { await ffmpeg.deleteFile('sr_video.mp4'); } catch { /* ignore */ }
+          }
+        }
+      }
+
+      // ---------------------------------------------------------------------
       // Clip-transform pass (after blur, before text → text stays anchored to
       // the frame, untransformed, exactly like the preview overlay layers).
       // Bakes the animated position/scale/rotation/opacity per frame via
@@ -1556,6 +1806,8 @@ export async function exportProject(
     }
     try { await ffmpeg.deleteFile('video_only.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_blurred.mp4'); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile('video_speedramped.mp4'); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile('sr_video.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_transformed.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('tf_video.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_overlaid.mp4'); } catch { /* ignore */ }
