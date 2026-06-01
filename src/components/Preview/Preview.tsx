@@ -16,6 +16,13 @@ import {
   makeRampSampler,
   type RampSampler,
 } from '../../lib/speedRamp';
+import {
+  buildDuckPoints,
+  duckGainAt,
+  hasDucking,
+  resolveDucking,
+  type DuckSegment,
+} from '../../lib/audioDucking';
 import styles from './Preview.module.css';
 
 /**
@@ -73,6 +80,8 @@ export function Preview() {
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
   const verticalReframe = useProjectStore((s) => s.verticalReframe);
   const setVerticalReframe = useProjectStore((s) => s.setVerticalReframe);
+  const markers = useProjectStore((s) => s.markers);
+  const audioDucking = useProjectStore((s) => s.audioDucking);
   const totalDuration = useTimelineDuration();
 
   const videoTrack = useMemo(
@@ -127,6 +136,34 @@ export function Preview() {
   const activeAudioAsset = activeAudioClip
     ? (assetMap[activeAudioClip.assetId] ?? null)
     : null;
+
+  // BGM auto-ducking (Phase P5, preview best-effort). Project the kill markers
+  // onto the timeline through the VIDEO clips (each at its own clip.start, since
+  // the preview is NOT a back-to-back concat) so the duck points land where the
+  // user hears the kills. The export does the same with the concat windows —
+  // the duck FEEL (dip around each kill) matches even though the absolute times
+  // differ between the live timeline and the concatenated export. Recomputed
+  // only when markers / clips change (not every playhead tick).
+  const duckResolved = useMemo(() => resolveDucking(audioDucking), [audioDucking]);
+  const duckActive = hasDucking(audioDucking);
+  const duckPoints = useMemo<number[]>(() => {
+    if (!duckActive || !videoTrackId || markers.length === 0) return [];
+    const segments: DuckSegment[] = clips
+      .filter((c) => c.trackId === videoTrackId)
+      .map((c) => ({
+        assetId: c.assetId,
+        trimStart: c.trimStart,
+        trimEnd: c.trimEnd,
+        speed: c.speed,
+        start: c.start,
+      }));
+    return buildDuckPoints(markers, segments);
+  }, [duckActive, videoTrackId, markers, clips]);
+  // Live duck gain (0..1) at the playhead — multiplies the BGM volume below.
+  const duckGain = useMemo(
+    () => (duckActive ? duckGainAt(playhead, duckPoints, duckResolved) : 1),
+    [duckActive, playhead, duckPoints, duckResolved],
+  );
 
   const fadeIn = activeClip?.effects.find((e) => e.type === 'fade-in') ?? null;
   const fadeOut = activeClip?.effects.find((e) => e.type === 'fade-out') ?? null;
@@ -315,7 +352,11 @@ export function Preview() {
     }
     audio.playbackRate = Math.max(0.0625, Math.min(4, speed));
     const v = activeAudioClip?.volume ?? 1;
-    audio.volume = Math.max(0, Math.min(1, v));
+    // BGM auto-ducking (preview best-effort): the active audio clip lives on the
+    // FIRST audio track (audioTrackId = the BGM lane), so dip its volume by the
+    // live duck gain around kill moments — matching the export's BGM-only duck.
+    const bgmGain = duckActive ? duckGain : 1;
+    audio.volume = Math.max(0, Math.min(1, v * bgmGain));
     audio.muted = audioTrackMuted || (activeAudioClip?.muted ?? false) || v === 0;
     if (isPlaying) {
       audio.play().catch(() => {});
@@ -339,6 +380,8 @@ export function Preview() {
     audioTrackMuted,
     activeAudioAsset,
     activeAudioClip,
+    duckActive,
+    duckGain,
   ]);
 
   // Pause audio when no active audio clip

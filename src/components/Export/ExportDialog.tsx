@@ -99,12 +99,14 @@ function humanizeError(raw: string): HumanizedError {
 export function ExportDialog({ onClose }: ExportDialogProps) {
   const clips = useProjectStore((s) => s.clips);
   const tracks = useProjectStore((s) => s.tracks);
+  const markers = useProjectStore((s) => s.markers);
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
   const projectFps = useProjectStore((s) => s.fps);
   const projectResolution = useProjectStore((s) => s.resolution);
   const projectName = useProjectStore((s) => s.name);
   const hudPreset = useProjectStore((s) => s.hudPreset);
   const verticalReframe = useProjectStore((s) => s.verticalReframe);
+  const audioDucking = useProjectStore((s) => s.audioDucking);
   const assets = useMediaStore((s) => s.assets);
 
   const [resolution, setResolution] = useState<'720p' | '1080p'>(projectResolution);
@@ -177,7 +179,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
 
     try {
       const blob = await exportProject(
-        { clips, tracks, assets },
+        { clips, tracks, assets, markers },
         {
           resolution,
           fps,
@@ -188,6 +190,9 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           motionBlurHudPreset: hudPreset,
           motionBlurHudMaskStrength: hudPreset === 'none' ? 0 : 1,
           verticalReframe,
+          // Carry the project's BGM auto-ducking into the export so the dipped
+          // BGM in the preview matches the exported MP4 (Phase P5).
+          audioDucking,
           onProgress: ({ stage: s, percent, log }) => {
             // Update core label whenever we receive a stage update that
             // mentions the variant (FFmpeg just finished loading).

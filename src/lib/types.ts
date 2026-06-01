@@ -3,6 +3,7 @@
 import type { Animatable } from './keyframes';
 import type { SpeedRamp } from './speedRamp';
 import type { ClipTransition } from './transitions';
+import type { AudioDucking } from './audioDucking';
 
 export type TrackKind = 'video' | 'overlay' | 'audio';
 
@@ -216,4 +217,11 @@ export interface ProjectState {
   clips: Clip[];
   markers: KillMarker[];
   duration: number;
+  /**
+   * Optional project-level BGM auto-ducking (Phase P5). When enabled, music on
+   * the BGM track is automatically dipped around each kill marker (the game's
+   * SE / kill moments). Absent = no ducking (backward compatible). See
+   * lib/audioDucking.
+   */
+  audioDucking?: AudioDucking;
 }

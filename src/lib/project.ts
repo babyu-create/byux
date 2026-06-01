@@ -10,6 +10,7 @@ import type {
   MediaAsset,
   Track,
 } from './types';
+import type { AudioDucking } from './audioDucking';
 
 export interface ProjectAssetRef {
   id: string;
@@ -35,6 +36,8 @@ export interface ProjectFile {
   postRollSec: number;
   assets: ProjectAssetRef[];
   createdAt: string;
+  /** Optional project-level BGM auto-ducking (Phase P5). Absent in old files. */
+  audioDucking?: AudioDucking;
 }
 
 export interface SerialiseInput {
@@ -49,6 +52,8 @@ export interface SerialiseInput {
   preRollSec: number;
   postRollSec: number;
   assets: MediaAsset[];
+  /** Optional project-level BGM auto-ducking (Phase P5). */
+  audioDucking?: AudioDucking;
 }
 
 export function serialiseProject(input: SerialiseInput): ProjectFile {
@@ -65,6 +70,9 @@ export function serialiseProject(input: SerialiseInput): ProjectFile {
     ioRanges: input.ioRanges,
     preRollSec: input.preRollSec,
     postRollSec: input.postRollSec,
+    // Only persist ducking when present (keeps old files byte-identical and the
+    // field genuinely optional / backward compatible).
+    ...(input.audioDucking ? { audioDucking: input.audioDucking } : null),
     assets: input.assets.map((a) => ({
       id: a.id,
       name: a.name,
@@ -182,6 +190,16 @@ const clipTransitionSchema = z.object({
   duration: finiteNumber,
 });
 
+// Optional project-level BGM auto-ducking (Phase P5). Persisted but OPTIONAL so
+// older projects without it stay valid (backward compatible). The ducking
+// resolver clamps amountDb / attack / release to a safe band on use.
+const audioDuckingSchema = z.object({
+  enabled: z.boolean(),
+  amountDb: finiteNumber,
+  attack: finiteNumber,
+  release: finiteNumber,
+});
+
 const clipSchema = z.object({
   id: idString,
   trackId: idString,
@@ -249,6 +267,7 @@ const projectFileSchema = z.object({
   postRollSec: finiteNumber,
   assets: z.array(assetRefSchema),
   createdAt: z.string(),
+  audioDucking: audioDuckingSchema.optional(),
 });
 
 export function parseProjectFile(text: string): ProjectFile {

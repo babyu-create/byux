@@ -5,9 +5,11 @@ import {
   clipTransformAtOutputTime,
   colorGradeFilterAtOutputTime,
   rampFootageSeekAtOutputTime,
+  exportVideoDuckSegments,
   type TransformSegment,
 } from './exporter';
 import { SLOW_TO_FAST_PRESET } from './speedRamp';
+import { buildDuckPoints } from './audioDucking';
 import type { Clip } from './types';
 
 describe('buildAtempoChain', () => {
@@ -254,5 +256,46 @@ describe('rampFootageSeekAtOutputTime', () => {
     ];
     // Start of the ramped second segment maps to its footage start (=2).
     expect(rampFootageSeekAtOutputTime(segments, 2)).toBeCloseTo(2, 3);
+  });
+});
+
+describe('exportVideoDuckSegments', () => {
+  const makeClip = (id: string, extra: Partial<Clip>): Clip => ({
+    id,
+    trackId: 'track-video',
+    assetId: 'a1',
+    start: 0,
+    trimStart: 0,
+    trimEnd: 1,
+    effects: [],
+    ...extra,
+  });
+
+  it('places clips back-to-back on the output timeline', () => {
+    const segs = exportVideoDuckSegments([
+      makeClip('c0', { trimStart: 0, trimEnd: 4, speed: 1 }),
+      makeClip('c1', { trimStart: 0, trimEnd: 2, speed: 1 }),
+    ]);
+    expect(segs[0].start).toBe(0);
+    // Second clip starts after the first clip's 4s output duration.
+    expect(segs[1].start).toBeCloseTo(4, 5);
+  });
+
+  it('accounts for clip speed in the output duration (concat placement)', () => {
+    const segs = exportVideoDuckSegments([
+      makeClip('c0', { trimStart: 0, trimEnd: 4, speed: 2 }), // 2s output
+      makeClip('c1', { trimStart: 0, trimEnd: 2, speed: 1 }),
+    ]);
+    expect(segs[1].start).toBeCloseTo(2, 5);
+  });
+
+  it('feeds buildDuckPoints so a kill maps to its concat output time', () => {
+    const segs = exportVideoDuckSegments([
+      makeClip('c0', { assetId: 'a1', trimStart: 0, trimEnd: 4, speed: 1 }),
+      makeClip('c1', { assetId: 'a1', trimStart: 2, trimEnd: 6, speed: 1 }),
+    ]);
+    // A source kill at t=3 falls in c0 (output 3) and c1 (output 4 + (3-2) = 5).
+    const points = buildDuckPoints([{ assetId: 'a1', time: 3 }], segs);
+    expect(points).toEqual([3, 5]);
   });
 });

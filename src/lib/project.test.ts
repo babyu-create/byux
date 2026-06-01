@@ -139,6 +139,25 @@ describe('parseProjectFile', () => {
     ];
     expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
   });
+
+  it('accepts an optional project audioDucking and round-trips it', () => {
+    const p = { ...validProject(), audioDucking: { enabled: true, amountDb: 12, attack: 0.12, release: 0.45 } };
+    const parsed = parseProjectFile(JSON.stringify(p));
+    expect(parsed.audioDucking?.enabled).toBe(true);
+    expect(parsed.audioDucking?.amountDb).toBe(12);
+    expect(parsed.audioDucking?.release).toBe(0.45);
+  });
+
+  it('stays valid for a project WITHOUT audioDucking (backward compatible)', () => {
+    const parsed = parseProjectFile(JSON.stringify(validProject()));
+    expect(parsed.audioDucking).toBeUndefined();
+  });
+
+  it('rejects a structurally invalid audioDucking (non-numeric amount)', () => {
+    const broken = JSON.parse(JSON.stringify(validProject()));
+    broken.audioDucking = { enabled: true, amountDb: 'loud', attack: 0.1, release: 0.4 };
+    expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
+  });
 });
 
 describe('buildAssetIdMap', () => {

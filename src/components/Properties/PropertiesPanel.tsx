@@ -12,6 +12,7 @@ import { ClipTransitionSection } from './ClipTransitionSection';
 import { ClipVolumeSection } from './ClipVolumeSection';
 import { ClipOverlaysSection } from './ClipOverlaysSection';
 import { BeatDetectionSection } from './BeatDetectionSection';
+import { AudioDuckingSection } from './AudioDuckingSection';
 import styles from './PropertiesPanel.module.css';
 
 export function PropertiesPanel() {
@@ -26,6 +27,10 @@ export function PropertiesPanel() {
   const selectedClipTrackKind = selectedClip
     ? (tracks.find((t) => t.id === selectedClip.trackId)?.kind ?? null)
     : null;
+  // The FIRST audio track is the BGM lane; auto-ducking is a BGM feature, so
+  // the ducking control only shows for a clip on that track (not SE etc.).
+  const bgmTrackId = tracks.find((t) => t.kind === 'audio')?.id ?? null;
+  const isBgmClip = !!selectedClip && selectedClip.trackId === bgmTrackId;
 
   return (
     <div className={styles.root}>
@@ -90,6 +95,11 @@ export function PropertiesPanel() {
               <div className={styles.markerSlot}>
                 <ClipVolumeSection clip={selectedClip} />
               </div>
+              {isBgmClip ? (
+                <div className={styles.markerSlot}>
+                  <AudioDuckingSection />
+                </div>
+              ) : null}
               <div className={styles.markerSlot}>
                 <ClipEffectsSection clip={selectedClip} />
               </div>

@@ -78,6 +78,7 @@ function App() {
       ioRanges: ps.ioRanges,
       preRollSec: ps.preRollSec,
       postRollSec: ps.postRollSec,
+      audioDucking: ps.audioDucking,
       assets: ms.assets,
     });
     downloadProjectFile(project);

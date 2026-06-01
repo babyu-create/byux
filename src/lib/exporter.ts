@@ -16,7 +16,15 @@
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
-import type { Clip, MediaAsset, Track } from './types';
+import type { Clip, KillMarker, MediaAsset, Track } from './types';
+import {
+  buildDuckPoints,
+  buildDuckVolumeExpr,
+  hasDucking,
+  resolveDucking,
+  type AudioDucking,
+  type DuckSegment,
+} from './audioDucking';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { exportStrengthFromIntensity, type HudPreset } from './motionBlurCore';
 import { OffscreenMotionBlurRenderer } from './motionBlurExporter';
@@ -67,6 +75,13 @@ export interface ExportOptions {
    * pans which horizontal slice is kept. Ignored for landscape output.
    */
   verticalReframe?: number;
+  /**
+   * Optional project-level BGM auto-ducking (Phase P5). When enabled, the BGM
+   * track's clips are dipped around each kill marker in the audio mix pass via
+   * a `volume=...:eval=frame` expression — matching the preview's best-effort
+   * ducking. Absent / disabled = full-level BGM (no ducking).
+   */
+  audioDucking?: AudioDucking;
   onProgress?: (info: { stage: string; percent: number; log?: string }) => void;
 }
 
@@ -74,6 +89,12 @@ export interface ExportInput {
   clips: Clip[];
   tracks: Track[];
   assets: MediaAsset[];
+  /**
+   * Source-time kill markers (Phase P5). Used to compute BGM duck points when
+   * {@link ExportOptions.audioDucking} is enabled. Optional — absent = no
+   * ducking even if the setting is on (nothing to duck around).
+   */
+  markers?: KillMarker[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,6 +1341,38 @@ async function applyOverlayPass(
 }
 
 // ---------------------------------------------------------------------------
+// BGM auto-ducking helpers (Phase P5) — preview/export parity for AudioDucking
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the OUTPUT-timeline video segments the export concatenates clips into,
+ * back-to-back (each clip's output window = its timeline duration at its
+ * constant speed). This is the same placement the encode pass uses for
+ * includedTimeline, recomputed in a pure form so the BGM duck points can be
+ * derived in BOTH the stream-copy and the full-encode paths (and unit-tested).
+ *
+ * Returns {@link DuckSegment}s carrying each clip's asset / source trim / speed
+ * and its output start, ready for {@link buildDuckPoints}.
+ */
+export function exportVideoDuckSegments(videoClips: readonly Clip[]): DuckSegment[] {
+  const segs: DuckSegment[] = [];
+  let cursor = 0;
+  for (const clip of videoClips) {
+    const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
+    const durOut = (clip.trimEnd - clip.trimStart) / Math.max(0.01, speed);
+    segs.push({
+      assetId: clip.assetId,
+      trimStart: clip.trimStart,
+      trimEnd: clip.trimEnd,
+      speed,
+      start: cursor,
+    });
+    cursor += durOut;
+  }
+  return segs;
+}
+
+// ---------------------------------------------------------------------------
 // Main export function
 // ---------------------------------------------------------------------------
 
@@ -1328,11 +1381,15 @@ export async function exportProject(
   options: ExportOptions,
 ): Promise<Blob> {
   const { clips, tracks, assets } = input;
+  const markers = input.markers ?? [];
   const videoTrack = tracks.find((t) => t.kind === 'video');
   const trackMutedById = (trackId: string): boolean =>
     tracks.find((t) => t.id === trackId)?.muted ?? false;
   const isAudioTrackId = (trackId: string): boolean =>
     tracks.find((t) => t.id === trackId)?.kind === 'audio';
+  // The FIRST audio track is the BGM lane (subsequent audio tracks are SE etc.)
+  // — only BGM is auto-ducked around kills, mirroring the preview.
+  const bgmTrackId = tracks.find((t) => t.kind === 'audio')?.id ?? null;
 
   const videoClips = clips
     .filter((c) => videoTrack && c.trackId === videoTrack.id)
@@ -1799,6 +1856,26 @@ export async function exportProject(
       progressState.startEpoch = Date.now();
       options.onProgress?.({ stage: 'BGM 合成中', percent: -1 });
 
+      // BGM auto-ducking (Phase P5): project the kill markers onto the OUTPUT
+      // timeline (the back-to-back video segments) and build a `volume`
+      // expression that dips the BGM around each kill. Computed once and applied
+      // ONLY to the first audio (BGM) track's clips — SE / other audio tracks
+      // play at full level. Resolved fields are clamped (lib/audioDucking).
+      const resolvedDuck = resolveDucking(options.audioDucking);
+      let duckVolumeExpr: string | null = null;
+      if (hasDucking(options.audioDucking) && markers.length > 0) {
+        const duckSegments = exportVideoDuckSegments(videoClips);
+        const duckPoints = buildDuckPoints(markers, duckSegments);
+        duckVolumeExpr = buildDuckVolumeExpr(duckPoints, resolvedDuck);
+        if (duckVolumeExpr) {
+          options.onProgress?.({
+            stage: `BGMダッキング: ${duckPoints.length}箇所のキルでBGMを下げます`,
+            percent: -1,
+            log: `[exporter] BGM ducking: ${duckPoints.length} duck point(s), -${resolvedDuck.amountDb}dB`,
+          });
+        }
+      }
+
       const audioInputArgs: string[] = [];
       const audioFilterParts: string[] = [];
       const mixLabels: string[] = [];
@@ -1829,6 +1906,14 @@ export async function exportProject(
           `volume=${vol.toFixed(3)}`,
         ];
         if (startMs > 0) filters.push(`adelay=${startMs}|${startMs}`);
+
+        // BGM auto-ducking: applied AFTER adelay so the per-frame expression's
+        // `t` is on the OUTPUT timeline (= where the duck points were computed).
+        // Only the BGM track is ducked; SE / other audio tracks are untouched.
+        const isBgmClip = bgmTrackId !== null && clip.trackId === bgmTrackId;
+        if (isBgmClip && duckVolumeExpr) {
+          filters.push(`volume=${duckVolumeExpr}:eval=frame`);
+        }
 
         const label = `[ba${i}]`;
         audioFilterParts.push(`[${audioInputIndex}:a]${filters.join(',')}${label}`);

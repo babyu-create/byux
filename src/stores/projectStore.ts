@@ -2,6 +2,7 @@ import { create, useStore } from 'zustand';
 import { temporal } from 'zundo';
 import type { Clip, IORange, KillMarker, PendingIn, Track } from '../lib/types';
 import type { HudPreset } from '../lib/motionBlurCore';
+import type { AudioDucking } from '../lib/audioDucking';
 import {
   clamp,
   clipDuration,
@@ -27,6 +28,12 @@ interface ProjectStoreState {
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];
+  /**
+   * Project-level BGM auto-ducking (Phase P5). Undefined = no ducking. Lives at
+   * project scope (like hudPreset) so the BGM is dipped identically in the live
+   * preview and the export. See lib/audioDucking.
+   */
+  audioDucking?: AudioDucking;
   selectedClipIds: string[];
   selectedMarkerId: string | null;
   playhead: number;
@@ -82,6 +89,8 @@ interface ProjectStoreState {
   toggleSnap: () => void;
   setHudPreset: (preset: HudPreset) => void;
   setVerticalReframe: (value: number) => void;
+  /** Set (or clear with null) the project-level BGM auto-ducking. */
+  setAudioDucking: (ducking: AudioDucking | null) => void;
   splitSelectedAtPlayhead: () => void;
   setIsPlaying: (playing: boolean) => void;
   togglePlay: () => void;
@@ -178,7 +187,7 @@ type DocState = Pick<
   ProjectStoreState,
   | 'name' | 'aspectRatio' | 'fps' | 'resolution'
   | 'tracks' | 'clips' | 'markers' | 'ioRanges'
-  | 'preRollSec' | 'postRollSec'
+  | 'preRollSec' | 'postRollSec' | 'audioDucking'
 >;
 
 function partializeDoc(s: ProjectStoreState): DocState {
@@ -193,6 +202,7 @@ function partializeDoc(s: ProjectStoreState): DocState {
     ioRanges: s.ioRanges,
     preRollSec: s.preRollSec,
     postRollSec: s.postRollSec,
+    audioDucking: s.audioDucking,
   };
 }
 
@@ -210,7 +220,8 @@ function docEqual(a: DocState, b: DocState): boolean {
     a.markers === b.markers &&
     a.ioRanges === b.ioRanges &&
     a.preRollSec === b.preRollSec &&
-    a.postRollSec === b.postRollSec
+    a.postRollSec === b.postRollSec &&
+    a.audioDucking === b.audioDucking
   );
 }
 
@@ -235,6 +246,7 @@ export const useProjectStore = create<ProjectStoreState>()(
   tracks: DEFAULT_TRACKS,
   clips: [],
   markers: [],
+  audioDucking: undefined,
   selectedClipIds: [],
   selectedMarkerId: null,
   playhead: 0,
@@ -454,6 +466,11 @@ export const useProjectStore = create<ProjectStoreState>()(
 
   setVerticalReframe: (value) =>
     set({ verticalReframe: Math.max(-1, Math.min(1, value)) }),
+
+  setAudioDucking: (ducking) =>
+    // Null clears the setting so the project serialises back to a ducking-free
+    // (backward-compatible) shape, mirroring setClipColorGrade(null) etc.
+    set({ audioDucking: ducking ?? undefined }),
 
   splitSelectedAtPlayhead: () => {
     const { selectedClipIds, playhead, splitClipAt } = get();
@@ -1010,6 +1027,8 @@ export const useProjectStore = create<ProjectStoreState>()(
       ioRanges: remap(file.ioRanges),
       preRollSec: file.preRollSec,
       postRollSec: file.postRollSec,
+      // Absent in old files → undefined (no ducking). Backward compatible.
+      audioDucking: file.audioDucking,
       selectedClipIds: [],
       selectedMarkerId: null,
       selectedRangeId: null,
