@@ -142,6 +142,11 @@ interface ProjectStoreState {
     clipId: string,
     grade: import('../lib/types').ColorGrade | null,
   ) => void;
+  setClipTransition: (
+    clipId: string,
+    edge: 'in' | 'out',
+    transition: import('../lib/transitions').ClipTransition | null,
+  ) => void;
   toggleClipMuted: (clipId: string) => void;
   addClipOverlay: (clipId: string, overlay: import('../lib/types').OverlayText) => void;
   updateClipOverlay: (
@@ -902,6 +907,30 @@ export const useProjectStore = create<ProjectStoreState>()(
             return rest;
           }
           return { ...c, colorGrade: grade };
+        }),
+      };
+    });
+  },
+
+  setClipTransition: (clipId, edge, transition) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      const key = edge === 'in' ? 'transitionIn' : 'transitionOut';
+      return {
+        clips: state.clips.map((c) => {
+          if (c.id !== clipId) return c;
+          if (transition === null || transition.type === 'none') {
+            // Drop the boundary transition entirely so the clip reverts to a
+            // hard cut and serialises back to a transition-free (backward-
+            // compatible) shape.
+            const { [key]: _drop, ...rest } = c;
+            void _drop;
+            return rest;
+          }
+          return { ...c, [key]: transition };
         }),
       };
     });

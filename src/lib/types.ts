@@ -2,6 +2,7 @@
 
 import type { Animatable } from './keyframes';
 import type { SpeedRamp } from './speedRamp';
+import type { ClipTransition } from './transitions';
 
 export type TrackKind = 'video' | 'overlay' | 'audio';
 
@@ -165,6 +166,14 @@ export interface Clip {
   transform?: ClipTransform;
   /** One-click color grade / LUT-style preset + fine knobs (see lib/colorGrade). */
   colorGrade?: ColorGrade;
+  /**
+   * Optional kill-to-kill transition preset applied at the clip's OWN start
+   * boundary (fade / slide / zoom in over a short window). Modelled per-clip
+   * (no cross-clip compositing) — see lib/transitions. Absent = hard cut.
+   */
+  transitionIn?: ClipTransition;
+  /** Optional transition preset applied at the clip's OWN end boundary. */
+  transitionOut?: ClipTransition;
   effects: ClipEffect[];
   overlays?: OverlayText[];
 }

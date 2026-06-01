@@ -10,6 +10,7 @@ import { shapeStrength } from '../../lib/motionBlurCore';
 import { OverlayLayer } from './OverlayLayer';
 import { sampleClipTransform, transformToCss } from '../../lib/clipTransform';
 import { colorGradeFilter } from '../../lib/colorGrade';
+import { transitionModulationAt } from '../../lib/transitions';
 import {
   hasSpeedRamp,
   makeRampSampler,
@@ -241,9 +242,27 @@ export function Preview() {
     if (!activeClip) return null;
     const localT = playhead - activeClip.start;
     const r = sampleClipTransform(activeClip.transform, localT);
+    // Compose the kill-to-kill transition modulation (Phase P4) onto the
+    // sampled transform: opacity & scale multiply, translate adds. Sampled at
+    // clip-local time over the clip's own boundary windows — the export bakes
+    // the SAME modulation per frame (see exporter's transform pass) so the
+    // boundary look matches.
+    const mod = transitionModulationAt(
+      activeClip.transitionIn,
+      activeClip.transitionOut,
+      localT,
+      clipDuration(activeClip),
+    );
+    const composed = {
+      x: r.x + mod.dx,
+      y: r.y + mod.dy,
+      scale: r.scale * mod.scale,
+      rotation: r.rotation,
+      opacity: r.opacity * mod.opacity,
+    };
     return {
-      transform: transformToCss(r),
-      opacity: Math.max(0, Math.min(1, r.opacity)),
+      transform: transformToCss(composed),
+      opacity: Math.max(0, Math.min(1, composed.opacity)),
     };
   }, [activeClip, playhead]);
 

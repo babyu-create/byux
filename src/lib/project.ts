@@ -173,6 +173,15 @@ const colorGradeSchema = z.object({
   temperature: finiteNumber.optional(),
 });
 
+// Optional kill-to-kill transition preset at a clip boundary (Phase P4).
+// Persisted but OPTIONAL so older projects without transitions stay valid
+// (backward compatible). `duration` is the boundary window in seconds; the
+// transitions resolver clamps it to a safe range on use.
+const clipTransitionSchema = z.object({
+  type: z.enum(['none', 'cut', 'fade', 'slide', 'zoom']),
+  duration: finiteNumber,
+});
+
 const clipSchema = z.object({
   id: idString,
   trackId: idString,
@@ -187,6 +196,8 @@ const clipSchema = z.object({
   stretchToFill: z.boolean().optional(),
   transform: clipTransformSchema.optional(),
   colorGrade: colorGradeSchema.optional(),
+  transitionIn: clipTransitionSchema.optional(),
+  transitionOut: clipTransitionSchema.optional(),
   effects: z.array(clipEffectSchema),
   overlays: z.array(overlaySchema).optional(),
 });

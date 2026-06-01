@@ -27,6 +27,7 @@ import {
   type ResolvedTransform,
 } from './clipTransform';
 import { clipHasColorGrade, colorGradeFilter } from './colorGrade';
+import { clipHasTransition, transitionModulationAt } from './transitions';
 import {
   hasSpeedRamp,
   makeRampSampler,
@@ -328,6 +329,10 @@ function canStreamCopy(
   // A color grade is baked per-frame (shares the WebCodecs transform pass)
   // → can't stream-copy.
   if (clipHasColorGrade(clip.colorGrade)) return false;
+
+  // A boundary transition is baked per-frame (shares the WebCodecs transform
+  // pass) → can't stream-copy.
+  if (clipHasTransition(clip.transitionIn, clip.transitionOut)) return false;
 
   // Text overlays are composited via a filter pass → can't stream-copy.
   if (clip.overlays && clip.overlays.length > 0) return false;
@@ -853,7 +858,29 @@ export function clipTransformAtOutputTime(
     // Past the final segment end (last frame) — hold the last clip.
     seg = segments[segments.length - 1];
   }
-  return sampleClipTransform(seg?.clip.transform, seg ? tOut - seg.start : 0);
+  const localT = seg ? tOut - seg.start : 0;
+  const r = sampleClipTransform(seg?.clip.transform, localT);
+  if (!seg) return r;
+  // Compose the kill-to-kill transition modulation (Phase P4) onto the sampled
+  // transform, exactly as the preview does (Preview.tsx footageTransform):
+  // opacity & scale multiply, translate adds. The segment's [start,end) window
+  // equals the clip's timeline duration, so the boundary windows line up with
+  // the preview's clip-local time.
+  if (!clipHasTransition(seg.clip.transitionIn, seg.clip.transitionOut)) return r;
+  const segDur = seg.end - seg.start;
+  const mod = transitionModulationAt(
+    seg.clip.transitionIn,
+    seg.clip.transitionOut,
+    localT,
+    segDur,
+  );
+  return {
+    x: r.x + mod.dx,
+    y: r.y + mod.dy,
+    scale: r.scale * mod.scale,
+    rotation: r.rotation,
+    opacity: Math.max(0, Math.min(1, r.opacity * mod.opacity)),
+  };
 }
 
 /**
@@ -1681,7 +1708,8 @@ export async function exportProject(
       const transformSegments: TransformSegment[] = includedTimeline.filter(
         (seg) =>
           clipHasTransform(seg.clip.transform) ||
-          clipHasColorGrade(seg.clip.colorGrade),
+          clipHasColorGrade(seg.clip.colorGrade) ||
+          clipHasTransition(seg.clip.transitionIn, seg.clip.transitionOut),
       );
       if (transformSegments.length > 0) {
         const transformFrames = Math.ceil(totalVideoSeconds * targetFps);

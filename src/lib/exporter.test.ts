@@ -111,6 +111,31 @@ describe('clipTransformAtOutputTime', () => {
     // tOut slightly past the end → held at last keyframe value.
     expect(clipTransformAtOutputTime(segments, 1.5).scale).toBeCloseTo(2, 5);
   });
+
+  it('composes a boundary transition (fade-in) onto the sampled opacity', () => {
+    // Segment 0..5s with a 0.4s fade-in. At output time 0 (segment start) the
+    // export must bake near-zero opacity, matching the preview.
+    const clip = { ...makeClip('c0'), transitionIn: { type: 'fade' as const, duration: 0.4 } };
+    const segments: TransformSegment[] = [{ clip, start: 0, end: 5 }];
+    expect(clipTransformAtOutputTime(segments, 0).opacity).toBeCloseTo(0, 4);
+    // Past the window → fully opaque.
+    expect(clipTransformAtOutputTime(segments, 0.4).opacity).toBeCloseTo(1, 4);
+    // Clip body → opacity unchanged.
+    expect(clipTransformAtOutputTime(segments, 2.5).opacity).toBeCloseTo(1, 4);
+  });
+
+  it('composes a transition with an existing transform (multiply / add)', () => {
+    // A zoom-in transition multiplies scale on top of a constant scale=2 clip.
+    const clip = {
+      ...makeClip('c0', { scale: 2 }),
+      transitionIn: { type: 'zoom' as const, duration: 0.4 },
+    };
+    const segments: TransformSegment[] = [{ clip, start: 0, end: 5 }];
+    // At t=0 the zoom punch (>1) multiplies the clip's scale 2 → >2.
+    expect(clipTransformAtOutputTime(segments, 0).scale).toBeGreaterThan(2);
+    // Once the window ends the zoom factor is 1 → scale back to the clip's 2.
+    expect(clipTransformAtOutputTime(segments, 0.4).scale).toBeCloseTo(2, 4);
+  });
 });
 
 describe('colorGradeFilterAtOutputTime', () => {
