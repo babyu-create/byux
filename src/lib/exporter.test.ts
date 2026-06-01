@@ -4,6 +4,7 @@ import {
   getResolution,
   clipTransformAtOutputTime,
   colorGradeFilterAtOutputTime,
+  transformFrameNeedsCanvas,
   rampFootageSeekAtOutputTime,
   exportVideoDuckSegments,
   type TransformSegment,
@@ -178,6 +179,72 @@ describe('colorGradeFilterAtOutputTime', () => {
       { clip: makeClip('c0', { preset: 'mono' }), start: 0, end: 1 },
     ];
     expect(colorGradeFilterAtOutputTime(segments, 1.5)).toContain('saturate(0)');
+  });
+});
+
+describe('transformFrameNeedsCanvas', () => {
+  const makeClip = (id: string, extra: Partial<Clip>): Clip => ({
+    id,
+    trackId: 'track-video',
+    assetId: 'a1',
+    start: 0,
+    trimStart: 0,
+    trimEnd: 1,
+    effects: [],
+    ...extra,
+  });
+
+  it('is false for an empty list (identity pass-through)', () => {
+    expect(transformFrameNeedsCanvas([], 1)).toBe(false);
+  });
+
+  it('is false for a plain segment with no transform / grade', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { trimEnd: 2 }), start: 0, end: 2 },
+    ];
+    expect(transformFrameNeedsCanvas(segments, 0)).toBe(false);
+    expect(transformFrameNeedsCanvas(segments, 1)).toBe(false);
+  });
+
+  it('is true while a visible transform applies', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { transform: { scale: 1.2 } }), start: 0, end: 2 },
+    ];
+    expect(transformFrameNeedsCanvas(segments, 0.5)).toBe(true);
+  });
+
+  it('is true when a color grade applies (even with identity transform)', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { colorGrade: { preset: 'mono' } }), start: 0, end: 2 },
+    ];
+    expect(transformFrameNeedsCanvas(segments, 0.5)).toBe(true);
+  });
+
+  it('routes only the transformed segment of a mixed timeline through the canvas', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { trimEnd: 2 }), start: 0, end: 2 },
+      { clip: makeClip('c1', { transform: { scale: 1.3 } }), start: 2, end: 4 },
+    ];
+    // Plain first segment → pass-through; transformed second segment → canvas.
+    expect(transformFrameNeedsCanvas(segments, 1)).toBe(false);
+    expect(transformFrameNeedsCanvas(segments, 3)).toBe(true);
+  });
+
+  it('is true inside an animating transition window, false in the clip body', () => {
+    const segments: TransformSegment[] = [
+      {
+        clip: makeClip('c0', {
+          trimEnd: 5,
+          transitionIn: { type: 'fade', duration: 0.4 },
+        }),
+        start: 0,
+        end: 5,
+      },
+    ];
+    // Inside the fade-in window opacity < 1 → needs the canvas.
+    expect(transformFrameNeedsCanvas(segments, 0)).toBe(true);
+    // Clip body, past the transition → identity pass-through.
+    expect(transformFrameNeedsCanvas(segments, 2.5)).toBe(false);
   });
 });
 

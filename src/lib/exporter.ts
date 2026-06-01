@@ -31,6 +31,7 @@ import { OffscreenMotionBlurRenderer } from './motionBlurExporter';
 import { OffscreenTransformRenderer } from './transformExporter';
 import {
   clipHasTransform,
+  isTransformVisible,
   sampleClipTransform,
   type ResolvedTransform,
 } from './clipTransform';
@@ -923,6 +924,28 @@ export function colorGradeFilterAtOutputTime(
 }
 
 /**
+ * True when the transform pass MUST route the frame at output time `tOut`
+ * through the Canvas2D renderer (because the resolved transform visibly moves /
+ * scales / rotates / fades the frame OR a color grade applies). Returns false
+ * when the frame is a pixel-identical pass-through — an identity transform with
+ * no grade over the black background draws exactly the source frame at output
+ * resolution — so the caller can feed the decoded `<video>` straight into the
+ * VideoFrame and SKIP the redundant fillRect + setTransform + drawImage copy.
+ *
+ * Pure (composes {@link clipTransformAtOutputTime} + {@link isTransformVisible}
+ * + {@link colorGradeFilterAtOutputTime}) so it stays unit-testable and the two
+ * decisions can never drift apart. Only a perf shortcut — the rendered output
+ * is identical either way.
+ */
+export function transformFrameNeedsCanvas(
+  segments: TransformSegment[],
+  tOut: number,
+): boolean {
+  if (isTransformVisible(clipTransformAtOutputTime(segments, tOut))) return true;
+  return colorGradeFilterAtOutputTime(segments, tOut) !== 'none';
+}
+
+/**
  * Apply the preview-matching clip transform to `videoInput` per frame.
  *
  * Pipeline mirrors applyWebglMotionBlur: decode each frame natively from a
@@ -1000,12 +1023,23 @@ async function applyTransformPass(
       if (t >= duration) break;
       await withTimeout(seekVideo(video, t), 10000, `フレーム seek #${i}`);
 
-      const resolved = clipTransformAtOutputTime(segments, t);
-      const filter = colorGradeFilterAtOutputTime(segments, t);
       let frame: VideoFrame | null = null;
       try {
-        const canvas = renderer.drawFrame(video, resolved, filter);
-        frame = new VideoFrame(canvas, {
+        // Identity pass-through: when this frame's segment has no visible
+        // transform AND no color grade, drawing it through the Canvas2D is a
+        // redundant copy (identity matrix + filter:none over a black fill =
+        // the source frame at output resolution). Feed the decoded <video>
+        // straight into the VideoFrame instead — same per-frame shortcut
+        // applySpeedRampPass already uses. Frames in transformed/graded
+        // segments still go through the renderer, so the output is identical.
+        const frameSource: CanvasImageSource = transformFrameNeedsCanvas(segments, t)
+          ? renderer.drawFrame(
+              video,
+              clipTransformAtOutputTime(segments, t),
+              colorGradeFilterAtOutputTime(segments, t),
+            )
+          : video;
+        frame = new VideoFrame(frameSource, {
           timestamp: i * frameDurUs,
           duration: frameDurUs,
         });
