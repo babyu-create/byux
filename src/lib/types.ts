@@ -1,6 +1,27 @@
 // Core domain types for Byux.
 
+import type { Animatable } from './keyframes';
+
 export type TrackKind = 'video' | 'overlay' | 'audio';
+
+/**
+ * Animatable clip transform (Phase 0 keyframe engine). Each field is either a
+ * constant or a sorted Keyframe[] (see lib/keyframes). Applied identically by
+ * the live Preview and the WebCodecs export renderer. All fields optional so
+ * older projects without a transform stay valid (backward compatible).
+ */
+export interface ClipTransform {
+  /** Translate X as % of frame width (+ = right, 0 = centered). */
+  x?: Animatable;
+  /** Translate Y as % of frame height (+ = down, 0 = centered). */
+  y?: Animatable;
+  /** Uniform scale multiplier (1 = 100%). Drives zoom/punch effects. */
+  scale?: Animatable;
+  /** Rotation in degrees. */
+  rotation?: Animatable;
+  /** Opacity 0..1 (1 = opaque). */
+  opacity?: Animatable;
+}
 
 export interface MediaAsset {
   id: string;
@@ -78,6 +99,8 @@ export interface Clip {
    * stretching to 16:9 instead of pillar-boxing. Off = preserve aspect (pad).
    */
   stretchToFill?: boolean;
+  /** Animatable transform (position / scale / rotation / opacity). */
+  transform?: ClipTransform;
   effects: ClipEffect[];
   overlays?: OverlayText[];
 }

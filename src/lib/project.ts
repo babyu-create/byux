@@ -130,6 +130,22 @@ const overlaySchema = z.object({
   background: z.string().optional(),
 });
 
+// Keyframe-animatable numeric property: a constant, or a list of keyframes.
+const keyframeSchema = z.object({
+  t: finiteNumber,
+  value: finiteNumber,
+  easing: z.enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold']).optional(),
+});
+const animatableSchema = z.union([finiteNumber, z.array(keyframeSchema)]);
+
+const clipTransformSchema = z.object({
+  x: animatableSchema.optional(),
+  y: animatableSchema.optional(),
+  scale: animatableSchema.optional(),
+  rotation: animatableSchema.optional(),
+  opacity: animatableSchema.optional(),
+});
+
 const clipSchema = z.object({
   id: idString,
   trackId: idString,
@@ -141,6 +157,7 @@ const clipSchema = z.object({
   volume: finiteNumber.optional(),
   muted: z.boolean().optional(),
   stretchToFill: z.boolean().optional(),
+  transform: clipTransformSchema.optional(),
   effects: z.array(clipEffectSchema),
   overlays: z.array(overlaySchema).optional(),
 });
