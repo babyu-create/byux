@@ -1025,155 +1025,6 @@ export function motionBlurStrengthAtOutputTime(
   return exportStrengthFromIntensity(mbEffect.intensity ?? 50, seg.clip.speed ?? 1);
 }
 
-/**
- * Apply the preview-matching clip transform to `videoInput` per frame.
- *
- * Pipeline mirrors applyWebglMotionBlur: decode each frame natively from a
- * hidden <video> (Chromium H.264), bake the sampled transform into it via the
- * shared OffscreenTransformRenderer (Canvas2D, origin = frame center), feed the
- * result into a WebCodecs VideoEncoder, then stream-copy the original audio
- * back on. Throws (→ caller skips the pass) if WebCodecs is unavailable.
- */
-async function applyTransformPass(
-  ffmpeg: FFmpeg,
-  videoInput: string,
-  params: {
-    width: number;
-    height: number;
-    targetFps: number;
-    segments: TransformSegment[];
-    onProgress?: ExportOptions['onProgress'];
-  },
-): Promise<string> {
-  const { width, height, targetFps, segments, onProgress } = params;
-
-  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
-    throw new Error('transform: WebCodecs (VideoEncoder) 利用不可');
-  }
-
-  onProgress?.({ stage: 'トランスフォーム: 動画を読み込み中', percent: -1 });
-  const data = await ffmpeg.readFile(videoInput);
-  const u8 = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
-  const blobPart: BlobPart = u8.buffer instanceof ArrayBuffer
-    ? (u8 as Uint8Array<ArrayBuffer>)
-    : new Uint8Array(u8);
-  const url = URL.createObjectURL(new Blob([blobPart], { type: 'video/mp4' }));
-  const video = document.createElement('video');
-  video.muted = true;
-  video.preload = 'auto';
-  video.src = url;
-  const loadedPromise = videoOnce(video, 'loadeddata');
-
-  const bitrate = pickBitrate(width, height, targetFps);
-  const codec = await pickAvcCodec({ width, height, bitrate, framerate: targetFps });
-  if (!codec) {
-    loadedPromise.catch(() => {});
-    URL.revokeObjectURL(url);
-    throw new Error('transform: 対応する H.264 エンコーダ設定が見つかりません');
-  }
-
-  const muxer = new Muxer({
-    target: new ArrayBufferTarget(),
-    video: { codec: 'avc', width, height, frameRate: targetFps },
-    fastStart: 'in-memory',
-  });
-  let encoderError: Error | null = null;
-  const encoder = new VideoEncoder({
-    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-    error: (e) => { encoderError = e instanceof Error ? e : new Error(String(e)); },
-  });
-  encoder.configure({ codec, width, height, bitrate, framerate: targetFps });
-
-  const renderer = new OffscreenTransformRenderer(width, height);
-  const frameDurUs = Math.round(1_000_000 / targetFps);
-  const gop = Math.max(1, targetFps * 2);
-
-  try {
-    await withTimeout(loadedPromise, 15000, '動画メタデータ読み込み');
-    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-    if (duration === 0) {
-      throw new Error('transform: 動画の長さを取得できませんでした');
-    }
-    const total = Math.max(1, Math.round(duration * targetFps));
-    mbLog(`[tf] native decode: duration=${duration.toFixed(2)}s total≈${total} frames`);
-
-    for (let i = 0; i < total; i++) {
-      if (encoderError) throw encoderError;
-      const t = (i + 0.5) / targetFps;
-      if (t >= duration) break;
-      await withTimeout(seekVideo(video, t), 10000, `フレーム seek #${i}`);
-
-      let frame: VideoFrame | null = null;
-      try {
-        // Identity pass-through: when this frame's segment has no visible
-        // transform AND no color grade, drawing it through the Canvas2D is a
-        // redundant copy (identity matrix + filter:none over a black fill =
-        // the source frame at output resolution). Feed the decoded <video>
-        // straight into the VideoFrame instead — same per-frame shortcut
-        // applySpeedRampPass already uses. Frames in transformed/graded
-        // segments still go through the renderer, so the output is identical.
-        const frameSource: CanvasImageSource = transformFrameNeedsCanvas(segments, t)
-          ? renderer.drawFrame(
-              video,
-              clipTransformAtOutputTime(segments, t),
-              colorGradeFilterAtOutputTime(segments, t),
-            )
-          : video;
-        frame = new VideoFrame(frameSource, {
-          timestamp: i * frameDurUs,
-          duration: frameDurUs,
-        });
-        encoder.encode(frame, { keyFrame: i % gop === 0 });
-      } finally {
-        if (frame) frame.close();
-      }
-
-      while (encoder.encodeQueueSize > 16) {
-        await new Promise<void>((r) => setTimeout(r, 4));
-        if (encoderError) throw encoderError;
-      }
-
-      if (i % 5 === 0 || i === total - 1) {
-        onProgress?.({
-          stage: `トランスフォーム適用中 (${i + 1}/${total})`,
-          percent: Math.max(0, Math.min(0.85, ((i + 1) / total) * 0.85)),
-        });
-      }
-    }
-
-    onProgress?.({ stage: 'トランスフォーム: エンコード仕上げ中', percent: 0.88 });
-    await encoder.flush();
-    if (encoderError) throw encoderError;
-    muxer.finalize();
-  } finally {
-    renderer.dispose();
-    try { encoder.close(); } catch { /* already closed / errored */ }
-    video.removeAttribute('src');
-    try { video.load(); } catch { /* ignore */ }
-    URL.revokeObjectURL(url);
-  }
-
-  const videoBytes = new Uint8Array(muxer.target.buffer);
-  onProgress?.({ stage: 'トランスフォーム: 音声を結合中', percent: 0.92 });
-  const TF_VIDEO = 'tf_video.mp4';
-  await ffmpeg.writeFile(TF_VIDEO, videoBytes);
-  const out = 'video_transformed.mp4';
-  await ffmpeg.exec([
-    '-threads', '1',
-    '-i', TF_VIDEO,
-    '-i', videoInput,
-    '-map', '0:v:0',
-    '-map', '1:a:0?',
-    '-c', 'copy',
-    '-movflags', '+faststart',
-    '-y',
-    out,
-  ]);
-  try { await ffmpeg.deleteFile(TF_VIDEO); } catch { /* ignore */ }
-  try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Speed-remap (ramp) pass — preview/export parity for Clip.speedRamp
 // ---------------------------------------------------------------------------
@@ -1226,36 +1077,65 @@ function segmentsHaveRamp(segments: TransformSegment[]): boolean {
   return segments.some((s) => hasSpeedRamp(s.clip.speedRamp));
 }
 
+// ---------------------------------------------------------------------------
+// Fused effects pass (WebCodecs) — motion-blur + speed-ramp + transform/grade
+// in ONE decode→render→encode loop
+// ---------------------------------------------------------------------------
+
+interface FusedEffectsParams {
+  width: number;
+  height: number;
+  targetFps: number;
+  segments: TransformSegment[];
+  /** Apply per-segment WebGL motion blur (gated like the preview). */
+  applyBlur: boolean;
+  /** Re-time the seek per output frame to bake each clip's speed ramp. */
+  applyRamp: boolean;
+  /** Bake the animated transform + color grade per frame. */
+  applyTransform: boolean;
+  /** Global motion-blur strength override (preview slider); per-clip gated. */
+  motionBlurStrengthOverride?: number;
+  hudPreset: HudPreset;
+  hudMaskStrength: number;
+  onProgress?: ExportOptions['onProgress'];
+}
+
 /**
- * Re-time the concatenated footage to bake each clip's speed ramp.
+ * Apply motion-blur, speed-ramp re-timing, and transform/color-grade to
+ * `videoInput` in a SINGLE decode→render→encode loop.
  *
- * Pipeline mirrors applyTransformPass / applyWebglMotionBlur: decode the
- * finished footage natively from a hidden <video>, but instead of seeking to a
- * linear time per output frame we seek to {@link rampFootageSeekAtOutputTime}
- * so slow→fast ramps show the correct source frame at each moment. The decoded
- * frame is fed straight into a WebCodecs VideoEncoder; the original audio is
- * stream-copied back on (audio is NOT time-warped here — see the export
- * LIMITATION note at the call site). Throws (→ caller skips) when WebCodecs is
- * unavailable.
+ * Previously each effect ran as its own self-contained pass (decode the whole
+ * video from WASM-FS → native <video> per-frame seek → WebCodecs re-encode →
+ * write back), so a clip using all three decoded-and-re-encoded the entire
+ * footage three times — compounding seek/encode time, peak memory (three
+ * ArrayBufferTargets), and stacking three lossy H.264 generations. Fusing them
+ * collapses that to one decode of each frame, one in-memory render chain
+ * (blur → transform/grade), and one H.264 generation — cutting effect-export
+ * time and peak memory by ~3x and removing the inter-pass quality loss.
+ *
+ * The per-output-time sampler functions used here
+ * ({@link rampFootageSeekAtOutputTime}, {@link motionBlurStrengthAtOutputTime},
+ * {@link clipTransformAtOutputTime}, {@link colorGradeFilterAtOutputTime},
+ * {@link transformFrameNeedsCanvas}) are pure, so this composition reproduces
+ * the exact result of running the three passes back-to-back.
+ *
+ * Throws (→ caller falls back to the individual passes) if WebCodecs is
+ * unavailable, no AVC config is supported, the video can't be read, or a seek
+ * times out.
  */
-async function applySpeedRampPass(
+async function applyFusedEffectsPass(
   ffmpeg: FFmpeg,
   videoInput: string,
-  params: {
-    width: number;
-    height: number;
-    targetFps: number;
-    segments: TransformSegment[];
-    onProgress?: ExportOptions['onProgress'];
-  },
+  params: FusedEffectsParams,
 ): Promise<string> {
   const { width, height, targetFps, segments, onProgress } = params;
+  const { applyBlur, applyRamp, applyTransform } = params;
 
   if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
-    throw new Error('speed-ramp: WebCodecs (VideoEncoder) 利用不可');
+    throw new Error('effects: WebCodecs (VideoEncoder) 利用不可');
   }
 
-  onProgress?.({ stage: '速度リマップ: 動画を読み込み中', percent: -1 });
+  onProgress?.({ stage: 'エフェクト: 動画を読み込み中', percent: -1 });
   const data = await ffmpeg.readFile(videoInput);
   const u8 = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
   const blobPart: BlobPart = u8.buffer instanceof ArrayBuffer
@@ -1273,7 +1153,7 @@ async function applySpeedRampPass(
   if (!codec) {
     loadedPromise.catch(() => {});
     URL.revokeObjectURL(url);
-    throw new Error('speed-ramp: 対応する H.264 エンコーダ設定が見つかりません');
+    throw new Error('effects: 対応する H.264 エンコーダ設定が見つかりません');
   }
 
   const muxer = new Muxer({
@@ -1288,6 +1168,35 @@ async function applySpeedRampPass(
   });
   encoder.configure({ codec, width, height, bitrate, framerate: targetFps });
 
+  const blurRenderer = applyBlur
+    ? new OffscreenMotionBlurRenderer(width, height, {
+        strength: params.motionBlurStrengthOverride ?? 0,
+        hudPreset: params.hudPreset,
+        hudMaskStrength: params.hudMaskStrength,
+      })
+    : null;
+  const transformRenderer = applyTransform ? new OffscreenTransformRenderer(width, height) : null;
+  // Intermediate canvas used ONLY to bridge the blur renderer's RGBA buffer
+  // into a CanvasImageSource the transform renderer (or the VideoFrame) can
+  // consume. Allocated once and reused per frame.
+  let bridgeCanvas: HTMLCanvasElement | null = null;
+  let bridgeCtx: CanvasRenderingContext2D | null = null;
+  if (applyBlur && applyTransform) {
+    bridgeCanvas = document.createElement('canvas');
+    bridgeCanvas.width = width;
+    bridgeCanvas.height = height;
+    const c = bridgeCanvas.getContext('2d');
+    if (!c) {
+      blurRenderer?.dispose();
+      transformRenderer?.dispose();
+      loadedPromise.catch(() => {});
+      try { encoder.close(); } catch { /* ignore */ }
+      URL.revokeObjectURL(url);
+      throw new Error('effects: 2D context for blur→transform bridge unavailable');
+    }
+    bridgeCtx = c;
+  }
+
   const frameDurUs = Math.round(1_000_000 / targetFps);
   const gop = Math.max(1, targetFps * 2);
 
@@ -1295,27 +1204,71 @@ async function applySpeedRampPass(
     await withTimeout(loadedPromise, 15000, '動画メタデータ読み込み');
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
     if (duration === 0) {
-      throw new Error('speed-ramp: 動画の長さを取得できませんでした');
+      throw new Error('effects: 動画の長さを取得できませんでした');
     }
-    // Output length = the timeline length of the concatenated footage (the
-    // ramp preserves each clip's duration, so this is unchanged).
     const total = Math.max(1, Math.round(duration * targetFps));
-    mbLog(`[sr] native decode: duration=${duration.toFixed(2)}s total≈${total} frames`);
+    mbLog(`[fx] native decode: duration=${duration.toFixed(2)}s total≈${total} frames (blur=${applyBlur} ramp=${applyRamp} transform=${applyTransform})`);
 
     for (let i = 0; i < total; i++) {
       if (encoderError) throw encoderError;
       const tOut = (i + 0.5) / targetFps;
       if (tOut >= duration) break;
-      // Re-timed seek: which footage frame should appear at this output time.
-      const seekT = Math.max(0, Math.min(duration - 1e-3, rampFootageSeekAtOutputTime(segments, tOut)));
+      // Speed ramp re-times WHICH source frame appears at this output time;
+      // when no ramp applies this is the linear output time (identity seek).
+      const seekT = applyRamp
+        ? Math.max(0, Math.min(duration - 1e-3, rampFootageSeekAtOutputTime(segments, tOut)))
+        : tOut;
       await withTimeout(seekVideo(video, seekT), 10000, `フレーム seek #${i}`);
 
       let frame: VideoFrame | null = null;
       try {
-        frame = new VideoFrame(video, {
-          timestamp: i * frameDurUs,
-          duration: frameDurUs,
-        });
+        // 1) Motion blur — produces RGBA gated per segment (sharp where no
+        //    motion-blur effect). When blur is the only effect, feed the RGBA
+        //    straight to a VideoFrame.
+        let blurredRgba: Uint8Array | null = null;
+        if (blurRenderer) {
+          const frameStrength = motionBlurStrengthAtOutputTime(
+            segments, tOut, params.motionBlurStrengthOverride,
+          );
+          blurredRgba = blurRenderer.processFrame(video, frameStrength);
+        }
+
+        // 2) Transform + color grade — drawn on top of the (optionally) blurred
+        //    frame. Identity transform + no grade is a pass-through (skip the
+        //    redundant Canvas2D copy), matching the standalone transform pass.
+        const needCanvas = applyTransform && transformFrameNeedsCanvas(segments, tOut);
+        if (needCanvas && transformRenderer) {
+          let source: CanvasImageSource;
+          if (blurredRgba && bridgeCtx && bridgeCanvas) {
+            // Copy the blur renderer's reused RGBA buffer into a fresh
+            // ImageData (the buffer is overwritten on the next processFrame).
+            bridgeCtx.putImageData(
+              new ImageData(new Uint8ClampedArray(blurredRgba), width, height),
+              0, 0,
+            );
+            source = bridgeCanvas;
+          } else {
+            source = video;
+          }
+          const canvas = transformRenderer.drawFrame(
+            source,
+            clipTransformAtOutputTime(segments, tOut),
+            colorGradeFilterAtOutputTime(segments, tOut),
+          );
+          frame = new VideoFrame(canvas, { timestamp: i * frameDurUs, duration: frameDurUs });
+        } else if (blurredRgba) {
+          // Blur (and/or ramp) only — emit the blurred RGBA directly.
+          frame = new VideoFrame(blurredRgba, {
+            format: 'RGBA',
+            codedWidth: width,
+            codedHeight: height,
+            timestamp: i * frameDurUs,
+            duration: frameDurUs,
+          });
+        } else {
+          // Ramp only (or identity transform frame) — emit the decoded frame.
+          frame = new VideoFrame(video, { timestamp: i * frameDurUs, duration: frameDurUs });
+        }
         encoder.encode(frame, { keyFrame: i % gop === 0 });
       } finally {
         if (frame) frame.close();
@@ -1328,17 +1281,19 @@ async function applySpeedRampPass(
 
       if (i % 5 === 0 || i === total - 1) {
         onProgress?.({
-          stage: `速度リマップ適用中 (${i + 1}/${total})`,
+          stage: `エフェクト適用中 (${i + 1}/${total})`,
           percent: Math.max(0, Math.min(0.85, ((i + 1) / total) * 0.85)),
         });
       }
     }
 
-    onProgress?.({ stage: '速度リマップ: エンコード仕上げ中', percent: 0.88 });
+    onProgress?.({ stage: 'エフェクト: エンコード仕上げ中', percent: 0.88 });
     await encoder.flush();
     if (encoderError) throw encoderError;
     muxer.finalize();
   } finally {
+    blurRenderer?.dispose();
+    transformRenderer?.dispose();
     try { encoder.close(); } catch { /* already closed / errored */ }
     video.removeAttribute('src');
     try { video.load(); } catch { /* ignore */ }
@@ -1346,13 +1301,13 @@ async function applySpeedRampPass(
   }
 
   const videoBytes = new Uint8Array(muxer.target.buffer);
-  onProgress?.({ stage: '速度リマップ: 音声を結合中', percent: 0.92 });
-  const SR_VIDEO = 'sr_video.mp4';
-  await ffmpeg.writeFile(SR_VIDEO, videoBytes);
-  const out = 'video_speedramped.mp4';
+  onProgress?.({ stage: 'エフェクト: 音声を結合中', percent: 0.92 });
+  const FX_VIDEO = 'fx_video.mp4';
+  await ffmpeg.writeFile(FX_VIDEO, videoBytes);
+  const out = 'video_effects.mp4';
   await ffmpeg.exec([
     '-threads', '1',
-    '-i', SR_VIDEO,
+    '-i', FX_VIDEO,
     '-i', videoInput,
     '-map', '0:v:0',
     '-map', '1:a:0?',
@@ -1361,7 +1316,7 @@ async function applySpeedRampPass(
     '-y',
     out,
   ]);
-  try { await ffmpeg.deleteFile(SR_VIDEO); } catch { /* ignore */ }
+  try { await ffmpeg.deleteFile(FX_VIDEO); } catch { /* ignore */ }
   try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
   return out;
 }
@@ -1769,151 +1724,144 @@ export async function exportProject(
       ]);
 
       // -----------------------------------------------------------------------
-      // Post-process motion-blur pass (preview-matching WebGL shader)
+      // Post-concat effects (motion-blur + speed-ramp + transform/color-grade)
       //
-      // Why a separate pass: tblend emits one fewer frame than input (no
-      // predecessor for frame 0). Inside a concat filter graph that desync
-      // causes a stall — the concat waits for matching frame counts that never
-      // arrive. Applying the blur after concat sidesteps both problems.
+      // FUSED into ONE decode→render→encode loop (applyFusedEffectsPass):
+      // previously each effect ran its own self-contained WebCodecs pass, so a
+      // clip using all three decoded-and-re-encoded the ENTIRE footage three
+      // times (3× seeks, 3 ArrayBufferTargets, 3 stacked H.264 generations).
+      // Fusing collapses that to one decode of each frame, one in-memory render
+      // chain (blur → transform/grade — order preserved from the old passes),
+      // and one H.264 generation. The per-output-time sampler functions are pure
+      // so the composed result equals running the passes back-to-back.
       //
-      // Per-segment gating: `includedTimeline` is passed to the WebGL pass so
-      // each output frame is blurred with its OWNING clip's intensity*speed —
-      // clips without a motion-blur effect pass through sharp, exactly like the
-      // preview (which only blurs the active clip when it has the effect). The
-      // `intensity`/`speed` below are only the legacy first-clip fallback used
-      // by the whole-video tblend path, which cannot vary strength per frame.
-      // -----------------------------------------------------------------------
-      if (enableMotionBlur) {
-        progressState.startEpoch = Date.now();
-        progressState.totalDuration = totalVideoSeconds;
-        options.onProgress?.({ stage: 'モーションブラー適用中', percent: -1 });
-
-        // Legacy fallback intensity/speed: first clip that has a motion-blur
-        // effect. Used ONLY by the tblend fallback (it applies one strength to
-        // the whole video); the WebGL path gates per segment via `segments`.
-        const mbClip = videoClips.find((c) =>
-          c.effects.some((e) => e.type === 'motion-blur'),
-        );
-        const mbEffect = mbClip?.effects.find((e) => e.type === 'motion-blur');
-        const mbIntensity = mbEffect?.intensity ?? 50;
-        const hudPreset = options.motionBlurHudPreset ?? 'valorant';
-        const hudMaskStrength = options.motionBlurHudMaskStrength ??
-          (hudPreset === 'none' ? 0 : 1);
-
-        videoOutput = await applyMotionBlur(ffmpeg, videoOutput, {
-          width,
-          height,
-          targetFps,
-          totalVideoSeconds,
-          intensity: mbIntensity,
-          speed: mbClip?.speed ?? 1,
-          strengthOverride: options.motionBlurStrength,
-          segments: includedTimeline,
-          hudPreset,
-          hudMaskStrength,
-          onProgress: options.onProgress,
-        });
-      }
-
-      // ---------------------------------------------------------------------
-      // Speed-remap (ramp) pass — bake each clip's slow→fast speed ramp by
-      // re-timing which source frame appears at each output frame. Runs after
-      // the blur pass (so the blurred footage is re-timed) and BEFORE the
-      // transform pass (transform samples by OUTPUT time, which the ramp does
-      // not change — only which source frame shows). Skipped entirely when no
-      // included clip has a ramp (zero cost for the common case).
+      // Why post-concat (not inside the filter graph): tblend emits one fewer
+      // frame than input (no predecessor for frame 0). Inside a concat filter
+      // graph that desync stalls the concat. Applying after concat sidesteps it.
       //
-      // LIMITATION (documented): this is a WebCodecs per-frame decode→encode
-      // pass like the others, so for very long timelines (> MAX_WEBGL_BLUR_
-      // FRAMES) or when WebCodecs is unavailable we SKIP it (export plays at the
-      // constant clip speed instead) rather than ship a wrong result — the
-      // preview still shows the ramp. Two further approximations vs the preview:
-      //   1. The AUDIO is not time-warped to the ramp (it keeps the
-      //      constant-speed atempo from the encode pass) — acceptable for FPS
-      //      kill montages where the ramp is a short visual slow-mo→punch.
-      //   2. Motion-blur strength in the export is scaled by the clip's AVERAGE
-      //      speed, not the instantaneous ramp speed (the preview scales by the
-      //      instantaneous value). The visual re-timing itself is exact.
-      // ---------------------------------------------------------------------
-      if (segmentsHaveRamp(includedTimeline)) {
-        const rampFrames = Math.ceil(totalVideoSeconds * targetFps);
-        if (rampFrames > MAX_WEBGL_BLUR_FRAMES) {
-          const msg = `[exporter] speed-ramp: ~${rampFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping ramp (constant speed for this export)`;
-          console.warn(msg);
-          options.onProgress?.({
-            stage: '速度リマップ: 長尺のためスキップ（一定速度で書き出し）',
-            percent: -1,
-            log: msg,
-          });
-        } else {
-          try {
-            options.onProgress?.({ stage: '速度リマップ適用中', percent: -1 });
-            videoOutput = await applySpeedRampPass(ffmpeg, videoOutput, {
-              width,
-              height,
-              targetFps,
-              segments: includedTimeline,
-              onProgress: options.onProgress,
-            });
-          } catch (err) {
-            // Never fail the whole export over the ramp pass — degrade to the
-            // constant-speed footage (still matches preview minus the ramp).
-            const m = `[exporter] speed-ramp pass failed (${err instanceof Error ? err.message : String(err)}) — exporting at constant speed`;
-            console.warn(m);
-            options.onProgress?.({ stage: '速度リマップに失敗（一定速度で継続）', percent: -1, log: m });
-            try { await ffmpeg.deleteFile('sr_video.mp4'); } catch { /* ignore */ }
-          }
-        }
-      }
-
-      // ---------------------------------------------------------------------
-      // Clip-transform + color-grade pass (after blur, before text → text stays
-      // anchored to the frame, untransformed/ungraded, like the preview overlay
-      // layers). Bakes the animated position/scale/rotation/opacity AND the
-      // one-click color grade per frame via WebCodecs (Canvas2D matrix +
-      // ctx.filter) so the export matches the preview. Skipped entirely when no
-      // included clip has a transform OR a color grade (zero cost for the
-      // common case).
+      // Per-segment gating: `includedTimeline` is passed so each output frame is
+      // blurred with its OWNING clip's intensity*speed (clips without a
+      // motion-blur effect pass through sharp), transformed/graded by its own
+      // clip, and ramp-re-timed per its own speed ramp — exactly like the
+      // preview.
       //
-      // LIMITATION: this is a WebCodecs (per-frame decode→canvas→encode) pass,
-      // like the motion-blur one. There is no ffmpeg-filter equivalent here, so
+      // LIMITATIONS (unchanged): all effects are WebCodecs per-frame passes, so
       // for very long timelines (> MAX_WEBGL_BLUR_FRAMES) or when WebCodecs is
-      // unavailable we SKIP the pass (export the untransformed/ungraded footage)
-      // rather than ship an approximation. The preview still shows it correctly.
-      // ---------------------------------------------------------------------
+      // unavailable we degrade — motion-blur falls back to the whole-video
+      // tblend filter; speed-ramp and transform/grade are SKIPPED (export at
+      // constant speed / untransformed) rather than shipping a wrong result. The
+      // ramp audio is not time-warped, and blur strength scales by the clip's
+      // AVERAGE (not instantaneous) speed; the visual re-timing itself is exact.
+      // -----------------------------------------------------------------------
+      const hasRamp = segmentsHaveRamp(includedTimeline);
       const transformSegments: TransformSegment[] = includedTimeline.filter(
         (seg) =>
           clipHasTransform(seg.clip.transform) ||
           clipHasColorGrade(seg.clip.colorGrade) ||
           clipHasTransition(seg.clip.transitionIn, seg.clip.transitionOut),
       );
-      if (transformSegments.length > 0) {
-        const transformFrames = Math.ceil(totalVideoSeconds * targetFps);
-        if (transformFrames > MAX_WEBGL_BLUR_FRAMES) {
-          const msg = `[exporter] clip transform: ~${transformFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping transform (preview-only for this export)`;
-          console.warn(msg);
-          options.onProgress?.({
-            stage: 'トランスフォーム/カラー: 長尺のためスキップ（プレビューのみ）',
-            percent: -1,
-            log: msg,
-          });
-        } else {
+      const hasTransform = transformSegments.length > 0;
+      const effectFrames = Math.ceil(totalVideoSeconds * targetFps);
+      const overFrameCap = effectFrames > MAX_WEBGL_BLUR_FRAMES;
+      const hudPreset = options.motionBlurHudPreset ?? 'valorant';
+      const hudMaskStrength = options.motionBlurHudMaskStrength ??
+        (hudPreset === 'none' ? 0 : 1);
+
+      if (enableMotionBlur || hasRamp || hasTransform) {
+        progressState.startEpoch = Date.now();
+        progressState.totalDuration = totalVideoSeconds;
+
+        // WebCodecs-fusable effects: blur (only when under the frame cap — over
+        // it falls back to the whole-video tblend filter), ramp, and transform.
+        const fuseBlur = enableMotionBlur && !overFrameCap;
+        const canFuse = (fuseBlur || hasRamp || hasTransform) && !overFrameCap;
+
+        if (canFuse) {
           try {
-            options.onProgress?.({ stage: 'トランスフォーム/カラー適用中', percent: -1 });
-            videoOutput = await applyTransformPass(ffmpeg, videoOutput, {
+            options.onProgress?.({ stage: 'エフェクト適用中', percent: -1 });
+            videoOutput = await applyFusedEffectsPass(ffmpeg, videoOutput, {
               width,
               height,
               targetFps,
               segments: includedTimeline,
+              applyBlur: fuseBlur,
+              applyRamp: hasRamp,
+              applyTransform: hasTransform,
+              motionBlurStrengthOverride: options.motionBlurStrength,
+              hudPreset,
+              hudMaskStrength,
               onProgress: options.onProgress,
             });
           } catch (err) {
-            // Never fail the whole export over the transform pass — degrade to
-            // the untransformed footage (still matches preview minus the move).
-            const m = `[exporter] transform pass failed (${err instanceof Error ? err.message : String(err)}) — exporting without clip transform`;
+            // Never fail the whole export over the fused pass — degrade exactly
+            // like the old per-pass fallbacks: motion-blur → whole-video tblend,
+            // speed-ramp & transform/grade → skipped (constant speed /
+            // untransformed). The preview still shows them correctly.
+            const m = `[exporter] fused effects pass failed (${err instanceof Error ? err.message : String(err)}) — degrading (blur→tblend, ramp/transform skipped)`;
             console.warn(m);
-            options.onProgress?.({ stage: 'トランスフォーム適用に失敗（変形なしで継続）', percent: -1, log: m });
-            try { await ffmpeg.deleteFile('tf_video.mp4'); } catch { /* ignore */ }
+            options.onProgress?.({ stage: 'エフェクト適用に失敗（縮退処理）', percent: -1, log: m });
+            try { await ffmpeg.deleteFile('fx_video.mp4'); } catch { /* ignore */ }
+            if (enableMotionBlur) {
+              const mbClip = videoClips.find((c) =>
+                c.effects.some((e) => e.type === 'motion-blur'),
+              );
+              const mbEffect = mbClip?.effects.find((e) => e.type === 'motion-blur');
+              videoOutput = await applyMotionBlur(ffmpeg, videoOutput, {
+                width,
+                height,
+                targetFps,
+                totalVideoSeconds,
+                intensity: mbEffect?.intensity ?? 50,
+                speed: mbClip?.speed ?? 1,
+                strengthOverride: options.motionBlurStrength,
+                segments: includedTimeline,
+                hudPreset,
+                hudMaskStrength,
+                onProgress: options.onProgress,
+              });
+            }
+          }
+        } else {
+          // Over the frame cap: motion-blur uses the whole-video tblend filter
+          // (applyMotionBlur routes there itself above the cap); ramp and
+          // transform/grade are skipped (preview-only for this export).
+          if (enableMotionBlur) {
+            options.onProgress?.({ stage: 'モーションブラー適用中', percent: -1 });
+            const mbClip = videoClips.find((c) =>
+              c.effects.some((e) => e.type === 'motion-blur'),
+            );
+            const mbEffect = mbClip?.effects.find((e) => e.type === 'motion-blur');
+            videoOutput = await applyMotionBlur(ffmpeg, videoOutput, {
+              width,
+              height,
+              targetFps,
+              totalVideoSeconds,
+              intensity: mbEffect?.intensity ?? 50,
+              speed: mbClip?.speed ?? 1,
+              strengthOverride: options.motionBlurStrength,
+              segments: includedTimeline,
+              hudPreset,
+              hudMaskStrength,
+              onProgress: options.onProgress,
+            });
+          }
+          if (hasRamp) {
+            const msg = `[exporter] speed-ramp: ~${effectFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping ramp (constant speed for this export)`;
+            console.warn(msg);
+            options.onProgress?.({
+              stage: '速度リマップ: 長尺のためスキップ（一定速度で書き出し）',
+              percent: -1,
+              log: msg,
+            });
+          }
+          if (hasTransform) {
+            const msg = `[exporter] clip transform: ~${effectFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping transform (preview-only for this export)`;
+            console.warn(msg);
+            options.onProgress?.({
+              stage: 'トランスフォーム/カラー: 長尺のためスキップ（プレビューのみ）',
+              percent: -1,
+              log: msg,
+            });
           }
         }
       }
@@ -2091,6 +2039,8 @@ export async function exportProject(
     try { await ffmpeg.deleteFile('sr_video.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_transformed.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('tf_video.mp4'); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile('video_effects.mp4'); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile('fx_video.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_overlaid.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('final.mp4'); } catch { /* ignore */ }
     // Purge any leftover overlay PNGs.
