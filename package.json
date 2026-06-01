@@ -5,13 +5,13 @@
   "version": "1.0.1",
   "license": "MIT",
   "description": "FPSキル集編集に特化したシンプルな動画エディタ",
-  "homepage": "https://github.com/babyu-create/highlight-maker",
+  "homepage": "https://github.com/babyu-create/byux",
   "repository": {
     "type": "git",
-    "url": "https://github.com/babyu-create/highlight-maker.git"
+    "url": "https://github.com/babyu-create/byux.git"
   },
   "bugs": {
-    "url": "https://github.com/babyu-create/highlight-maker/issues"
+    "url": "https://github.com/babyu-create/byux/issues"
   },
   "author": {
     "name": "babyu-create",
@@ -141,7 +141,7 @@
       {
         "provider": "github",
         "owner": "babyu-create",
-        "repo": "highlight-maker",
+        "repo": "byux",
         "releaseType": "release"
       }
     ]
