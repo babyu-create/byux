@@ -93,6 +93,52 @@ describe('parseProjectFile', () => {
     broken.clips[0].colorGrade = { preset: 'teal-orange' };
     expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
   });
+
+  it('accepts optional overlay decoration + intro fields and round-trips them', () => {
+    const p = validProject();
+    p.clips[0].overlays = [
+      {
+        id: 'ov1',
+        text: 'KILL',
+        fontSize: 8,
+        color: '#ffffff',
+        position: 'bottom-center',
+        outline: true,
+        decoration: 'gradient',
+        decorationColor: '#00ffcc',
+        strokeWidth: 0.12,
+        intro: 'slide-up',
+        introDuration: 0.5,
+      },
+    ];
+    const parsed = parseProjectFile(JSON.stringify(p));
+    const ov = parsed.clips[0].overlays?.[0];
+    expect(ov?.decoration).toBe('gradient');
+    expect(ov?.decorationColor).toBe('#00ffcc');
+    expect(ov?.strokeWidth).toBe(0.12);
+    expect(ov?.intro).toBe('slide-up');
+    expect(ov?.introDuration).toBe(0.5);
+  });
+
+  it('stays valid for a legacy overlay WITHOUT the new fields (backward compatible)', () => {
+    const p = validProject();
+    p.clips[0].overlays = [
+      { id: 'ov1', text: 'X', fontSize: 8, color: '#fff', position: 'center' },
+    ];
+    const parsed = parseProjectFile(JSON.stringify(p));
+    const ov = parsed.clips[0].overlays?.[0];
+    expect(ov?.decoration).toBeUndefined();
+    expect(ov?.intro).toBeUndefined();
+  });
+
+  it('rejects an unknown overlay intro kind', () => {
+    const p = validProject();
+    const broken = JSON.parse(JSON.stringify(p));
+    broken.clips[0].overlays = [
+      { id: 'ov1', text: 'X', fontSize: 8, color: '#fff', position: 'center', intro: 'spin' },
+    ];
+    expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
+  });
 });
 
 describe('buildAssetIdMap', () => {

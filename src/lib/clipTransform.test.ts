@@ -1,12 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import {
   IDENTITY_TRANSFORM,
+  buildShakeKeyframes,
+  buildZoomPunchKeyframes,
   clipHasTransform,
   isTransformVisible,
   sampleClipTransform,
   transformToCss,
   transformToMatrix,
 } from './clipTransform';
+import { sample } from './keyframes';
 import type { ClipTransform } from './types';
 
 describe('sampleClipTransform', () => {
@@ -76,6 +79,54 @@ describe('clipHasTransform', () => {
   });
   it('false for an empty keyframe array (no keyframes)', () => {
     expect(clipHasTransform({ scale: [] })).toBe(false);
+  });
+});
+
+describe('buildZoomPunchKeyframes', () => {
+  it('scale eases 1.0 → 1.15 over the clip', () => {
+    const { scale } = buildZoomPunchKeyframes(2);
+    expect(scale).toBeDefined();
+    expect(scale![0]).toEqual({ t: 0, value: 1, easing: 'easeOut' });
+    expect(scale![scale!.length - 1].t).toBe(2);
+    expect(scale![scale!.length - 1].value).toBe(1.15);
+  });
+
+  it('honours a custom target scale and clamps tiny durations', () => {
+    const { scale } = buildZoomPunchKeyframes(0.01, 1.3);
+    expect(scale![scale!.length - 1].t).toBe(0.2); // clamped to 0.2 min
+    expect(scale![scale!.length - 1].value).toBe(1.3);
+  });
+});
+
+describe('buildShakeKeyframes', () => {
+  it('produces matched x/y keyframe arrays starting and ending at 0', () => {
+    const { x, y } = buildShakeKeyframes(1, 4, 6);
+    expect(x).toBeDefined();
+    expect(y).toBeDefined();
+    expect(x!.length).toBe(y!.length);
+    // Starts at t=0, ends at the clip duration.
+    expect(x![0].t).toBe(0);
+    expect(x![x!.length - 1].t).toBeCloseTo(1, 5);
+    // Settles to exactly 0 at the end (no residual offset).
+    expect(x![x!.length - 1].value).toBe(0);
+    expect(y![y!.length - 1].value).toBe(0);
+  });
+
+  it('amplitude decays over time (later peaks are smaller)', () => {
+    const { x } = buildShakeKeyframes(1, 5, 6);
+    // First non-zero peak magnitude should exceed a later one.
+    const first = Math.abs(x![0].value);
+    const later = Math.abs(x![Math.floor(x!.length / 2)].value);
+    expect(first).toBeGreaterThanOrEqual(later);
+  });
+
+  it('keyframes are sampleable through the keyframe engine (bounded by amplitude)', () => {
+    const { x } = buildShakeKeyframes(1, 3, 6);
+    // Sampling anywhere in range stays within ±amplitude.
+    for (let t = 0; t <= 1; t += 0.1) {
+      const v = sample(x, t, 0);
+      expect(Math.abs(v)).toBeLessThanOrEqual(3 + 1e-6);
+    }
   });
 });
 

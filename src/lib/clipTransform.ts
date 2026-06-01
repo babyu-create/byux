@@ -13,6 +13,7 @@
 // transform-origin is the frame CENTER for both preview and export.
 
 import type { ClipTransform } from './types';
+import type { Keyframe } from './keyframes';
 import { isAnimated, sample } from './keyframes';
 
 /** Concrete (sampled) transform — every field resolved to a number. */
@@ -107,6 +108,70 @@ export function transformToCss(r: ResolvedTransform): string {
     `scale(${r.scale}) ` +
     `rotate(${r.rotation}deg)`
   );
+}
+
+// --- One-click transform-keyframe presets (Phase P3) -----------------------
+// Pure authoring helpers that build keyframe arrays from a clip duration, so
+// the preset buttons stay declarative and unit-testable. The resulting
+// keyframes flow through the SAME sampleClipTransform path as hand-authored
+// ones, so the preview and export render them identically.
+
+/** Result of a transform preset: the keyframe arrays to merge into a transform. */
+export interface TransformPresetKeyframes {
+  x?: Keyframe[];
+  y?: Keyframe[];
+  scale?: Keyframe[];
+}
+
+/**
+ * Build a "ズームパンチ" preset: scale eases from 1.0 → `to` over the clip.
+ * Defaults match the existing one-click zoom-punch (1.0 → 1.15, easeOut).
+ */
+export function buildZoomPunchKeyframes(
+  durationSec: number,
+  to = 1.15,
+): TransformPresetKeyframes {
+  const dur = Math.max(0.2, durationSec);
+  return {
+    scale: [
+      { t: 0, value: 1, easing: 'easeOut' },
+      { t: dur, value: to },
+    ],
+  };
+}
+
+/**
+ * Build a "シェイク" (camera shake) preset: x/y oscillate around 0 with a
+ * decaying amplitude, as % of frame width/height. `amplitude` is the starting
+ * peak offset (%), `shakes` the number of back-and-forth cycles. The shake is
+ * front-loaded (decays to 0 by the end) so it reads as an impact, not a
+ * constant wobble. Pure → testable; flows through sampleClipTransform.
+ */
+export function buildShakeKeyframes(
+  durationSec: number,
+  amplitude = 3,
+  shakes = 6,
+): TransformPresetKeyframes {
+  const dur = Math.max(0.2, durationSec);
+  const cycles = Math.max(1, Math.round(shakes));
+  // One keyframe per half-cycle for x and y, alternating sign, amplitude
+  // decaying linearly to 0. y uses a quarter-phase offset so motion isn't
+  // purely diagonal. End at 0,0 so the clip settles.
+  const xKfs: Keyframe[] = [];
+  const yKfs: Keyframe[] = [];
+  const steps = cycles * 2; // half-cycles
+  for (let i = 0; i <= steps; i++) {
+    const t = (i / steps) * dur;
+    const decay = 1 - i / steps; // 1 → 0
+    const amp = amplitude * decay;
+    const xVal = i === steps ? 0 : (i % 2 === 0 ? amp : -amp);
+    // y is phase-shifted: use sign based on floor((i+1)/2) parity.
+    const ySign = Math.floor((i + 1) / 2) % 2 === 0 ? 1 : -1;
+    const yVal = i === steps ? 0 : ySign * amp * 0.7;
+    xKfs.push({ t, value: xVal, easing: 'easeInOut' });
+    yKfs.push({ t, value: yVal, easing: 'easeInOut' });
+  }
+  return { x: xKfs, y: yKfs };
 }
 
 /** A 2D affine matrix [a, b, c, d, e, f] (CSS matrix() / Canvas setTransform). */

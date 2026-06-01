@@ -178,7 +178,7 @@
 
 .fontRow {
   display: grid;
-  grid-template-columns: 38px 1fr;
+  grid-template-columns: 38px 1fr auto;
   align-items: center;
   gap: 6px;
   margin-top: 6px;

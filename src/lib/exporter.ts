@@ -32,6 +32,11 @@ import {
   makeRampSampler,
 } from './speedRamp';
 import { rasterizeOverlays } from './overlayRaster';
+import {
+  buildOverlayFilterParts,
+  introForClipOverlays,
+  type ClipOverlayIntro,
+} from './overlayText';
 
 export interface ExportOptions {
   resolution: '720p' | '1080p';
@@ -1209,6 +1214,12 @@ interface OverlaySpec {
   /** Output-timeline window (seconds) the overlay is visible. */
   start: number;
   end: number;
+  /**
+   * Optional intro animation (Phase P3) for this clip's overlay PNG — animates
+   * the appearance (alpha fade + slide offset) so the export matches the
+   * preview's intro. Null = static composite (legacy behaviour).
+   */
+  intro: ClipOverlayIntro | null;
 }
 
 /**
@@ -1237,15 +1248,24 @@ async function applyOverlayPass(
   }
 
   // Chain: [0:v][1:v]overlay…[ov0]; [ov0][2:v]overlay…[ov1]; … → [ovout].
-  // Commas inside between() are escaped (\,) so the filtergraph parser doesn't
-  // read them as filter separators.
+  // Each overlay is composited statically OR with an intro (alpha fade + slide
+  // offset). The fragment builder namespaces any intermediate labels by index
+  // so multiple overlays compose without collisions. Commas inside expressions
+  // are escaped (\,) so the filtergraph parser doesn't split on them.
   const parts: string[] = [];
   let last = '[0:v]';
   specs.forEach((s, k) => {
     const next = k === specs.length - 1 ? '[ovout]' : `[ov${k}]`;
-    parts.push(
-      `${last}[${k + 1}:v]overlay=0:0:enable=between(t\\,${s.start.toFixed(3)}\\,${s.end.toFixed(3)})${next}`,
+    const fragParts = buildOverlayFilterParts(
+      last,
+      `[${k + 1}:v]`,
+      next,
+      k,
+      s.start,
+      s.end,
+      s.intro,
     );
+    parts.push(...fragParts);
     last = next;
   });
 
@@ -1711,7 +1731,9 @@ export async function exportProject(
         if (!png) continue;
         const name = `ovl_${overlaySpecs.length}.png`;
         await ffmpeg.writeFile(name, png);
-        overlaySpecs.push({ name, start: seg.start, end: seg.end });
+        // Intro animation for this clip's shared overlay PNG (matches preview).
+        const intro = introForClipOverlays(seg.clip.overlays, height);
+        overlaySpecs.push({ name, start: seg.start, end: seg.end, intro });
       }
       if (overlaySpecs.length > 0) {
         options.onProgress?.({ stage: 'テキスト合成中', percent: -1 });

@@ -1,11 +1,13 @@
 import { useMemo } from 'react';
-import { Move3d, Plus, RotateCcw, ZoomIn } from 'lucide-react';
+import { Move3d, Plus, RotateCcw, Waves, ZoomIn } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import type { Clip, ClipTransform } from '../../lib/types';
 import type { Animatable, Keyframe } from '../../lib/keyframes';
 import { isAnimated, upsertKeyframe } from '../../lib/keyframes';
 import {
   IDENTITY_TRANSFORM,
+  buildShakeKeyframes,
+  buildZoomPunchKeyframes,
   clipHasTransform,
   sampleClipTransform,
 } from '../../lib/clipTransform';
@@ -109,12 +111,14 @@ export function ClipTransformSection({ clip }: ClipTransformSectionProps) {
 
   /** One-click zoom-punch: scale 1.0 → ~1.15 with easeOut over the clip. */
   const applyZoomPunch = () => {
-    const dur = Math.max(0.2, clipDuration(clip));
-    const scaleKfs: Keyframe[] = [
-      { t: 0, value: 1, easing: 'easeOut' },
-      { t: dur, value: 1.15 },
-    ];
-    setTransform(clip.id, { ...(transform ?? {}), scale: scaleKfs });
+    const { scale } = buildZoomPunchKeyframes(clipDuration(clip));
+    setTransform(clip.id, { ...(transform ?? {}), scale });
+  };
+
+  /** One-click camera shake: decaying x/y oscillation (impact feel). */
+  const applyShake = () => {
+    const { x, y } = buildShakeKeyframes(clipDuration(clip));
+    setTransform(clip.id, { ...(transform ?? {}), x, y });
   };
 
   /** Clear the transform entirely (back to identity). */
@@ -140,6 +144,15 @@ export function ClipTransformSection({ clip }: ClipTransformSectionProps) {
         >
           <ZoomIn size={14} strokeWidth={2} aria-hidden="true" />
           ズームパンチ
+        </button>
+        <button
+          type="button"
+          className={styles.presetBtn}
+          onClick={applyShake}
+          title="衝撃カメラシェイク（x/y を減衰振動、プレビュー・書き出し共通）"
+        >
+          <Waves size={14} strokeWidth={2} aria-hidden="true" />
+          シェイク
         </button>
         <button
           type="button"

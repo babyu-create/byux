@@ -733,6 +733,7 @@ export function Preview() {
                 <OverlayLayer
                   overlays={activeClip.overlays}
                   contextValues={overlayContext}
+                  localTime={playhead - activeClip.start}
                 />
               ) : null}
             </>

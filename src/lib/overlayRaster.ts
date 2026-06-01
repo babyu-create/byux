@@ -13,6 +13,7 @@
 
 import type { OverlayText } from './types';
 import { getFontStack } from './fonts';
+import { overlayDecoration, overlayStrokeWidth } from './overlayText';
 
 const INSET = 0.05; // 5% — matches OverlayLayer top/bottom/left/right inset
 const LINE_HEIGHT = 1.1;
@@ -131,19 +132,62 @@ export async function rasterizeOverlays(
       fillRoundRect(ctx, bx, yTop - padY, bw, bh, fontPx * 0.2);
     }
 
+    // Decoration (Phase P3). 'glow' / 'shadow' use the canvas shadow on the
+    // FILL pass; 'gradient' fills with a vertical linear gradient. The outline
+    // (stroke) is drawn first WITHOUT any shadow so the glow/shadow only haloes
+    // the fill — matching OverlayLayer's text-shadow layering.
+    const deco = overlayDecoration(o);
+
+    // Build the fill style: a vertical gradient for 'gradient', else the color.
+    let fillStyle: string | CanvasGradient = o.color;
+    if (deco === 'gradient') {
+      const g = ctx.createLinearGradient(0, yTop, 0, yTop + blockH);
+      g.addColorStop(0, o.color);
+      g.addColorStop(1, o.decorationColor ?? o.color);
+      fillStyle = g;
+    }
+
     // Text: stroke (outline) then fill, line by line.
     lines.forEach((ln, i) => {
       const y = yTop + i * lineH;
+      // Outline first, with NO shadow so the halo doesn't double on the stroke.
       if (o.outline) {
-        ctx.lineWidth = Math.max(2, fontPx * 0.08);
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.lineWidth = Math.max(2, fontPx * overlayStrokeWidth(o));
         ctx.strokeStyle = o.outlineColor ?? '#000000';
         ctx.lineJoin = 'round';
         ctx.miterLimit = 2;
         ctx.strokeText(ln, x, y);
       }
-      ctx.fillStyle = o.color;
+      // Fill, applying the glow / drop-shadow on this pass only.
+      if (deco === 'glow') {
+        ctx.shadowColor = o.decorationColor ?? o.color;
+        ctx.shadowBlur = fontPx * 0.4;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+      } else if (deco === 'shadow') {
+        ctx.shadowColor = 'rgba(0,0,0,0.65)';
+        ctx.shadowBlur = fontPx * 0.12;
+        ctx.shadowOffsetX = fontPx * 0.06;
+        ctx.shadowOffsetY = fontPx * 0.06;
+      } else {
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+      }
+      ctx.fillStyle = fillStyle;
       ctx.fillText(ln, x, y);
     });
+
+    // Reset shadow so the next overlay / background pill isn't haloed.
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
   }
 
   const blob = await new Promise<Blob | null>((resolve) =>

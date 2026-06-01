@@ -89,6 +89,17 @@ export type OverlayPosition =
   | 'bottom-center'
   | 'bottom-right';
 
+/** Decorative text style (Phase P3). 'none' = flat fill, no extra decoration. */
+export type OverlayDecoration = 'none' | 'glow' | 'shadow' | 'gradient';
+
+/**
+ * Optional intro animation kind for a text overlay (Phase P3). Sampled by
+ * lib/overlayText over the overlay's intro window from clip-local t=0, applied
+ * identically by the live Preview (CSS transform/opacity) and the WebCodecs
+ * export (ffmpeg fade + overlay position). 'none' = appears instantly.
+ */
+export type OverlayIntroKind = 'none' | 'fade' | 'slide-up' | 'slide-left' | 'scale-in';
+
 export interface OverlayText {
   id: string;
   text: string;
@@ -103,6 +114,23 @@ export interface OverlayText {
   fontFamily?: string;
   /** Background color (transparent if undefined). */
   background?: string;
+  /**
+   * Decorative text treatment (Phase P3): soft 'glow', drop 'shadow', or a
+   * vertical 'gradient' fill. Drawn identically by the preview (CSS) and the
+   * export raster (Canvas2D). Absent / 'none' = flat fill (backward compatible).
+   */
+  decoration?: OverlayDecoration;
+  /** Secondary color for 'gradient' decoration (bottom stop). Top stop = `color`. */
+  decorationColor?: string;
+  /**
+   * Outline / stroke width as a fraction of font size (e.g. 0.08 = 8%). Only
+   * applies when `outline` is on. Absent = default 0.08 (matches legacy look).
+   */
+  strokeWidth?: number;
+  /** Optional intro animation kind (Phase P3). Absent / 'none' = no intro. */
+  intro?: OverlayIntroKind;
+  /** Intro animation duration in seconds (defaults to 0.4). Clamped on use. */
+  introDuration?: number;
 }
 
 export interface Clip {

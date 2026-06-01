@@ -128,6 +128,13 @@ const overlaySchema = z.object({
   outlineColor: z.string().optional(),
   fontFamily: z.string().optional(),
   background: z.string().optional(),
+  // Phase P3 decorative text + intro animation. All OPTIONAL so older projects
+  // without these fields stay valid (backward compatible).
+  decoration: z.enum(['none', 'glow', 'shadow', 'gradient']).optional(),
+  decorationColor: z.string().optional(),
+  strokeWidth: finiteNumber.optional(),
+  intro: z.enum(['none', 'fade', 'slide-up', 'slide-left', 'scale-in']).optional(),
+  introDuration: finiteNumber.optional(),
 });
 
 // Keyframe-animatable numeric property: a constant, or a list of keyframes.
