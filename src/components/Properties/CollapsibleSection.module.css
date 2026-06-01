@@ -62,7 +62,7 @@
 .body {
   /* Suppress each wrapped section's own internal header (its first child) so
      the collapsible toggle is the single, non-duplicated header for the
-     section. Every Clip*/marker section renders `root > header > body`. */
+     section. Every Clip / marker section renders root > header > body. */
 }
 
 .body > div > div:first-child {
