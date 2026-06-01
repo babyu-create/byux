@@ -275,11 +275,12 @@ export function buildDuckVolumeExpr(
   // filtergraph parser doesn't split the filter on them.
   const factors = merged.map((p) => {
     const c = p.toFixed(5);
-    // attackRamp = (t-(c-a))/a  on [c-a, c]; releaseRamp = (t-c)/r on [c, c+r]
+    // attackRamp = (c-t)/a on [c-a, c]; releaseRamp = (t-c)/r on [c, c+r].
     // We build a single ramp value in [0,1] that is 0 at the point and 1 at the
-    // window edges, then map: gain = floor + (1-floor)*ramp.
-    const attackRamp = `((t-(${c}-${a}))/${a})`;
-    const releaseRamp = `(((${c}+${r})-t)/${r})`;
+    // window edges, then map: gain = floor + (1-floor)*ramp — matching duckGainAt
+    // (floor AT the kill point, full at the window edges).
+    const attackRamp = `((${c}-t)/${a})`;
+    const releaseRamp = `((t-${c})/${r})`;
     const ramp = `if(lt(t\\,${c})\\,${attackRamp}\\,${releaseRamp})`;
     const inWindow = `between(t\\,${c}-${a}\\,${c}+${r})`;
     // Clamp the ramp to [0,1] then map to gain; outside the window → 1.

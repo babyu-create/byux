@@ -255,6 +255,49 @@ describe('buildDuckVolumeExpr', () => {
     const expr = buildDuckVolumeExpr([5, 10], resolved)!;
     expect((expr.match(/between/g) ?? []).length).toBe(2);
   });
+
+  // Numerically evaluate the built ffmpeg expression at a given time `t` so we
+  // can assert preview/export PARITY (the existing string-shape tests pass
+  // regardless of ramp direction). The ffmpeg builtins used here (if/between/
+  // lt/min/max) are modeled as JS functions; un-escaping the commas then makes
+  // the expression directly evaluable. The duck expression is pure arithmetic
+  // (no division by zero, no side effects), so ffmpeg's lazy `if` vs JS's eager
+  // argument evaluation make no difference to the result.
+  const evalDuckExpr = (expr: string, t: number): number => {
+    const js = expr
+      .replace(/\\,/g, ',') // un-escape ffmpeg commas
+      .replace(/\bif\(/g, 'ffif('); // `if` is a JS keyword → rename the call
+    const ffif = (c: number, a: number, b: number) => (c ? a : b);
+    const between = (x: number, lo: number, hi: number) => (x >= lo && x <= hi ? 1 : 0);
+    const lt = (x: number, y: number) => (x < y ? 1 : 0);
+    // eslint-disable-next-line no-new-func
+    const fn = Function('t', 'min', 'max', 'ffif', 'between', 'lt', `return (${js});`);
+    return fn(t, Math.min, Math.max, ffif, between, lt) as number;
+  };
+
+  it('matches duckGainAt across the window (preview/export parity)', () => {
+    const point = 5;
+    const expr = buildDuckVolumeExpr([point], resolved)!;
+    // Sample densely across the full window [c-attack, c+release] and a little
+    // outside it; the expression must equal duckGainAt within 1e-4 everywhere.
+    let maxDiff = 0;
+    for (let t = point - resolved.attack - 0.1; t <= point + resolved.release + 0.1; t += 0.01) {
+      const analytic = duckGainAt(t, [point], resolved);
+      const fromExpr = evalDuckExpr(expr, t);
+      maxDiff = Math.max(maxDiff, Math.abs(analytic - fromExpr));
+    }
+    expect(maxDiff).toBeLessThan(1e-4);
+  });
+
+  it('hits the floor AT the kill point and full at the window edges (not inverted)', () => {
+    const point = 5;
+    const expr = buildDuckVolumeExpr([point], resolved)!;
+    // At the kill point the BGM is dipped to the floor (LOUDEST is the bug).
+    expect(evalDuckExpr(expr, point)).toBeCloseTo(resolved.floorGain, 4);
+    // At both window edges the BGM is back to full level.
+    expect(evalDuckExpr(expr, point - resolved.attack)).toBeCloseTo(1, 4);
+    expect(evalDuckExpr(expr, point + resolved.release)).toBeCloseTo(1, 4);
+  });
 });
 
 describe('preset metadata', () => {
