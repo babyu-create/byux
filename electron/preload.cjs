@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld('fce', {
     check() {
       return ipcRenderer.invoke('updater:check');
     },
+    download() {
+      return ipcRenderer.invoke('updater:download');
+    },
     installAndRestart() {
       return ipcRenderer.invoke('updater:install-and-restart');
     },

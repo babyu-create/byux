@@ -8,8 +8,15 @@ const VITE_DEV_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
 let mainWindow = null;
 
 // --- Auto-update wiring ---
-autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
+// Windows/macOS artifacts are NOT code-signed yet, so electron-updater has no
+// cryptographic trust anchor on the downloaded installer beyond TLS to GitHub.
+// If the release channel were ever compromised, an auto-download + auto-install
+// would silently push attacker-controlled code to every client. Until the
+// builds are signed (Authenticode / notarization), require explicit user intent
+// before any update is fetched or staged: autoDownload stays off and the
+// renderer must call updater:download to begin the transfer.
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = false;
 
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -44,6 +51,18 @@ autoUpdater.on('update-downloaded', (info) => {
 
 ipcMain.handle('updater:install-and-restart', () => {
   autoUpdater.quitAndInstall();
+});
+// Download is gated behind an explicit user action in the renderer
+// (UpdateBanner) — never triggered automatically — because unsigned artifacts
+// offer no publisher verification.
+ipcMain.handle('updater:download', async () => {
+  if (isDev) return { skipped: true, reason: 'dev mode' };
+  try {
+    await autoUpdater.downloadUpdate();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err?.message ?? String(err) };
+  }
 });
 ipcMain.handle('updater:check', async () => {
   if (isDev) return { skipped: true, reason: 'dev mode' };

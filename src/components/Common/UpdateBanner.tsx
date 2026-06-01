@@ -13,6 +13,7 @@ type UpdaterEvent =
 interface UpdaterAPI {
   onEvent(cb: (e: UpdaterEvent) => void): () => void;
   check(): Promise<unknown>;
+  download(): Promise<unknown>;
   installAndRestart(): Promise<unknown>;
 }
 
@@ -50,21 +51,35 @@ export function UpdateBanner() {
     window.fce?.updater?.installAndRestart();
   };
 
+  // Unsigned artifacts have no publisher verification, so the download only
+  // starts when the user explicitly requests it — never automatically.
+  const handleDownload = () => {
+    window.fce?.updater?.download();
+  };
+
   if (event.status === 'available') {
     return (
       <div className={styles.banner} data-state="available" role="status">
         <span className={styles.icon}><Sparkles size={16} strokeWidth={2} aria-hidden="true" /></span>
         <span className={styles.text}>
-          新しいバージョン <strong>v{event.version}</strong> のダウンロードを開始しました…
+          新しいバージョン <strong>v{event.version}</strong> が利用可能です。
         </span>
-        <button
-          type="button"
-          className={styles.dismissBtn}
-          onClick={() => setDismissed(true)}
-          aria-label="閉じる"
-        >
-          ×
-        </button>
+        <div className={styles.actions}>
+          <button
+            type="button"
+            className={styles.btnSecondary}
+            onClick={() => setDismissed(true)}
+          >
+            あとで
+          </button>
+          <button
+            type="button"
+            className={styles.btnPrimary}
+            onClick={handleDownload}
+          >
+            ダウンロード
+          </button>
+        </div>
       </div>
     );
   }
