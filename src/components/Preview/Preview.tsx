@@ -8,6 +8,7 @@ import { Rewind, FastForward, Play, Pause, EyeOff, Clapperboard } from 'lucide-r
 import { MotionBlurCanvas, type HudPreset } from './MotionBlurCanvas';
 import { shapeStrength } from '../../lib/motionBlurCore';
 import { OverlayLayer } from './OverlayLayer';
+import { sampleClipTransform, transformToCss } from '../../lib/clipTransform';
 import styles from './Preview.module.css';
 
 // Motion-blur strength shaping (shapeStrength + gamma/peak constants) now lives
@@ -181,6 +182,23 @@ export function Preview() {
     }
     return Math.max(0, Math.min(1, opacity));
   }, [fadeIn, fadeOut, activeClip, playhead]);
+
+  // Animated clip transform (position / scale / rotation / opacity). Sampled at
+  // clip-local time and applied as a CSS transform to the footage layer (the
+  // <video> AND the MotionBlurCanvas together — they're wrapped in one element
+  // so both move identically). Fade overlay / text / badges live OUTSIDE this
+  // layer so they stay anchored to the frame. The export applies the SAME
+  // sampled transform per frame (lib/clipTransform → OffscreenTransformRenderer)
+  // so the preview and the MP4 match.
+  const footageTransform = useMemo(() => {
+    if (!activeClip) return null;
+    const localT = playhead - activeClip.start;
+    const r = sampleClipTransform(activeClip.transform, localT);
+    return {
+      transform: transformToCss(r),
+      opacity: Math.max(0, Math.min(1, r.opacity)),
+    };
+  }, [activeClip, playhead]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -570,26 +588,38 @@ export function Preview() {
         <div className={styles.frame} data-aspect={aspectRatio}>
           {showVideo ? (
             <>
-              <video
-                key={displayAsset?.id}
-                ref={videoRef}
-                src={displayAsset?.url}
-                className={styles.video}
-                style={videoStyle}
-                playsInline
-                muted={videoTrackMuted}
-                onClick={togglePlay}
-              />
-              <MotionBlurCanvas
-                videoRef={videoRef}
-                isPlaying={isPlaying}
-                active={motionBlur !== null && motionBlurStrength > 0}
-                strength={motionBlurStrength}
-                hudPreset={hudPreset}
-                hudMaskStrength={hudPreset === 'none' ? 0 : 1}
-                aspect={aspectRatio === '9:16' ? 9 / 16 : 16 / 9}
-                coverPosition={isVertical ? reframePosition : undefined}
-              />
+              <div
+                className={styles.footageLayer}
+                style={
+                  footageTransform
+                    ? {
+                        transform: footageTransform.transform,
+                        opacity: footageTransform.opacity,
+                      }
+                    : undefined
+                }
+              >
+                <video
+                  key={displayAsset?.id}
+                  ref={videoRef}
+                  src={displayAsset?.url}
+                  className={styles.video}
+                  style={videoStyle}
+                  playsInline
+                  muted={videoTrackMuted}
+                  onClick={togglePlay}
+                />
+                <MotionBlurCanvas
+                  videoRef={videoRef}
+                  isPlaying={isPlaying}
+                  active={motionBlur !== null && motionBlurStrength > 0}
+                  strength={motionBlurStrength}
+                  hudPreset={hudPreset}
+                  hudMaskStrength={hudPreset === 'none' ? 0 : 1}
+                  aspect={aspectRatio === '9:16' ? 9 / 16 : 16 / 9}
+                  coverPosition={isVertical ? reframePosition : undefined}
+                />
+              </div>
               {fadeOpacity > 0 ? (
                 <div
                   className={styles.fadeOverlay}

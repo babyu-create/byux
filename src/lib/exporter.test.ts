@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { buildAtempoChain, getResolution } from './exporter';
+import {
+  buildAtempoChain,
+  getResolution,
+  clipTransformAtOutputTime,
+  type TransformSegment,
+} from './exporter';
+import type { Clip } from './types';
 
 describe('buildAtempoChain', () => {
   it('returns no filters at 1x', () => {
@@ -45,5 +51,61 @@ describe('getResolution', () => {
   it('maps 9:16 presets (portrait)', () => {
     expect(getResolution('1080p', '9:16')).toEqual({ width: 1080, height: 1920 });
     expect(getResolution('720p', '9:16')).toEqual({ width: 720, height: 1280 });
+  });
+});
+
+describe('clipTransformAtOutputTime', () => {
+  // Minimal clip factory — only the fields the helper reads matter.
+  const makeClip = (id: string, transform?: Clip['transform']): Clip => ({
+    id,
+    trackId: 'track-video',
+    assetId: 'a1',
+    start: 0,
+    trimStart: 0,
+    trimEnd: 1,
+    transform,
+    effects: [],
+  });
+
+  it('returns identity outside any segment / empty list', () => {
+    expect(clipTransformAtOutputTime([], 1).scale).toBe(1);
+  });
+
+  it('samples the segment containing the output time, clip-local', () => {
+    const segments: TransformSegment[] = [
+      {
+        clip: makeClip('c0', {
+          scale: [
+            { t: 0, value: 1, easing: 'linear' },
+            { t: 2, value: 1.2 },
+          ],
+        }),
+        start: 0,
+        end: 2,
+      },
+      {
+        clip: makeClip('c1', { x: 30 }),
+        start: 2,
+        end: 4,
+      },
+    ];
+    // First segment, halfway → scale 1.1.
+    expect(clipTransformAtOutputTime(segments, 1).scale).toBeCloseTo(1.1, 5);
+    // Second segment: time becomes (tOut - start) = 0.5 of a constant x=30.
+    const r = clipTransformAtOutputTime(segments, 2.5);
+    expect(r.x).toBe(30);
+    expect(r.scale).toBe(1);
+  });
+
+  it('holds the last segment past the final end (last-frame safety)', () => {
+    const segments: TransformSegment[] = [
+      {
+        clip: makeClip('c0', { scale: [{ t: 0, value: 1 }, { t: 1, value: 2 }] }),
+        start: 0,
+        end: 1,
+      },
+    ];
+    // tOut slightly past the end → held at last keyframe value.
+    expect(clipTransformAtOutputTime(segments, 1.5).scale).toBeCloseTo(2, 5);
   });
 });

@@ -20,6 +20,12 @@ import type { Clip, MediaAsset, Track } from './types';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { exportStrengthFromIntensity, type HudPreset } from './motionBlurCore';
 import { OffscreenMotionBlurRenderer } from './motionBlurExporter';
+import { OffscreenTransformRenderer } from './transformExporter';
+import {
+  clipHasTransform,
+  sampleClipTransform,
+  type ResolvedTransform,
+} from './clipTransform';
 import { rasterizeOverlays } from './overlayRaster';
 
 export interface ExportOptions {
@@ -304,6 +310,10 @@ function canStreamCopy(
 
   // Stretch-to-fill requires a non-uniform scale → must re-encode.
   if (clip.stretchToFill) return false;
+
+  // An animated/positioned clip transform is baked per-frame (WebCodecs pass)
+  // → can't stream-copy.
+  if (clipHasTransform(clip.transform)) return false;
 
   // Text overlays are composited via a filter pass → can't stream-copy.
   if (clip.overlays && clip.overlays.length > 0) return false;
@@ -795,6 +805,178 @@ async function applyMotionBlur(
 }
 
 // ---------------------------------------------------------------------------
+// Clip-transform pass (WebCodecs) — preview/export parity for Clip.transform
+// ---------------------------------------------------------------------------
+
+/** One concatenated clip's output-timeline window, for transform sampling. */
+export interface TransformSegment {
+  clip: Clip;
+  /** Output-timeline start/end (seconds), back-to-back across clips. */
+  start: number;
+  end: number;
+}
+
+/**
+ * Resolve the clip transform that applies at output-timeline time `tOut`.
+ *
+ * The export concatenates clips back-to-back, so each segment owns an output
+ * window [start, end). Within a segment, clip-local time advances at the clip's
+ * playback speed (a 2× clip covers 2 s of source per 1 s of output) — the
+ * transform keyframes are authored in clip-local timeline seconds (playhead -
+ * clip.start in the preview), which equals the offset within the segment. So we
+ * sample at (tOut - segment.start), matching the preview exactly.
+ */
+export function clipTransformAtOutputTime(
+  segments: TransformSegment[],
+  tOut: number,
+): ResolvedTransform {
+  // Find the segment containing tOut (segments are sorted, contiguous).
+  let seg = segments.find((s) => tOut >= s.start - 1e-6 && tOut < s.end - 1e-6);
+  if (!seg && segments.length > 0) {
+    // Past the final segment end (last frame) — hold the last clip.
+    seg = segments[segments.length - 1];
+  }
+  return sampleClipTransform(seg?.clip.transform, seg ? tOut - seg.start : 0);
+}
+
+/**
+ * Apply the preview-matching clip transform to `videoInput` per frame.
+ *
+ * Pipeline mirrors applyWebglMotionBlur: decode each frame natively from a
+ * hidden <video> (Chromium H.264), bake the sampled transform into it via the
+ * shared OffscreenTransformRenderer (Canvas2D, origin = frame center), feed the
+ * result into a WebCodecs VideoEncoder, then stream-copy the original audio
+ * back on. Throws (→ caller skips the pass) if WebCodecs is unavailable.
+ */
+async function applyTransformPass(
+  ffmpeg: FFmpeg,
+  videoInput: string,
+  params: {
+    width: number;
+    height: number;
+    targetFps: number;
+    segments: TransformSegment[];
+    onProgress?: ExportOptions['onProgress'];
+  },
+): Promise<string> {
+  const { width, height, targetFps, segments, onProgress } = params;
+
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    throw new Error('transform: WebCodecs (VideoEncoder) 利用不可');
+  }
+
+  onProgress?.({ stage: 'トランスフォーム: 動画を読み込み中', percent: -1 });
+  const data = await ffmpeg.readFile(videoInput);
+  const u8 = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
+  const blobPart: BlobPart = u8.buffer instanceof ArrayBuffer
+    ? (u8 as Uint8Array<ArrayBuffer>)
+    : new Uint8Array(u8);
+  const url = URL.createObjectURL(new Blob([blobPart], { type: 'video/mp4' }));
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'auto';
+  video.src = url;
+  const loadedPromise = videoOnce(video, 'loadeddata');
+
+  const bitrate = pickBitrate(width, height, targetFps);
+  const codec = await pickAvcCodec({ width, height, bitrate, framerate: targetFps });
+  if (!codec) {
+    loadedPromise.catch(() => {});
+    URL.revokeObjectURL(url);
+    throw new Error('transform: 対応する H.264 エンコーダ設定が見つかりません');
+  }
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: 'avc', width, height, frameRate: targetFps },
+    fastStart: 'in-memory',
+  });
+  let encoderError: Error | null = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => { encoderError = e instanceof Error ? e : new Error(String(e)); },
+  });
+  encoder.configure({ codec, width, height, bitrate, framerate: targetFps });
+
+  const renderer = new OffscreenTransformRenderer(width, height);
+  const frameDurUs = Math.round(1_000_000 / targetFps);
+  const gop = Math.max(1, targetFps * 2);
+
+  try {
+    await withTimeout(loadedPromise, 15000, '動画メタデータ読み込み');
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    if (duration === 0) {
+      throw new Error('transform: 動画の長さを取得できませんでした');
+    }
+    const total = Math.max(1, Math.round(duration * targetFps));
+    mbLog(`[tf] native decode: duration=${duration.toFixed(2)}s total≈${total} frames`);
+
+    for (let i = 0; i < total; i++) {
+      if (encoderError) throw encoderError;
+      const t = (i + 0.5) / targetFps;
+      if (t >= duration) break;
+      await withTimeout(seekVideo(video, t), 10000, `フレーム seek #${i}`);
+
+      const resolved = clipTransformAtOutputTime(segments, t);
+      let frame: VideoFrame | null = null;
+      try {
+        const canvas = renderer.drawFrame(video, resolved);
+        frame = new VideoFrame(canvas, {
+          timestamp: i * frameDurUs,
+          duration: frameDurUs,
+        });
+        encoder.encode(frame, { keyFrame: i % gop === 0 });
+      } finally {
+        if (frame) frame.close();
+      }
+
+      while (encoder.encodeQueueSize > 16) {
+        await new Promise<void>((r) => setTimeout(r, 4));
+        if (encoderError) throw encoderError;
+      }
+
+      if (i % 5 === 0 || i === total - 1) {
+        onProgress?.({
+          stage: `トランスフォーム適用中 (${i + 1}/${total})`,
+          percent: Math.max(0, Math.min(0.85, ((i + 1) / total) * 0.85)),
+        });
+      }
+    }
+
+    onProgress?.({ stage: 'トランスフォーム: エンコード仕上げ中', percent: 0.88 });
+    await encoder.flush();
+    if (encoderError) throw encoderError;
+    muxer.finalize();
+  } finally {
+    renderer.dispose();
+    try { encoder.close(); } catch { /* already closed / errored */ }
+    video.removeAttribute('src');
+    try { video.load(); } catch { /* ignore */ }
+    URL.revokeObjectURL(url);
+  }
+
+  const videoBytes = new Uint8Array(muxer.target.buffer);
+  onProgress?.({ stage: 'トランスフォーム: 音声を結合中', percent: 0.92 });
+  const TF_VIDEO = 'tf_video.mp4';
+  await ffmpeg.writeFile(TF_VIDEO, videoBytes);
+  const out = 'video_transformed.mp4';
+  await ffmpeg.exec([
+    '-threads', '1',
+    '-i', TF_VIDEO,
+    '-i', videoInput,
+    '-map', '0:v:0',
+    '-map', '1:a:0?',
+    '-c', 'copy',
+    '-movflags', '+faststart',
+    '-y',
+    out,
+  ]);
+  try { await ffmpeg.deleteFile(TF_VIDEO); } catch { /* ignore */ }
+  try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Text-overlay pass
 // ---------------------------------------------------------------------------
 
@@ -1188,6 +1370,54 @@ export async function exportProject(
       }
 
       // ---------------------------------------------------------------------
+      // Clip-transform pass (after blur, before text → text stays anchored to
+      // the frame, untransformed, exactly like the preview overlay layers).
+      // Bakes the animated position/scale/rotation/opacity per frame via
+      // WebCodecs so the export matches the preview. Skipped entirely when no
+      // included clip has a transform (zero cost for the common case).
+      //
+      // LIMITATION: this is a WebCodecs (per-frame decode→canvas→encode) pass,
+      // like the motion-blur one. There is no ffmpeg-filter equivalent here, so
+      // for very long timelines (> MAX_WEBGL_BLUR_FRAMES) or when WebCodecs is
+      // unavailable we SKIP the transform (export the untransformed footage)
+      // rather than ship a tblend-style approximation — a clip transform can't
+      // be reproduced by tblend at all. The preview still shows it correctly.
+      // ---------------------------------------------------------------------
+      const transformSegments: TransformSegment[] = includedTimeline.filter((seg) =>
+        clipHasTransform(seg.clip.transform),
+      );
+      if (transformSegments.length > 0) {
+        const transformFrames = Math.ceil(totalVideoSeconds * targetFps);
+        if (transformFrames > MAX_WEBGL_BLUR_FRAMES) {
+          const msg = `[exporter] clip transform: ~${transformFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping transform (preview-only for this export)`;
+          console.warn(msg);
+          options.onProgress?.({
+            stage: 'トランスフォーム: 長尺のためスキップ（プレビューのみ）',
+            percent: -1,
+            log: msg,
+          });
+        } else {
+          try {
+            options.onProgress?.({ stage: 'トランスフォーム適用中', percent: -1 });
+            videoOutput = await applyTransformPass(ffmpeg, videoOutput, {
+              width,
+              height,
+              targetFps,
+              segments: includedTimeline,
+              onProgress: options.onProgress,
+            });
+          } catch (err) {
+            // Never fail the whole export over the transform pass — degrade to
+            // the untransformed footage (still matches preview minus the move).
+            const m = `[exporter] transform pass failed (${err instanceof Error ? err.message : String(err)}) — exporting without clip transform`;
+            console.warn(m);
+            options.onProgress?.({ stage: 'トランスフォーム適用に失敗（変形なしで継続）', percent: -1, log: m });
+            try { await ffmpeg.deleteFile('tf_video.mp4'); } catch { /* ignore */ }
+          }
+        }
+      }
+
+      // ---------------------------------------------------------------------
       // Text-overlay pass (after blur → text stays sharp). Rasterize each
       // clip's overlays in the browser (exact preview fonts) and composite
       // them onto their output time window.
@@ -1326,6 +1556,8 @@ export async function exportProject(
     }
     try { await ffmpeg.deleteFile('video_only.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_blurred.mp4'); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile('video_transformed.mp4'); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile('tf_video.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_overlaid.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('final.mp4'); } catch { /* ignore */ }
     // Purge any leftover overlay PNGs.
