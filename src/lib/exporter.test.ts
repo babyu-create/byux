@@ -5,10 +5,12 @@ import {
   clipTransformAtOutputTime,
   colorGradeFilterAtOutputTime,
   transformFrameNeedsCanvas,
+  motionBlurStrengthAtOutputTime,
   rampFootageSeekAtOutputTime,
   exportVideoDuckSegments,
   type TransformSegment,
 } from './exporter';
+import { exportStrengthFromIntensity } from './motionBlurCore';
 import { SLOW_TO_FAST_PRESET } from './speedRamp';
 import { buildDuckPoints } from './audioDucking';
 import type { Clip } from './types';
@@ -245,6 +247,84 @@ describe('transformFrameNeedsCanvas', () => {
     expect(transformFrameNeedsCanvas(segments, 0)).toBe(true);
     // Clip body, past the transition → identity pass-through.
     expect(transformFrameNeedsCanvas(segments, 2.5)).toBe(false);
+  });
+});
+
+describe('motionBlurStrengthAtOutputTime', () => {
+  const makeClip = (id: string, extra: Partial<Clip>): Clip => ({
+    id,
+    trackId: 'track-video',
+    assetId: 'a1',
+    start: 0,
+    trimStart: 0,
+    trimEnd: 1,
+    effects: [],
+    ...extra,
+  });
+
+  it('is 0 for an empty list', () => {
+    expect(motionBlurStrengthAtOutputTime([], 1)).toBe(0);
+  });
+
+  it('is 0 for a clip with no motion-blur effect (stays sharp like the preview)', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { trimEnd: 2 }), start: 0, end: 2 },
+    ];
+    expect(motionBlurStrengthAtOutputTime(segments, 1)).toBe(0);
+  });
+
+  it("uses the owning clip's intensity*speed when it has the effect", () => {
+    const segments: TransformSegment[] = [
+      {
+        clip: makeClip('c0', {
+          trimEnd: 2,
+          speed: 1.5,
+          effects: [{ type: 'motion-blur', intensity: 80 }],
+        }),
+        start: 0,
+        end: 2,
+      },
+    ];
+    expect(motionBlurStrengthAtOutputTime(segments, 1)).toBeCloseTo(
+      exportStrengthFromIntensity(80, 1.5),
+      6,
+    );
+  });
+
+  it('gates per segment: blurred clip gets strength, unblurred neighbour stays 0', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { trimEnd: 2 }), start: 0, end: 2 },
+      {
+        clip: makeClip('c1', {
+          trimEnd: 2,
+          effects: [{ type: 'motion-blur', intensity: 50 }],
+        }),
+        start: 2,
+        end: 4,
+      },
+    ];
+    // First (no effect) → sharp; second (effect) → derived strength.
+    expect(motionBlurStrengthAtOutputTime(segments, 1)).toBe(0);
+    expect(motionBlurStrengthAtOutputTime(segments, 3)).toBeCloseTo(
+      exportStrengthFromIntensity(50, 1),
+      6,
+    );
+  });
+
+  it('applies the global strength override only to clips that have the effect', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { trimEnd: 2 }), start: 0, end: 2 },
+      {
+        clip: makeClip('c1', {
+          trimEnd: 2,
+          effects: [{ type: 'motion-blur', intensity: 50 }],
+        }),
+        start: 2,
+        end: 4,
+      },
+    ];
+    expect(motionBlurStrengthAtOutputTime(segments, 1, 7.5)).toBe(0);
+    expect(motionBlurStrengthAtOutputTime(segments, 3, 7.5)).toBe(7.5);
   });
 });
 

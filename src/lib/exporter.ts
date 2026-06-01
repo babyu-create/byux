@@ -543,6 +543,15 @@ interface MotionBlurParams {
   speed: number;
   /** Explicit strength override (preview value); when undefined it's derived. */
   strengthOverride?: number;
+  /**
+   * Output-timeline segments (back-to-back included clips). When supplied, the
+   * WebGL pass gates the blur PER SEGMENT — each output frame uses its owning
+   * clip's own intensity*speed (0 → sharp for clips with no motion-blur
+   * effect), matching the preview. When omitted, the blur is applied globally
+   * at `strengthOverride`/derived strength (legacy whole-video behaviour, used
+   * by the tblend fallback which cannot vary strength per frame).
+   */
+  segments?: TransformSegment[];
   hudPreset: HudPreset;
   hudMaskStrength: number;
   onProgress?: ExportOptions['onProgress'];
@@ -720,7 +729,15 @@ async function applyWebglMotionBlur(
 
       let frame: VideoFrame | null = null;
       try {
-        const rgba = renderer.processFrame(video);
+        // Per-segment gating: when segments are supplied, the strength for THIS
+        // output frame is its owning clip's own intensity*speed (0 → sharp for
+        // clips with no motion-blur effect), matching the preview. The frame
+        // mid-time `t` is the output-timeline position. When no segments are
+        // supplied, fall back to the renderer's constant config strength.
+        const frameStrength = params.segments
+          ? motionBlurStrengthAtOutputTime(params.segments, t, params.strengthOverride)
+          : undefined;
+        const rgba = renderer.processFrame(video, frameStrength);
         frame = new VideoFrame(rgba, {
           format: 'RGBA',
           codedWidth: width,
@@ -829,10 +846,28 @@ async function applyMotionBlur(
 ): Promise<string> {
   const estimatedFrames = Math.ceil(params.totalVideoSeconds * params.targetFps);
   mbLog(`[mb] applyMotionBlur: ~${estimatedFrames} frames (cap ${MAX_WEBGL_BLUR_FRAMES})`);
+  // The tblend fallback applies one strength to the ENTIRE video — it cannot
+  // gate per output-timeline segment like the WebGL path. Surface that so the
+  // user knows multi-clip timelines won't get per-clip blur in this path.
+  const blurGateLimited =
+    !!params.segments &&
+    params.segments.length > 1 &&
+    params.segments.some(
+      (s) => !s.clip.effects.some((e) => e.type === 'motion-blur'),
+    );
   if (estimatedFrames > MAX_WEBGL_BLUR_FRAMES) {
     const msg = `[exporter] motion-blur: ~${estimatedFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — using tblend fallback`;
     console.info(msg);
     params.onProgress?.({ stage: 'モーションブラー: 長尺のため tblend を使用', percent: -1, log: msg });
+    if (blurGateLimited) {
+      const warn = '[exporter] motion-blur: tblend fallback applies blur to ALL clips globally (no per-clip gating in this path)';
+      console.warn(warn);
+      params.onProgress?.({
+        stage: 'モーションブラー: 全クリップに一括適用（長尺フォールバック）',
+        percent: -1,
+        log: warn,
+      });
+    }
     return applyTblendMotionBlur(ffmpeg, videoInput, params);
   }
   try {
@@ -842,6 +877,15 @@ async function applyMotionBlur(
     console.error('[mb] WebGL path threw:', err);
     console.warn(msg);
     params.onProgress?.({ stage: 'モーションブラー: WebGL不可 → tblend', percent: -1, log: msg });
+    if (blurGateLimited) {
+      const warn = '[exporter] motion-blur: tblend fallback applies blur to ALL clips globally (no per-clip gating in this path)';
+      console.warn(warn);
+      params.onProgress?.({
+        stage: 'モーションブラー: 全クリップに一括適用（WebGLフォールバック）',
+        percent: -1,
+        log: warn,
+      });
+    }
     // Drop any intermediate the failed WebGL pass left behind.
     try { await ffmpeg.deleteFile('mb_video.mp4'); } catch { /* ignore */ }
     return applyTblendMotionBlur(ffmpeg, videoInput, params);
@@ -943,6 +987,42 @@ export function transformFrameNeedsCanvas(
 ): boolean {
   if (isTransformVisible(clipTransformAtOutputTime(segments, tOut))) return true;
   return colorGradeFilterAtOutputTime(segments, tOut) !== 'none';
+}
+
+/**
+ * Resolve the motion-blur shader strength that applies at output-timeline time
+ * `tOut`, gated PER SEGMENT exactly like the preview.
+ *
+ * The export concatenates clips back-to-back, so each output frame belongs to
+ * one clip's [start, end) window. The preview only blurs the clip whose
+ * `effects` array contains a 'motion-blur' effect, scaling that clip's authored
+ * intensity by its own playback speed (Preview.tsx). This mirrors that: clips
+ * WITHOUT a motion-blur effect resolve to strength 0 (the shader early-outs →
+ * the frame is emitted sharp), and clips WITH one resolve to
+ * `exportStrengthFromIntensity(intensity, speed)` using that clip's own values.
+ *
+ * As documented elsewhere in this file, the export scales by the clip's
+ * (average) playback speed rather than the instantaneous ramp speed — the
+ * preview uses the instantaneous value, but the per-clip gating is exact.
+ *
+ * `strengthOverride` (the preview's global strength slider) is applied ONLY to
+ * clips that actually have a motion-blur effect — clips without one stay at 0
+ * (sharp) regardless of the override.
+ */
+export function motionBlurStrengthAtOutputTime(
+  segments: TransformSegment[],
+  tOut: number,
+  strengthOverride?: number,
+): number {
+  let seg = segments.find((s) => tOut >= s.start - 1e-6 && tOut < s.end - 1e-6);
+  if (!seg && segments.length > 0) {
+    seg = segments[segments.length - 1];
+  }
+  if (!seg) return 0;
+  const mbEffect = seg.clip.effects.find((e) => e.type === 'motion-blur');
+  if (!mbEffect) return 0;
+  if (strengthOverride !== undefined) return strengthOverride;
+  return exportStrengthFromIntensity(mbEffect.intensity ?? 50, seg.clip.speed ?? 1);
 }
 
 /**
@@ -1689,24 +1769,28 @@ export async function exportProject(
       ]);
 
       // -----------------------------------------------------------------------
-      // Post-process motion-blur pass (variable tblend intensity)
+      // Post-process motion-blur pass (preview-matching WebGL shader)
       //
       // Why a separate pass: tblend emits one fewer frame than input (no
       // predecessor for frame 0). Inside a concat filter graph that desync
       // causes a stall — the concat waits for matching frame counts that never
-      // arrive. Applying tblend after concat sidesteps both problems.
+      // arrive. Applying the blur after concat sidesteps both problems.
       //
-      // Intensity is taken from the first clip's motion-blur effect, or
-      // defaults to the middle tier (2 passes) if the effect has no intensity
-      // field set.
+      // Per-segment gating: `includedTimeline` is passed to the WebGL pass so
+      // each output frame is blurred with its OWNING clip's intensity*speed —
+      // clips without a motion-blur effect pass through sharp, exactly like the
+      // preview (which only blurs the active clip when it has the effect). The
+      // `intensity`/`speed` below are only the legacy first-clip fallback used
+      // by the whole-video tblend path, which cannot vary strength per frame.
       // -----------------------------------------------------------------------
       if (enableMotionBlur) {
         progressState.startEpoch = Date.now();
         progressState.totalDuration = totalVideoSeconds;
         options.onProgress?.({ stage: 'モーションブラー適用中', percent: -1 });
 
-        // Pick intensity + speed from the first clip that has a motion-blur
-        // effect (matches the legacy single-config behaviour).
+        // Legacy fallback intensity/speed: first clip that has a motion-blur
+        // effect. Used ONLY by the tblend fallback (it applies one strength to
+        // the whole video); the WebGL path gates per segment via `segments`.
         const mbClip = videoClips.find((c) =>
           c.effects.some((e) => e.type === 'motion-blur'),
         );
@@ -1724,6 +1808,7 @@ export async function exportProject(
           intensity: mbIntensity,
           speed: mbClip?.speed ?? 1,
           strengthOverride: options.motionBlurStrength,
+          segments: includedTimeline,
           hudPreset,
           hudMaskStrength,
           onProgress: options.onProgress,

@@ -137,11 +137,17 @@ export class OffscreenMotionBlurRenderer {
    * resolution. Frames MUST be supplied in playback order — the motion
    * estimator depends on the previous frame.
    *
+   * `strengthOverride` lets the caller vary the blur strength per frame (e.g.
+   * to gate the blur per output-timeline segment so clips WITHOUT a motion-blur
+   * effect pass through sharp, matching the preview). When omitted, the
+   * constructor's `config.strength` is used. A strength of 0 yields zero motion
+   * magnitude, so the shader early-outs and the frame is emitted unchanged.
+   *
    * Returns an internal buffer reused across calls; feed it to
    * `new VideoFrame(buf, { format: 'RGBA', ... })` immediately (the VideoFrame
    * constructor copies the data, so the buffer is safe to overwrite next call).
    */
-  processFrame(source: BlurFrameSource): Uint8Array {
+  processFrame(source: BlurFrameSource, strengthOverride?: number): Uint8Array {
     if (this.disposed) throw new Error('OffscreenMotionBlurRenderer: used after dispose()');
     const { gl } = this.setup;
 
@@ -174,8 +180,9 @@ export class OffscreenMotionBlurRenderer {
     this.smoothDx = this.smoothDx * (1 - EMA) + measuredDx * EMA;
     this.smoothDy = this.smoothDy * (1 - EMA) + measuredDy * EMA;
 
+    const frameStrength = strengthOverride ?? this.config.strength;
     const { motionUVX, motionUVY, magnitudeUV, sampleCount } = motionToUniforms(
-      this.smoothDx, this.smoothDy, this.config.strength,
+      this.smoothDx, this.smoothDy, frameStrength,
     );
 
     // === GPU render ===
