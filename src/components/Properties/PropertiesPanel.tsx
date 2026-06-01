@@ -1,6 +1,11 @@
 import { useSelectedAsset } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { formatDuration, formatFileSize, formatTimecode } from '../../lib/media';
+import { clipHasTransform } from '../../lib/clipTransform';
+import { clipHasColorGrade } from '../../lib/colorGrade';
+import { clipHasTransition } from '../../lib/transitions';
+import { hasSpeedRamp } from '../../lib/speedRamp';
+import { CollapsibleSection } from './CollapsibleSection';
 import { KillMarkerSection } from './KillMarkerSection';
 import { IORangeSection } from './IORangeSection';
 import { ClipEffectsSection } from './ClipEffectsSection';
@@ -32,6 +37,7 @@ export function PropertiesPanel() {
   // the ducking control only shows for a clip on that track (not SE etc.).
   const bgmTrackId = tracks.find((t) => t.kind === 'audio')?.id ?? null;
   const isBgmClip = !!selectedClip && selectedClip.trackId === bgmTrackId;
+  const isVideoClip = selectedClipTrackKind !== 'audio';
 
   return (
     <div className={styles.root}>
@@ -70,49 +76,106 @@ export function PropertiesPanel() {
 
           {selectedClip ? (
             <>
-              <div className={styles.markerSlot}>
+              {/* High-frequency FPS-montage control: open by default. */}
+              <CollapsibleSection
+                id="speed"
+                title="再生速度"
+                defaultOpen
+                active={
+                  (selectedClip.speed ?? 1) !== 1 || hasSpeedRamp(selectedClip.speedRamp)
+                }
+                badge={`${selectedClip.speed ?? 1}×`}
+              >
                 <ClipSpeedSection clip={selectedClip} />
-              </div>
-              {selectedClipTrackKind !== 'audio' ? (
-                <div className={styles.markerSlot}>
+              </CollapsibleSection>
+
+              {isVideoClip ? (
+                <CollapsibleSection
+                  id="stretch"
+                  title="引き伸ばし"
+                  active={selectedClip.stretchToFill ?? false}
+                >
                   <ClipStretchSection clip={selectedClip} />
-                </div>
+                </CollapsibleSection>
               ) : null}
-              {selectedClipTrackKind !== 'audio' ? (
-                <div className={styles.markerSlot}>
+
+              {isVideoClip ? (
+                <CollapsibleSection
+                  id="transform"
+                  title="トランスフォーム"
+                  active={clipHasTransform(selectedClip.transform)}
+                >
                   <ClipTransformSection clip={selectedClip} />
-                </div>
+                </CollapsibleSection>
               ) : null}
-              {selectedClipTrackKind !== 'audio' ? (
-                <div className={styles.markerSlot}>
+
+              {isVideoClip ? (
+                <CollapsibleSection
+                  id="color"
+                  title="カラー"
+                  defaultOpen
+                  active={clipHasColorGrade(selectedClip.colorGrade)}
+                >
                   <ClipColorSection clip={selectedClip} />
-                </div>
+                </CollapsibleSection>
               ) : null}
-              {selectedClipTrackKind !== 'audio' ? (
-                <div className={styles.markerSlot}>
+
+              {isVideoClip ? (
+                <CollapsibleSection
+                  id="transition"
+                  title="トランジション"
+                  active={clipHasTransition(
+                    selectedClip.transitionIn,
+                    selectedClip.transitionOut,
+                  )}
+                >
                   <ClipTransitionSection clip={selectedClip} />
-                </div>
+                </CollapsibleSection>
               ) : null}
-              <div className={styles.markerSlot}>
+
+              <CollapsibleSection
+                id="volume"
+                title="音量"
+                active={(selectedClip.volume ?? 1) !== 1 || (selectedClip.muted ?? false)}
+                badge={
+                  selectedClip.muted
+                    ? 'MUTE'
+                    : `${Math.round((selectedClip.volume ?? 1) * 100)}%`
+                }
+              >
                 <ClipVolumeSection clip={selectedClip} />
-              </div>
+              </CollapsibleSection>
+
               {isBgmClip ? (
-                <div className={styles.markerSlot}>
+                <CollapsibleSection id="ducking" title="BGMダッキング">
                   <AudioDuckingSection />
-                </div>
+                </CollapsibleSection>
               ) : null}
-              <div className={styles.markerSlot}>
+
+              <CollapsibleSection
+                id="effects"
+                title="エフェクト"
+                active={selectedClip.effects.length > 0}
+                badge={String(selectedClip.effects.length)}
+              >
                 <ClipEffectsSection clip={selectedClip} />
-              </div>
-              {selectedClip.assetId && selectedClipTrackKind !== 'audio' ? (
-                <div className={styles.markerSlot}>
+              </CollapsibleSection>
+
+              {selectedClip.assetId && isVideoClip ? (
+                <CollapsibleSection
+                  id="overlays"
+                  title="テキストオーバーレイ"
+                  active={(selectedClip.overlays?.length ?? 0) > 0}
+                  badge={String(selectedClip.overlays?.length ?? 0)}
+                >
                   <ClipOverlaysSection clip={selectedClip} />
-                </div>
+                </CollapsibleSection>
               ) : null}
-              {selectedClipTrackKind !== 'audio' ? (
-                <div className={styles.markerSlot}>
+
+              {isVideoClip ? (
+                <CollapsibleSection id="presets" title="プリセット">
                   <ClipPresetsSection clip={selectedClip} />
-                </div>
+                </CollapsibleSection>
               ) : null}
             </>
           ) : null}
@@ -120,24 +183,25 @@ export function PropertiesPanel() {
             // Multi-select: per-clip sliders make no sense, but the WHOLE point
             // of presets is grading many clips identically — so keep an
             // apply-only preset panel reachable (no single `clip` to save from).
-            <div className={styles.markerSlot}>
+            <CollapsibleSection id="presets-multi" title="プリセット" defaultOpen>
               <ClipPresetsSection />
-            </div>
+            </CollapsibleSection>
           ) : null}
           {asset.kind === 'video' ? (
             <>
-              <div className={styles.markerSlot}>
+              {/* High-frequency FPS-montage control: open by default. */}
+              <CollapsibleSection id="kill-markers" title="キルマーカー" defaultOpen>
                 <KillMarkerSection asset={asset} />
-              </div>
-              <div className={styles.markerSlot}>
+              </CollapsibleSection>
+              <CollapsibleSection id="io-range" title="A/D レンジ">
                 <IORangeSection asset={asset} />
-              </div>
+              </CollapsibleSection>
             </>
           ) : null}
           {asset.kind === 'audio' ? (
-            <div className={styles.markerSlot}>
+            <CollapsibleSection id="beat-detection" title="ビート検出">
               <BeatDetectionSection asset={asset} />
-            </div>
+            </CollapsibleSection>
           ) : null}
         </div>
       )}
