@@ -4,6 +4,7 @@ import './styles/theme.css';
 import './styles/reset.css';
 import App from './App';
 import { applyTheme, loadTheme } from './lib/theme';
+import { AppErrorBoundary } from './components/Common/AppErrorBoundary';
 
 // Apply persisted theme before first render to prevent FOUC.
 applyTheme(loadTheme(), undefined);
@@ -15,6 +16,8 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </StrictMode>,
 );

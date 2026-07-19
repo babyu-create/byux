@@ -21,6 +21,17 @@ contextBridge.exposeInMainWorld('fce', {
   setDirty(dirty) {
     ipcRenderer.send('app:dirty', Boolean(dirty));
   },
+  onSaveBeforeClose(cb) {
+    const listener = (_event, payload) => cb(payload?.id);
+    ipcRenderer.on('app:save-before-close', listener);
+    return () => ipcRenderer.removeListener('app:save-before-close', listener);
+  },
+  completeSaveBeforeClose(id, success) {
+    ipcRenderer.send('app:save-before-close-result', {
+      id,
+      success: Boolean(success),
+    });
+  },
   getPathForFile(file) {
     return webUtils.getPathForFile(file);
   },
@@ -34,6 +45,11 @@ contextBridge.exposeInMainWorld('fce', {
     return ipcRenderer.invoke('media:release-file', token);
   },
   project: {
+    newSession(detachOnFailure = false) {
+      return ipcRenderer.invoke('project:new-session', {
+        detachOnFailure: Boolean(detachOnFailure),
+      });
+    },
     openDialog() {
       return ipcRenderer.invoke('project:open-dialog');
     },
@@ -46,8 +62,18 @@ contextBridge.exposeInMainWorld('fce', {
     autosave(text) {
       return ipcRenderer.invoke('project:autosave', { text });
     },
+    commitSave(savedText, autosaveGeneration, sessionId) {
+      return ipcRenderer.invoke('project:commit-save', {
+        savedText,
+        autosaveGeneration,
+        sessionId,
+      });
+    },
     checkRecovery() {
       return ipcRenderer.invoke('project:check-recovery');
+    },
+    confirmRecovery(recoveryId) {
+      return ipcRenderer.invoke('project:confirm-recovery', recoveryId);
     },
     listRecent() {
       return ipcRenderer.invoke('project:list-recent');
@@ -62,6 +88,9 @@ contextBridge.exposeInMainWorld('fce', {
   export: {
     chooseOutput(payload) {
       return ipcRenderer.invoke('export:choose-output', payload);
+    },
+    setSize(token, totalBytes) {
+      return ipcRenderer.invoke('export:set-size', token, totalBytes);
     },
     writeChunk(token, offset, chunk, final) {
       return ipcRenderer.invoke('export:write-chunk', token, offset, chunk, final);

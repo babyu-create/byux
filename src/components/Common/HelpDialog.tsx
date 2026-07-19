@@ -6,6 +6,7 @@ import {
   getBindings,
   subscribeBindings,
 } from '../../lib/keybindings';
+import { AccessibleDialog } from './AccessibleDialog';
 import styles from './HelpDialog.module.css';
 
 interface HelpDialogProps {
@@ -22,6 +23,9 @@ const STATIC_GROUPS: { title: string; items: StaticEntry[] }[] = [
     title: 'プロジェクト',
     items: [
       { keys: ['Ctrl', 'S'], label: 'プロジェクト保存' },
+      { keys: ['Ctrl', 'Shift', 'S'], label: '別名で保存' },
+      { keys: ['Ctrl', 'Z'], label: '元に戻す' },
+      { keys: ['Ctrl', 'Y'], label: 'やり直す' },
       { keys: ['?'], label: 'このヘルプを表示' },
     ],
   },
@@ -67,10 +71,18 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
     filteredStatic.reduce((n, g) => n + g.items.length, 0);
 
   return (
-    <div className={styles.backdrop} role="dialog" aria-modal="true" onClick={onClose}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <AccessibleDialog
+      backdropClassName={styles.backdrop}
+      dialogClassName={styles.modal}
+      titleId="help-dialog-title"
+      onClose={onClose}
+    >
         <div className={styles.header}>
-          <span className={styles.title} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <span
+            id="help-dialog-title"
+            className={styles.title}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+          >
             <Keyboard size={16} strokeWidth={2} aria-hidden="true" />
             ショートカット
           </span>
@@ -93,6 +105,7 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
             onChange={(e) => setQuery(e.target.value)}
             aria-label="ショートカットを検索"
             autoFocus
+            data-dialog-initial-focus
           />
           {query ? (
             <button
@@ -156,7 +169,6 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
             </section>
           ))}
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 }

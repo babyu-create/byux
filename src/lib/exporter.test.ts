@@ -8,6 +8,9 @@ import {
   motionBlurStrengthAtOutputTime,
   rampFootageSeekAtOutputTime,
   exportVideoDuckSegments,
+  buildExportTimeline,
+  buildAudioMixFilter,
+  exportProject,
   type TransformSegment,
 } from './exporter';
 import { exportStrengthFromIntensity } from './motionBlurCore';
@@ -117,6 +120,20 @@ describe('clipTransformAtOutputTime', () => {
     expect(clipTransformAtOutputTime(segments, 1.5).scale).toBeCloseTo(2, 5);
   });
 
+  it('returns identity in an authored gap between clips', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { x: 10 }), start: 0, end: 1 },
+      { clip: makeClip('c1', { x: 20 }), start: 3, end: 4 },
+    ];
+    expect(clipTransformAtOutputTime(segments, 2)).toMatchObject({
+      x: 0,
+      y: 0,
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+    });
+  });
+
   it('composes a boundary transition (fade-in) onto the sampled opacity', () => {
     // Segment 0..5s with a 0.4s fade-in. At output time 0 (segment start) the
     // export must bake near-zero opacity, matching the preview.
@@ -181,6 +198,14 @@ describe('colorGradeFilterAtOutputTime', () => {
       { clip: makeClip('c0', { preset: 'mono' }), start: 0, end: 1 },
     ];
     expect(colorGradeFilterAtOutputTime(segments, 1.5)).toContain('saturate(0)');
+  });
+
+  it("returns 'none' in an authored gap between clips", () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { preset: 'mono' }), start: 0, end: 1 },
+      { clip: makeClip('c1', { preset: 'vivid' }), start: 3, end: 4 },
+    ];
+    expect(colorGradeFilterAtOutputTime(segments, 2)).toBe('none');
   });
 });
 
@@ -326,6 +351,15 @@ describe('motionBlurStrengthAtOutputTime', () => {
     expect(motionBlurStrengthAtOutputTime(segments, 1, 7.5)).toBe(0);
     expect(motionBlurStrengthAtOutputTime(segments, 3, 7.5)).toBe(7.5);
   });
+
+  it('stays sharp in an authored gap between clips', () => {
+    const blurred = { effects: [{ type: 'motion-blur' as const, intensity: 50 }] };
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', blurred), start: 0, end: 1 },
+      { clip: makeClip('c1', blurred), start: 3, end: 4 },
+    ];
+    expect(motionBlurStrengthAtOutputTime(segments, 2)).toBe(0);
+  });
 });
 
 describe('rampFootageSeekAtOutputTime', () => {
@@ -404,6 +438,75 @@ describe('rampFootageSeekAtOutputTime', () => {
     // Start of the ramped second segment maps to its footage start (=2).
     expect(rampFootageSeekAtOutputTime(segments, 2)).toBeCloseTo(2, 3);
   });
+
+  it('keeps the output time unchanged in an authored gap', () => {
+    const segments: TransformSegment[] = [
+      { clip: makeClip('c0', { trimEnd: 1 }), start: 0, end: 1 },
+      { clip: makeClip('c1', { trimEnd: 1 }), start: 3, end: 4 },
+    ];
+    expect(rampFootageSeekAtOutputTime(segments, 2)).toBe(2);
+  });
+});
+
+describe('export cancellation', () => {
+  it('stops before loading FFmpeg when already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      exportProject(
+        { clips: [], tracks: [], assets: [] },
+        {
+          resolution: '720p',
+          fps: 30,
+          aspectRatio: '16:9',
+          signal: controller.signal,
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('buildExportTimeline', () => {
+  const makeClip = (id: string, start: number, duration: number, speed = 1): Clip => ({
+    id,
+    trackId: 'track-video',
+    assetId: `asset-${id}`,
+    start,
+    trimStart: 0,
+    trimEnd: duration,
+    speed,
+    effects: [],
+  });
+
+  it('preserves leading and inter-clip gaps at authored absolute times', () => {
+    const timeline = buildExportTimeline([
+      makeClip('c0', 2, 2),
+      makeClip('c1', 6, 2, 2),
+    ]);
+    expect(timeline.map(({ kind, start, end }) => ({ kind, start, end }))).toEqual([
+      { kind: 'gap', start: 0, end: 2 },
+      { kind: 'clip', start: 2, end: 4 },
+      { kind: 'gap', start: 4, end: 6 },
+      { kind: 'clip', start: 6, end: 7 },
+    ]);
+  });
+
+  it('does not insert a gap between adjacent clips', () => {
+    const timeline = buildExportTimeline([
+      makeClip('c0', 0, 2),
+      makeClip('c1', 2, 1),
+    ]);
+    expect(timeline.map((item) => item.kind)).toEqual(['clip', 'clip']);
+  });
+
+  it('rejects overlapping clips instead of silently changing their timing', () => {
+    expect(() =>
+      buildExportTimeline([
+        makeClip('c0', 0, 2),
+        makeClip('c1', 1, 2),
+      ]),
+    ).toThrow('映像クリップが重なっています');
+  });
 });
 
 describe('exportVideoDuckSegments', () => {
@@ -418,20 +521,19 @@ describe('exportVideoDuckSegments', () => {
     ...extra,
   });
 
-  it('places clips back-to-back on the output timeline', () => {
+  it('uses each clip authored absolute start on the output timeline', () => {
     const segs = exportVideoDuckSegments([
       makeClip('c0', { trimStart: 0, trimEnd: 4, speed: 1 }),
-      makeClip('c1', { trimStart: 0, trimEnd: 2, speed: 1 }),
+      makeClip('c1', { start: 6, trimStart: 0, trimEnd: 2, speed: 1 }),
     ]);
     expect(segs[0].start).toBe(0);
-    // Second clip starts after the first clip's 4s output duration.
-    expect(segs[1].start).toBeCloseTo(4, 5);
+    expect(segs[1].start).toBeCloseTo(6, 5);
   });
 
-  it('accounts for clip speed in the output duration (concat placement)', () => {
+  it('accepts adjacent placement based on speed-adjusted duration', () => {
     const segs = exportVideoDuckSegments([
       makeClip('c0', { trimStart: 0, trimEnd: 4, speed: 2 }), // 2s output
-      makeClip('c1', { trimStart: 0, trimEnd: 2, speed: 1 }),
+      makeClip('c1', { start: 2, trimStart: 0, trimEnd: 2, speed: 1 }),
     ]);
     expect(segs[1].start).toBeCloseTo(2, 5);
   });
@@ -439,10 +541,20 @@ describe('exportVideoDuckSegments', () => {
   it('feeds buildDuckPoints so a kill maps to its concat output time', () => {
     const segs = exportVideoDuckSegments([
       makeClip('c0', { assetId: 'a1', trimStart: 0, trimEnd: 4, speed: 1 }),
-      makeClip('c1', { assetId: 'a1', trimStart: 2, trimEnd: 6, speed: 1 }),
+      makeClip('c1', { assetId: 'a1', start: 4, trimStart: 2, trimEnd: 6, speed: 1 }),
     ]);
     // A source kill at t=3 falls in c0 (output 3) and c1 (output 4 + (3-2) = 5).
     const points = buildDuckPoints([{ assetId: 'a1', time: 3 }], segs);
     expect(points).toEqual([3, 5]);
+  });
+});
+
+describe('buildAudioMixFilter', () => {
+  it('keeps source levels, then limits the summed master safely', () => {
+    const filter = buildAudioMixFilter(['[ba0]', '[ba1]']);
+    expect(filter).toContain('amix=inputs=3');
+    expect(filter).toContain('normalize=0');
+    expect(filter).toContain('alimiter=limit=0.95:level=false');
+    expect(filter).not.toContain('normalize=1');
   });
 });

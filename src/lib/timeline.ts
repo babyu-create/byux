@@ -1,4 +1,6 @@
 // Pure helpers for timeline pixel/time conversions and clip math.
+import type { Clip } from './types';
+import { hasSpeedRamp, makeRampSampler } from './speedRamp';
 
 export const BASE_PX_PER_SECOND = 40;
 
@@ -84,6 +86,40 @@ export function clipDuration(clip: {
 /** Source-time duration ignoring speed. */
 export function clipSourceDuration(clip: { trimStart: number; trimEnd: number }): number {
   return Math.max(0, clip.trimEnd - clip.trimStart);
+}
+
+/** Map an editor timeline time to source-media time, including speed ramps. */
+export function sourceTimeAtTimelineTime(
+  clip: Pick<Clip, 'start' | 'trimStart' | 'trimEnd' | 'speed' | 'speedRamp'>,
+  timelineTime: number,
+): number {
+  const localTime = timelineTime - clip.start;
+  if (hasSpeedRamp(clip.speedRamp)) {
+    return makeRampSampler(
+      clip.speedRamp,
+      clip.speed ?? 1,
+      clip.trimStart,
+      clip.trimEnd,
+    ).sourceTimeAtLocalTime(localTime);
+  }
+  return clip.trimStart + localTime * (clip.speed ?? 1);
+}
+
+/** Inverse of sourceTimeAtTimelineTime, including speed ramps. */
+export function timelineTimeAtSourceTime(
+  clip: Pick<Clip, 'start' | 'trimStart' | 'trimEnd' | 'speed' | 'speedRamp'>,
+  sourceTime: number,
+): number {
+  if (hasSpeedRamp(clip.speedRamp)) {
+    const localTime = makeRampSampler(
+      clip.speedRamp,
+      clip.speed ?? 1,
+      clip.trimStart,
+      clip.trimEnd,
+    ).localTimeAtSourceTime(sourceTime);
+    return clip.start + localTime;
+  }
+  return clip.start + (sourceTime - clip.trimStart) / (clip.speed ?? 1);
 }
 
 interface OverlapClip {

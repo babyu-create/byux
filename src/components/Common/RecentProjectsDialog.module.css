@@ -30,14 +30,14 @@
 }
 
 .title {
-  color: var(--text-primary, #f4f6f8);
+  color: var(--text);
   font-size: 16px;
   font-weight: 700;
 }
 
 .subtitle {
   margin-top: 4px;
-  color: var(--text-secondary, #9ba3ac);
+  color: var(--text-dim);
   font-size: 12px;
 }
 
@@ -47,7 +47,7 @@
   place-items: center;
   border: 0;
   background: transparent;
-  color: var(--text-secondary, #9ba3ac);
+  color: var(--text-dim);
   cursor: pointer;
 }
 
@@ -59,8 +59,8 @@
 
 .close:hover,
 .remove:hover {
-  color: var(--text-primary, #fff);
-  background: rgb(255 255 255 / 7%);
+  color: var(--text);
+  background: var(--bg-panel-2);
 }
 
 .list {
@@ -72,7 +72,7 @@
 .empty {
   padding: 54px 24px;
   text-align: center;
-  color: var(--text-secondary, #9ba3ac);
+  color: var(--text-dim);
   font-size: 13px;
 }
 
@@ -83,7 +83,7 @@
 }
 
 .item:hover {
-  background: rgb(255 255 255 / 5%);
+  background: var(--bg-panel-2);
 }
 
 .open {
@@ -125,7 +125,7 @@
 
 .name {
   overflow: hidden;
-  color: var(--text-primary, #f4f6f8);
+  color: var(--text);
   font-size: 13px;
   font-weight: 650;
   text-overflow: ellipsis;
@@ -134,7 +134,7 @@
 
 .path {
   overflow: hidden;
-  color: var(--text-secondary, #9ba3ac);
+  color: var(--text-dim);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -144,7 +144,7 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  color: var(--text-muted, #6f7780);
+  color: var(--text-muted);
   font-size: 11px;
 }
 

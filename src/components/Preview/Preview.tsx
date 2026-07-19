@@ -85,18 +85,25 @@ function PreviewAudioLayer({
   gain,
 }: PreviewAudioLayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const rampSampler = useMemo(() => rampSamplerForClip(clip), [clip]);
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
     const speed = clip.speed ?? 1;
-    const target = clip.trimStart + (playhead - clip.start) * speed;
+    const localTime = playhead - clip.start;
+    const target = rampSampler
+      ? rampSampler.sourceTimeAtLocalTime(localTime)
+      : clip.trimStart + localTime * speed;
     const clamped = Math.max(0, Math.min(asset.duration, target));
     const drift = Math.abs(audio.currentTime - clamped);
     if (drift > (isPlaying ? 0.35 : 1 / 30)) {
       audio.currentTime = clamped;
     }
-    audio.playbackRate = Math.max(0.0625, Math.min(4, speed));
+    const instantaneousSpeed = rampSampler
+      ? rampSampler.speedFactorAtLocalTime(localTime)
+      : speed;
+    audio.playbackRate = Math.max(0.0625, Math.min(4, instantaneousSpeed));
     const volume = clip.volume ?? 1;
     audio.volume = Math.max(0, Math.min(1, volume * gain));
     audio.muted = trackMuted || (clip.muted ?? false) || volume === 0;
@@ -105,7 +112,7 @@ function PreviewAudioLayer({
     } else {
       audio.pause();
     }
-  }, [asset.duration, clip, gain, isPlaying, playhead, trackMuted]);
+  }, [asset.duration, clip, gain, isPlaying, playhead, rampSampler, trackMuted]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -591,6 +598,9 @@ export function Preview() {
   };
 
   const totalForDisplay = totalDuration > 0 ? totalDuration : (displayAsset?.duration ?? 0);
+  const canPlayTimeline = clips.some(
+    (clip) => clip.trackId === videoTrackId,
+  ) && !videoTrackHidden;
   const scrubMax = totalForDisplay || 0;
   const scrubValue = Math.min(playhead, scrubMax);
 
@@ -620,6 +630,7 @@ export function Preview() {
             type="button"
             className={`${styles.aspectBtn} ${aspectRatio === '16:9' ? styles.aspectActive : ''}`}
             onClick={() => setAspect('16:9')}
+            aria-pressed={aspectRatio === '16:9'}
           >
             16:9
           </button>
@@ -627,6 +638,7 @@ export function Preview() {
             type="button"
             className={`${styles.aspectBtn} ${aspectRatio === '9:16' ? styles.aspectActive : ''}`}
             onClick={() => setAspect('9:16')}
+            aria-pressed={aspectRatio === '9:16'}
           >
             9:16
           </button>
@@ -836,8 +848,12 @@ export function Preview() {
             className={styles.playBtn}
             onClick={togglePlay}
             aria-label={isPlaying ? '一時停止' : '再生'}
-            title={isPlaying ? '一時停止 (Space)' : '再生 (Space)'}
-            disabled={totalForDisplay === 0}
+            title={
+              canPlayTimeline
+                ? (isPlaying ? '一時停止 (Space)' : '再生 (Space)')
+                : 'タイムラインに動画を追加すると再生できます'
+            }
+            disabled={!canPlayTimeline}
           >
             {isPlaying ? (
               <Pause size={20} strokeWidth={0} fill="currentColor" aria-hidden="true" />

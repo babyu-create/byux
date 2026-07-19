@@ -61,6 +61,19 @@ export const DEFAULT_BINDINGS: Record<ActionId, string> = ACTIONS.reduce(
   {} as Record<ActionId, string>,
 );
 
+/** App-level commands that are intentionally not rebindable. */
+export const RESERVED_BINDINGS: Readonly<Record<string, string>> = {
+  'ctrl+s': 'プロジェクト保存',
+  'meta+s': 'プロジェクト保存',
+  'ctrl+shift+s': '別名で保存',
+  'meta+shift+s': '別名で保存',
+  'ctrl+z': '元に戻す',
+  'meta+z': '元に戻す',
+  'ctrl+y': 'やり直す',
+  'ctrl+shift+z': 'やり直す',
+  'meta+shift+z': 'やり直す',
+};
+
 const STORAGE_KEY = 'fce.pref.keybindings.v1';
 
 let cache: Record<ActionId, string> | null = null;

@@ -1,5 +1,6 @@
 import { Clock3, FolderOpen, Trash2, X } from 'lucide-react';
 import type { RecentProject } from './UpdateBanner';
+import { AccessibleDialog } from './AccessibleDialog';
 import styles from './RecentProjectsDialog.module.css';
 
 interface RecentProjectsDialogProps {
@@ -7,6 +8,7 @@ interface RecentProjectsDialogProps {
   onOpen: (project: RecentProject) => void;
   onRemove: (project: RecentProject) => void;
   onClose: () => void;
+  busy?: boolean;
 }
 
 function formatOpenedAt(value: string): string {
@@ -24,13 +26,20 @@ export function RecentProjectsDialog({
   onOpen,
   onRemove,
   onClose,
+  busy = false,
 }: RecentProjectsDialogProps) {
   return (
-    <div className={styles.backdrop} role="dialog" aria-modal="true" aria-label="最近使ったプロジェクト">
-      <div className={styles.modal}>
+    <AccessibleDialog
+      backdropClassName={styles.backdrop}
+      dialogClassName={styles.modal}
+      titleId="recent-projects-title"
+      onClose={onClose}
+    >
         <div className={styles.header}>
           <div>
-            <div className={styles.title}>最近使ったプロジェクト</div>
+            <div id="recent-projects-title" className={styles.title}>
+              最近使ったプロジェクト
+            </div>
             <div className={styles.subtitle}>前回の編集をすぐに再開できます</div>
           </div>
           <button type="button" className={styles.close} onClick={onClose} aria-label="閉じる">
@@ -51,7 +60,7 @@ export function RecentProjectsDialog({
                   type="button"
                   className={styles.open}
                   onClick={() => onOpen(project)}
-                  disabled={!project.available}
+                  disabled={!project.available || busy}
                 >
                   <span className={styles.icon}>
                     <FolderOpen size={18} aria-hidden="true" />
@@ -69,6 +78,7 @@ export function RecentProjectsDialog({
                   type="button"
                   className={styles.remove}
                   onClick={() => onRemove(project)}
+                  disabled={busy}
                   aria-label={`${project.name}を履歴から削除`}
                   title="履歴から削除"
                 >
@@ -78,7 +88,6 @@ export function RecentProjectsDialog({
             ))
           )}
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 }

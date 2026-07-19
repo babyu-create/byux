@@ -27,11 +27,19 @@ export const Track = memo(function Track({
   // and trigger an infinite render loop ("Maximum update depth exceeded").
   const tracks = useProjectStore((s) => s.tracks);
   const allClips = useProjectStore((s) => s.clips);
+  const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
   const track = useMemo(() => tracks.find((t) => t.id === trackId), [tracks, trackId]);
   const clips = useMemo(
     () => allClips.filter((c) => c.trackId === trackId),
     [allClips, trackId],
   );
+  const orderedClips = useMemo(
+    () => [...clips].sort((a, b) => a.start - b.start || a.id.localeCompare(b.id)),
+    [clips],
+  );
+  const keyboardClipId =
+    [...selectedClipIds].reverse().find((id) => orderedClips.some((clip) => clip.id === id)) ??
+    orderedClips[0]?.id;
 
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -145,7 +153,7 @@ export const Track = memo(function Track({
       onPointerCancel={handleTrackPointerUp}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {clips.map((clip) => {
+      {orderedClips.map((clip, index) => {
         const asset = assetsById[clip.assetId];
         return (
           <Clip
@@ -155,6 +163,9 @@ export const Track = memo(function Track({
             asset={asset}
             kind={track.kind}
             locked={track.locked}
+            keyboardTabStop={clip.id === keyboardClipId}
+            previousClipId={orderedClips[index - 1]?.id}
+            nextClipId={orderedClips[index + 1]?.id}
           />
         );
       })}

@@ -110,5 +110,16 @@
 }
 
 .destructive {
-  background: var(--accent);
+  background: var(--danger);
+}
+
+.destructive:hover {
+  background: color-mix(in srgb, var(--danger) 84%, black);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backdrop,
+  .modal {
+    animation: none;
+  }
 }

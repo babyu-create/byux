@@ -95,6 +95,7 @@ export function TimelineToolbar() {
           step={0.1}
           value={Math.log2(zoom)}
           onChange={(e) => setZoom(2 ** parseFloat(e.target.value))}
+          aria-label="タイムラインのズーム"
           className={styles.zoomSlider}
         />
         <button type="button" className={styles.zoomBtn} onClick={zoomIn} title="ズームイン (+)" aria-label="ズームイン">

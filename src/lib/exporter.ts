@@ -5,19 +5,16 @@
 // that was the primary bottleneck (each intermediate vclip_N.mp4 incurred a
 // full libx264 encode + WASM-FS write, then a second read during concat).
 //
-// Stream-copy fast path: when all video clips satisfy the "no-transcode"
-// conditions (speed=1, no fades, no motion blur, source codec=h264, resolution
-// matches output, single clip) the pipeline skips libx264 entirely and uses
-// `-c copy` — reducing a 50-second clip from ~60 s encode to ~2 s.
+// Every source is normalized through libx264 so the requested geometry, FPS,
+// trim points, mute/volume settings, and output codec are authoritative.
 //
 // Motion blur: opt-in tblend post-process pass with variable intensity (1–3
 // chained tblend stages driven by the intensity slider on each clip's
 // motion-blur effect).
 
-import { FFmpeg } from '@ffmpeg/ffmpeg';
+import { FFmpeg, FFFSType } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
 import type { Clip, KillMarker, MediaAsset, Track } from './types';
-import { readMediaAssetBytes } from './media';
 import {
   buildDuckPoints,
   buildDuckVolumeExpr,
@@ -106,6 +103,8 @@ export interface ExportOptions {
    * ducking. Absent / disabled = full-level BGM (no ducking).
    */
   audioDucking?: AudioDucking;
+  /** Cancels long-running FFmpeg/WebCodecs work and leaves no successful output. */
+  signal?: AbortSignal;
   onProgress?: (info: { stage: string; percent: number; log?: string }) => void;
 }
 
@@ -135,6 +134,15 @@ interface FFmpegHandle {
 
 let ffmpegHandle: FFmpegHandle | null = null;
 let loadPromise: Promise<FFmpegHandle> | null = null;
+let loadingFFmpeg: FFmpeg | null = null;
+let ffmpegGeneration = 0;
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error('書き出しが中止されました');
+  error.name = 'AbortError';
+  throw error;
+}
 
 // Local MT core (copied from node_modules by vite.config.ts copyMtCore plugin).
 // Using local files means CDN is never hit — no unpkg.com latency, no proxy
@@ -169,7 +177,19 @@ export function getActiveCoreThreadCount(): number {
  * silently fail.
  */
 export function resetFFmpeg(): void {
+  ffmpegGeneration += 1;
+  try {
+    ffmpegHandle?.ffmpeg.terminate();
+  } catch {
+    // The worker may already be gone after an OOM or explicit cancellation.
+  }
+  try {
+    loadingFFmpeg?.terminate();
+  } catch {
+    // Same as above.
+  }
   ffmpegHandle = null;
+  loadingFFmpeg = null;
   loadPromise = null;
 }
 
@@ -237,13 +257,20 @@ async function tryLoadMtLocal(
 async function getFFmpeg(onProgress?: ExportOptions['onProgress']): Promise<FFmpegHandle> {
   if (ffmpegHandle) return ffmpegHandle;
   if (loadPromise) return loadPromise;
+  const generation = ffmpegGeneration;
   loadPromise = (async (): Promise<FFmpegHandle> => {
     const ffmpeg = new FFmpeg();
+    loadingFFmpeg = ffmpeg;
 
     // Try local MT core first (CDN-free path).
     if (await tryLoadMtLocal(ffmpeg, onProgress)) {
+      if (generation !== ffmpegGeneration) {
+        ffmpeg.terminate();
+        throw new Error('書き出しが中止されました');
+      }
       const threadCount = navigator.hardwareConcurrency ?? 4;
       const handle: FFmpegHandle = { ffmpeg, variant: 'mt', threadCount };
+      loadingFFmpeg = null;
       ffmpegHandle = handle;
       onProgress?.({
         stage: `MT コア起動 (${threadCount} スレッド)`,
@@ -257,7 +284,7 @@ async function getFFmpeg(onProgress?: ExportOptions['onProgress']): Promise<FFmp
     onProgress?.({
       stage: 'ST コア読み込み中 (local)',
       percent: -1,
-      log: '[exporter] loading local ST core from /lib/',
+      log: '[exporter] loading bundled ST core',
     });
     try {
       const [coreBlob, wasmBlob] = await withTimeout(
@@ -277,19 +304,36 @@ async function getFFmpeg(onProgress?: ExportOptions['onProgress']): Promise<FFmp
       const msg = `[exporter] ローカル ST コア読み込み失敗: ${localErr instanceof Error ? localErr.message : String(localErr)}`;
       onProgress?.({ stage: 'ST (local) 失敗', percent: -1, log: msg });
       throw new Error(
-        `FFmpeg 初期化失敗 — ローカルファイル (/lib/ffmpeg-core.*) が見つかりません。\n詳細: ${localErr instanceof Error ? localErr.message : String(localErr)}`,
+        `FFmpeg 初期化失敗 — 同梱の動画処理コアを読み込めませんでした。\n詳細: ${localErr instanceof Error ? localErr.message : String(localErr)}`,
         { cause: localErr },
       );
     }
+    if (generation !== ffmpegGeneration) {
+      ffmpeg.terminate();
+      throw new Error('書き出しが中止されました');
+    }
     const handle: FFmpegHandle = { ffmpeg, variant: 'st', threadCount: 1 };
+    loadingFFmpeg = null;
     ffmpegHandle = handle;
     return handle;
   })().catch((err) => {
     // Reset so the next call can retry from scratch.
+    loadingFFmpeg = null;
     loadPromise = null;
     throw err;
   });
   return loadPromise;
+}
+
+async function execChecked(
+  ffmpeg: FFmpeg,
+  args: string[],
+  operation: string,
+): Promise<void> {
+  const status = await ffmpeg.exec(args);
+  if (status !== 0) {
+    throw new Error(`${operation}に失敗しました (FFmpeg終了コード: ${status})`);
+  }
 }
 
 export function getResolution(
@@ -392,97 +436,11 @@ export async function createPreviewProxy(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Stream-copy fast path detection
-// ---------------------------------------------------------------------------
-
-/**
- * Returns true when the entire export can skip libx264 re-encoding and use
- * `-c copy` (stream copy). This shaves encode time from ~60 s → ~2 s for a
- * typical 50-second single-clip export.
- *
- * Requirements for stream copy:
- * - Exactly one video clip (no concat needed)
- * - speed = 1.0
- * - No fade effects on the clip
- * - Motion blur is off (or clip has no motion-blur effect)
- * - Source asset codec is h264 (detected via MIME type heuristic)
- * - Source resolution equals the target output resolution
- * - Video track is not muted (would need re-encode to silence audio)
- *
- * Note: We do not attempt stream copy for multi-clip timelines because
- * true copy-mode concat requires all segments to start on keyframe boundaries
- * — a constraint we cannot guarantee without probing each file.
- */
-function canStreamCopy(
-  videoClips: Clip[],
-  assets: MediaAsset[],
-  width: number,
-  height: number,
-  videoTrackMuted: boolean,
-  enableMotionBlur: boolean,
-): boolean {
-  if (videoClips.length !== 1) return false;
-  if (enableMotionBlur) return false;
-  if (videoTrackMuted) return false;
-
-  const clip = videoClips[0];
-  const asset = assets.find((a) => a.id === clip.assetId);
-  if (!asset) return false;
-
-  // Stretch-to-fill requires a non-uniform scale → must re-encode.
-  if (clip.stretchToFill) return false;
-
-  // An animated/positioned clip transform is baked per-frame (WebCodecs pass)
-  // → can't stream-copy.
-  if (clipHasTransform(clip.transform)) return false;
-
-  // A color grade is baked per-frame (shares the WebCodecs transform pass)
-  // → can't stream-copy.
-  if (clipHasColorGrade(clip.colorGrade)) return false;
-
-  // A boundary transition is baked per-frame (shares the WebCodecs transform
-  // pass) → can't stream-copy.
-  if (clipHasTransition(clip.transitionIn, clip.transitionOut)) return false;
-
-  // Text overlays are composited via a filter pass → can't stream-copy.
-  if (clip.overlays && clip.overlays.length > 0) return false;
-
-  const speed = clip.speed ?? 1;
-  if (Math.abs(speed - 1) > 1e-3) return false;
-
-  // A speed ramp re-times frames (WebCodecs pass) → can't stream-copy.
-  if (hasSpeedRamp(clip.speedRamp)) return false;
-
-  const hasFade = clip.effects.some(
-    (e) => e.type === 'fade-in' || e.type === 'fade-out',
-  );
-  if (hasFade) return false;
-
-  // Trim must cover the full asset. Otherwise `-ss`/`-to` with `-c copy`
-  // snaps to keyframes and emits extra leading frames (the file starts
-  // before the user's intended cut, by up to the keyframe interval —
-  // typically 1-2s for game recordings). Frame-accurate trimming requires
-  // re-encoding; we'd rather fall out of the fast path than ship wrong
-  // output.
-  const FRAME_EPS = 1 / 240; // sub-frame tolerance for fp comparisons
-  if (clip.trimStart > FRAME_EPS) return false;
-  if (clip.trimEnd < asset.duration - FRAME_EPS) return false;
-
-  // Resolution must match exactly — stream copy can't scale.
-  if (asset.width !== width || asset.height !== height) return false;
-
-  // MIME-type heuristic: MP4/MOV containers commonly carry H.264.
-  // We accept ONLY video/mp4 and video/quicktime as likely H.264 sources.
-  // An empty/unknown MIME is NOT assumed H.264 — a .webm (VP9/AV1) dropped from
-  // the OS can report an empty type, and stream-copying it into an .mp4 wrapper
-  // would emit a broken file. Unknown → fall through to a safe re-encode.
-  const mime = asset.mimeType.toLowerCase();
-  const likelyH264 = mime === 'video/mp4' || mime === 'video/quicktime';
-  if (!likelyH264) return false;
-
-  return true;
-}
+// The old stream-copy fast path inferred H.264 from the container MIME and did
+// not know the source FPS/audio codec. It could therefore ignore a requested
+// 60fps conversion, clip mute/volume, or copy HEVC/ProRes into the result.
+// Correct output is more important than that optimisation; every export now
+// uses the normalized encode path until real stream metadata is probed.
 
 // ---------------------------------------------------------------------------
 // Clip-level filter builder
@@ -671,7 +629,7 @@ interface MotionBlurParams {
   /** Explicit strength override (preview value); when undefined it's derived. */
   strengthOverride?: number;
   /**
-   * Output-timeline segments (back-to-back included clips). When supplied, the
+   * Output-timeline segments at their authored absolute positions. When supplied, the
    * WebGL pass gates the blur PER SEGMENT — each output frame uses its owning
    * clip's own intensity*speed (0 → sharp for clips with no motion-blur
    * effect), matching the preview. When omitted, the blur is applied globally
@@ -682,6 +640,7 @@ interface MotionBlurParams {
   hudPreset: HudPreset;
   hudMaskStrength: number;
   encoding: VideoEncodingSettings;
+  signal?: AbortSignal;
   onProgress?: ExportOptions['onProgress'];
 }
 
@@ -854,6 +813,7 @@ async function applyWebglMotionBlur(
     mbLog(`[mb] native decode: duration=${duration.toFixed(2)}s total≈${total} frames`);
 
     for (let i = 0; i < total; i++) {
+      throwIfAborted(params.signal);
       if (encoderError) throw encoderError;
       // Seek to the middle of frame i so we land squarely on it, not a boundary.
       const t = (i + 0.5) / targetFps;
@@ -923,7 +883,7 @@ async function applyWebglMotionBlur(
   const MB_VIDEO = 'mb_video.mp4';
   await ffmpeg.writeFile(MB_VIDEO, videoBytes);
   const blurredOutput = 'video_blurred.mp4';
-  await ffmpeg.exec([
+  await execChecked(ffmpeg, [
     '-threads', '1',
     '-i', MB_VIDEO,
     '-i', videoInput,
@@ -933,7 +893,7 @@ async function applyWebglMotionBlur(
     '-movflags', '+faststart',
     '-y',
     blurredOutput,
-  ]);
+  ], 'モーションブラー映像と音声の結合');
   try { await ffmpeg.deleteFile(MB_VIDEO); } catch { /* ignore */ }
   try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
   mbLog('[mb] audio mux done; motion-blur complete');
@@ -950,7 +910,7 @@ async function applyTblendMotionBlur(
   const passCount = tblendPassCount(params.intensity);
   const tblendVf = buildTblendFilter(passCount);
   const blurredOutput = 'video_blurred.mp4';
-  await ffmpeg.exec([
+  await execChecked(ffmpeg, [
     '-threads', '1',
     '-i', videoInput,
     '-vf', tblendVf,
@@ -962,7 +922,7 @@ async function applyTblendMotionBlur(
     '-movflags', '+faststart',
     '-y',
     blurredOutput,
-  ]);
+  ], 'モーションブラーの適用');
   try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
   return blurredOutput;
 }
@@ -982,42 +942,40 @@ async function applyMotionBlur(
   // The tblend fallback applies one strength to the ENTIRE video — it cannot
   // gate per output-timeline segment like the WebGL path. Surface that so the
   // user knows multi-clip timelines won't get per-clip blur in this path.
-  const blurGateLimited =
-    !!params.segments &&
-    params.segments.length > 1 &&
-    params.segments.some(
-      (s) => !s.clip.effects.some((e) => e.type === 'motion-blur'),
-    );
+  const blurStrengths = params.segments?.map((segment) =>
+    motionBlurStrengthAtOutputTime(
+      [segment],
+      (segment.start + segment.end) / 2,
+      params.strengthOverride,
+    ),
+  ) ?? [];
+  const blurGateLimited = new Set(
+    blurStrengths.map((value) => value.toFixed(6)),
+  ).size > 1;
   if (estimatedFrames > MAX_WEBGL_BLUR_FRAMES) {
     const msg = `[exporter] motion-blur: ~${estimatedFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — using tblend fallback`;
     console.info(msg);
     params.onProgress?.({ stage: 'モーションブラー: 長尺のため tblend を使用', percent: -1, log: msg });
     if (blurGateLimited) {
-      const warn = '[exporter] motion-blur: tblend fallback applies blur to ALL clips globally (no per-clip gating in this path)';
-      console.warn(warn);
-      params.onProgress?.({
-        stage: 'モーションブラー: 全クリップに一括適用（長尺フォールバック）',
-        percent: -1,
-        log: warn,
-      });
+      throw new Error(
+        'クリップごとに異なるモーションブラーを設定した長尺動画は、現在の書き出し上限を超えています。',
+      );
     }
     return applyTblendMotionBlur(ffmpeg, videoInput, params);
   }
   try {
     return await applyWebglMotionBlur(ffmpeg, videoInput, params);
   } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') throw err;
     const msg = `[exporter] motion-blur: WebGL パス失敗 (${err instanceof Error ? err.message : String(err)}) — tblend へフォールバック`;
     console.error('[mb] WebGL path threw:', err);
     console.warn(msg);
     params.onProgress?.({ stage: 'モーションブラー: WebGL不可 → tblend', percent: -1, log: msg });
     if (blurGateLimited) {
-      const warn = '[exporter] motion-blur: tblend fallback applies blur to ALL clips globally (no per-clip gating in this path)';
-      console.warn(warn);
-      params.onProgress?.({
-        stage: 'モーションブラー: 全クリップに一括適用（WebGLフォールバック）',
-        percent: -1,
-        log: warn,
-      });
+      throw new Error(
+        'クリップごとのモーションブラーを正確に適用できませんでした。',
+        { cause: err },
+      );
     }
     // Drop any intermediate the failed WebGL pass left behind.
     try { await ffmpeg.deleteFile('mb_video.mp4'); } catch { /* ignore */ }
@@ -1032,7 +990,7 @@ async function applyMotionBlur(
 /** One concatenated clip's output-timeline window, for transform sampling. */
 export interface TransformSegment {
   clip: Clip;
-  /** Output-timeline start/end (seconds), back-to-back across clips. */
+  /** Authored absolute output-timeline start/end (seconds). */
   start: number;
   end: number;
 }
@@ -1040,7 +998,7 @@ export interface TransformSegment {
 /**
  * Resolve the clip transform that applies at output-timeline time `tOut`.
  *
- * The export concatenates clips back-to-back, so each segment owns an output
+ * Each segment owns its authored absolute output
  * window [start, end). Within a segment, clip-local time advances at the clip's
  * playback speed (a 2× clip covers 2 s of source per 1 s of output) — the
  * transform keyframes are authored in clip-local timeline seconds (playhead -
@@ -1051,11 +1009,12 @@ export function clipTransformAtOutputTime(
   segments: TransformSegment[],
   tOut: number,
 ): ResolvedTransform {
-  // Find the segment containing tOut (segments are sorted, contiguous).
+  // Find the segment containing tOut (segments are sorted but may have gaps).
   let seg = segments.find((s) => tOut >= s.start - 1e-6 && tOut < s.end - 1e-6);
-  if (!seg && segments.length > 0) {
+  const last = segments[segments.length - 1];
+  if (!seg && last && tOut >= last.end - 1e-6) {
     // Past the final segment end (last frame) — hold the last clip.
-    seg = segments[segments.length - 1];
+    seg = last;
   }
   const localT = seg ? tOut - seg.start : 0;
   const r = sampleClipTransform(seg?.clip.transform, localT);
@@ -1094,8 +1053,9 @@ export function colorGradeFilterAtOutputTime(
   tOut: number,
 ): string {
   let seg = segments.find((s) => tOut >= s.start - 1e-6 && tOut < s.end - 1e-6);
-  if (!seg && segments.length > 0) {
-    seg = segments[segments.length - 1];
+  const last = segments[segments.length - 1];
+  if (!seg && last && tOut >= last.end - 1e-6) {
+    seg = last;
   }
   return colorGradeFilter(seg?.clip.colorGrade);
 }
@@ -1126,7 +1086,7 @@ export function transformFrameNeedsCanvas(
  * Resolve the motion-blur shader strength that applies at output-timeline time
  * `tOut`, gated PER SEGMENT exactly like the preview.
  *
- * The export concatenates clips back-to-back, so each output frame belongs to
+ * At clip times, each output frame belongs to
  * one clip's [start, end) window. The preview only blurs the clip whose
  * `effects` array contains a 'motion-blur' effect, scaling that clip's authored
  * intensity by its own playback speed (Preview.tsx). This mirrors that: clips
@@ -1148,8 +1108,9 @@ export function motionBlurStrengthAtOutputTime(
   strengthOverride?: number,
 ): number {
   let seg = segments.find((s) => tOut >= s.start - 1e-6 && tOut < s.end - 1e-6);
-  if (!seg && segments.length > 0) {
-    seg = segments[segments.length - 1];
+  const last = segments[segments.length - 1];
+  if (!seg && last && tOut >= last.end - 1e-6) {
+    seg = last;
   }
   if (!seg) return 0;
   const mbEffect = seg.clip.effects.find((e) => e.type === 'motion-blur');
@@ -1173,8 +1134,8 @@ export function motionBlurStrengthAtOutputTime(
  * `sampler.sourceTimeAtLocalTime(tLocal)`. Inverting the linear constant-speed
  * map gives the footage-local time that shows that desired source:
  *   footageLocal = (rampSource - trimStart) / speed
- * which we add to the segment's footage start (= segment.start, since concat is
- * back-to-back). Non-ramped segments map identity (footage already correct).
+ * which we add to the segment's footage start (= segment.start because black
+ * gap segments are included in the concat). Non-ramped segments map identity.
  *
  * Returned time is in the concatenated footage's own clock (seconds).
  */
@@ -1183,8 +1144,9 @@ export function rampFootageSeekAtOutputTime(
   tOut: number,
 ): number {
   let seg = segments.find((s) => tOut >= s.start - 1e-6 && tOut < s.end - 1e-6);
-  if (!seg && segments.length > 0) {
-    seg = segments[segments.length - 1];
+  const last = segments[segments.length - 1];
+  if (!seg && last && tOut >= last.end - 1e-6) {
+    seg = last;
   }
   if (!seg) return tOut;
   const tLocal = tOut - seg.start;
@@ -1231,6 +1193,7 @@ interface FusedEffectsParams {
   hudPreset: HudPreset;
   hudMaskStrength: number;
   encoding: VideoEncodingSettings;
+  signal?: AbortSignal;
   onProgress?: ExportOptions['onProgress'];
 }
 
@@ -1344,6 +1307,7 @@ async function applyFusedEffectsPass(
     mbLog(`[fx] native decode: duration=${duration.toFixed(2)}s total≈${total} frames (blur=${applyBlur} ramp=${applyRamp} transform=${applyTransform})`);
 
     for (let i = 0; i < total; i++) {
+      throwIfAborted(params.signal);
       if (encoderError) throw encoderError;
       const tOut = (i + 0.5) / targetFps;
       if (tOut >= duration) break;
@@ -1439,7 +1403,7 @@ async function applyFusedEffectsPass(
   const FX_VIDEO = 'fx_video.mp4';
   await ffmpeg.writeFile(FX_VIDEO, videoBytes);
   const out = 'video_effects.mp4';
-  await ffmpeg.exec([
+  await execChecked(ffmpeg, [
     '-threads', '1',
     '-i', FX_VIDEO,
     '-i', videoInput,
@@ -1449,7 +1413,7 @@ async function applyFusedEffectsPass(
     '-movflags', '+faststart',
     '-y',
     out,
-  ]);
+  ], 'エフェクト映像と音声の結合');
   try { await ffmpeg.deleteFile(FX_VIDEO); } catch { /* ignore */ }
   try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
   return out;
@@ -1521,7 +1485,7 @@ async function applyOverlayPass(
     last = next;
   });
 
-  await ffmpeg.exec([
+  await execChecked(ffmpeg, [
     '-threads', '1',
     ...inputArgs,
     '-filter_complex', parts.join(';'),
@@ -1535,7 +1499,7 @@ async function applyOverlayPass(
     '-movflags', '+faststart',
     '-y',
     out,
-  ]);
+  ], 'テキストオーバーレイの合成');
 
   try { await ffmpeg.deleteFile(videoInput); } catch { /* ignore */ }
   for (const s of specs) {
@@ -1548,32 +1512,71 @@ async function applyOverlayPass(
 // BGM auto-ducking helpers (Phase P5) — preview/export parity for AudioDucking
 // ---------------------------------------------------------------------------
 
+export type ExportTimelineItem =
+  | { kind: 'gap'; start: number; end: number }
+  | { kind: 'clip'; start: number; end: number; clip: Clip };
+
 /**
- * Build the OUTPUT-timeline video segments the export concatenates clips into,
- * back-to-back (each clip's output window = its timeline duration at its
- * constant speed). This is the same placement the encode pass uses for
- * includedTimeline, recomputed in a pure form so the BGM duck points can be
- * derived in BOTH the stream-copy and the full-encode paths (and unit-tested).
+ * Build the visible main-video timeline without collapsing empty space.
+ * Overlap is rejected because the current exporter has no layer-compositing
+ * rule for two simultaneous clips on the same lane.
+ */
+export function buildExportTimeline(
+  clips: readonly Clip[],
+): ExportTimelineItem[] {
+  const sorted = [...clips].sort((a, b) => a.start - b.start);
+  const result: ExportTimelineItem[] = [];
+  const EPS = 1e-4;
+  let cursor = 0;
+
+  for (const clip of sorted) {
+    const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
+    const duration = (clip.trimEnd - clip.trimStart) / speed;
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error(`クリップの長さが不正です: ${clip.id}`);
+    }
+    if (clip.start < cursor - EPS) {
+      throw new Error(
+        `映像クリップが重なっています。重なりを解消してから書き出してください: ${clip.id}`,
+      );
+    }
+    if (clip.start > cursor + EPS) {
+      result.push({ kind: 'gap', start: cursor, end: clip.start });
+    }
+    const end = clip.start + duration;
+    result.push({ kind: 'clip', start: clip.start, end, clip });
+    cursor = end;
+  }
+  return result;
+}
+
+/**
+ * Build OUTPUT-timeline video segments at their authored absolute starts.
  *
  * Returns {@link DuckSegment}s carrying each clip's asset / source trim / speed
  * and its output start, ready for {@link buildDuckPoints}.
  */
 export function exportVideoDuckSegments(videoClips: readonly Clip[]): DuckSegment[] {
-  const segs: DuckSegment[] = [];
-  let cursor = 0;
-  for (const clip of videoClips) {
-    const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
-    const durOut = (clip.trimEnd - clip.trimStart) / Math.max(0.01, speed);
-    segs.push({
+  return buildExportTimeline(videoClips)
+    .filter((item): item is Extract<ExportTimelineItem, { kind: 'clip' }> =>
+      item.kind === 'clip')
+    .map(({ clip, start }) => ({
       assetId: clip.assetId,
       trimStart: clip.trimStart,
       trimEnd: clip.trimEnd,
-      speed,
-      start: cursor,
-    });
-    cursor += durOut;
-  }
-  return segs;
+      speed: clip.speed && clip.speed > 0 ? clip.speed : 1,
+      speedRamp: clip.speedRamp,
+      start,
+    }));
+}
+
+export function buildAudioMixFilter(mixLabels: readonly string[]): string {
+  const inputs = `[0:a]${mixLabels.join('')}`;
+  return (
+    `${inputs}amix=inputs=${mixLabels.length + 1}:duration=first:` +
+    'dropout_transition=0:normalize=0,' +
+    'alimiter=limit=0.95:level=false[aout]'
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1584,6 +1587,7 @@ export async function exportProject(
   input: ExportInput,
   options: ExportOptions,
 ): Promise<Blob> {
+  throwIfAborted(options.signal);
   const { clips, tracks, assets } = input;
   const markers = input.markers ?? [];
   const videoTrack = tracks.find((t) => t.kind === 'video');
@@ -1608,24 +1612,42 @@ export async function exportProject(
     throw new Error('映像クリップがありません');
   }
 
+  const timelinePlan = buildExportTimeline(videoClips);
+
+  const requiredClips = [
+    ...videoClips,
+    ...audioClips.filter(
+      (clip) => !(clip.muted ?? false) && !trackMutedById(clip.trackId),
+    ),
+  ];
+  const missingAssetIds = [...new Set(
+    requiredClips
+      .filter((clip) => !assets.some((asset) => asset.id === clip.assetId))
+      .map((clip) => clip.assetId),
+  )];
+  if (missingAssetIds.length > 0) {
+    throw new Error(
+      `元素材が見つからないクリップがあります。再リンクしてから書き出してください: ` +
+      missingAssetIds.join(', '),
+    );
+  }
+
   // Legacy projects may contain secondary video/overlay lanes from builds
-  // that exposed them before compositing existed. Keep them loadable, but
-  // report every unsupported visual clip instead of dropping overlay clips
-  // silently.
+  // that exposed them before compositing existed. Loading remains supported,
+  // but exporting them incompletely is never treated as success.
   const droppedVideoClips = clips.filter(
     (c) => {
-      const kind = tracks.find((t) => t.id === c.trackId)?.kind;
+      const track = tracks.find((t) => t.id === c.trackId);
+      if (!track || track.hidden) return false;
+      const kind = track.kind;
       return kind === 'overlay' || (kind === 'video' && videoTrack && c.trackId !== videoTrack.id);
     },
   );
   if (droppedVideoClips.length > 0) {
-    const msg = `[exporter] WARNING: ${droppedVideoClips.length} clip(s) on a secondary video track are not yet composited into the export.`;
-    console.warn(msg);
-    options.onProgress?.({
-      stage: `サブ映像/オーバーレイの${droppedVideoClips.length}クリップは書き出し未対応（メイン映像トラックに移動してください）`,
-      percent: -1,
-      log: msg,
-    });
+    throw new Error(
+      `サブ映像/オーバーレイの${droppedVideoClips.length}クリップは書き出し未対応です。` +
+      'メイン映像トラックに移動するか、トラックを非表示にしてください。',
+    );
   }
 
   const { width, height } = getResolution(options.resolution, options.aspectRatio);
@@ -1636,6 +1658,7 @@ export async function exportProject(
 
   options.onProgress?.({ stage: 'FFmpeg を読み込み中', percent: -1 });
   const { ffmpeg, variant, threadCount } = await getFFmpeg(options.onProgress);
+  throwIfAborted(options.signal);
 
   const variantLabel = variant === 'mt'
     ? `MT (${threadCount} threads)`
@@ -1644,13 +1667,6 @@ export async function exportProject(
 
   // Text overlays ARE exported (rasterized → composited after the blur pass);
   // see the overlay pass below. No more "preview-only" warning.
-
-  // -------------------------------------------------------------------------
-  // Stream-copy fast path check
-  // -------------------------------------------------------------------------
-  let useStreamCopy = canStreamCopy(
-    videoClips, assets, width, height, videoTrackMuted, enableMotionBlur,
-  );
 
   // Progress tracking from FFmpeg log stream.
   const progressState = {
@@ -1701,11 +1717,33 @@ export async function exportProject(
     }
     options.onProgress?.({ stage: 'FFmpeg', percent: -1, log: message });
   };
-  ffmpeg.on('log', logHandler);
-
-  const writtenAssets = new Set<string>();
   const writtenAudioFilenames = new Map<string, string>();
   const assetHasAudio = new Map<string, boolean>();
+  const sourceMountPoint = `/byux_sources_${crypto.randomUUID().replaceAll('-', '')}`;
+  const mountedInputsByAssetId = new Map<string, string>();
+  const sourceBlobs: Array<{ name: string; data: Blob }> = [];
+
+  for (const assetId of new Set(requiredClips.map((clip) => clip.assetId))) {
+    const asset = assets.find((candidate) => candidate.id === assetId);
+    if (!asset) continue;
+    const fileName = `source_${mountedInputsByAssetId.size}.${safeExt(asset.name, 'bin')}`;
+    mountedInputsByAssetId.set(asset.id, `${sourceMountPoint}/${fileName}`);
+    if (asset.file) {
+      sourceBlobs.push({ name: fileName, data: asset.file });
+      continue;
+    }
+    throwIfAborted(options.signal);
+    const response = await fetch(asset.url, { signal: options.signal });
+    if (!response.ok) {
+      throw new Error(`素材を読み込めません: ${asset.name}`);
+    }
+    const blob = await response.blob();
+    throwIfAborted(options.signal);
+    if (blob.size !== asset.size) {
+      throw new Error(`素材の読み込みが途中で失敗しました: ${asset.name}`);
+    }
+    sourceBlobs.push({ name: fileName, data: blob });
+  }
 
   // Build deduplicated input list for video clips.
   const assetInputMap = new Map<string, { index: number; inputName: string }>();
@@ -1714,107 +1752,75 @@ export async function exportProject(
   for (const clip of videoClips) {
     const asset = assets.find((a) => a.id === clip.assetId);
     if (!asset || assetInputMap.has(asset.id)) continue;
-    const ext = safeExt(asset.name, 'mp4');
-    const inputName = `vinput_${asset.id}.${ext}`;
+    const inputName = mountedInputsByAssetId.get(asset.id);
+    if (!inputName) continue;
     const inputIndex = ffmpegInputArgs.length / 2;
     assetInputMap.set(asset.id, { index: inputIndex, inputName });
     ffmpegInputArgs.push('-i', inputName);
   }
 
-  let totalVideoSeconds = 0;
-  for (const clip of videoClips) {
-    totalVideoSeconds += (clip.trimEnd - clip.trimStart) / Math.max(0.01, clip.speed ?? 1);
-  }
+  const totalVideoSeconds = timelinePlan.at(-1)?.end ?? 0;
   progressState.totalDuration = totalVideoSeconds;
 
+  ffmpeg.on('log', logHandler);
   try {
-    // Write source files to WASM-FS.
-    options.onProgress?.({ stage: 'ソースファイル書き込み中', percent: -1 });
-    for (const [assetId, { inputName }] of assetInputMap) {
-      if (writtenAssets.has(assetId)) continue;
-      const asset = assets.find((a) => a.id === assetId);
-      if (!asset) continue;
-      await ffmpeg.writeFile(inputName, await readMediaAssetBytes(asset));
-      writtenAssets.add(assetId);
-    }
+    // WORKERFS lets FFmpeg read Blob/File sources without duplicating every
+    // multi-GB recording into a renderer Uint8Array and again into MEMFS.
+    options.onProgress?.({ stage: 'ソースファイルを接続中', percent: -1 });
+    await ffmpeg.createDir(sourceMountPoint, { signal: options.signal });
+    await ffmpeg.mount(FFFSType.WORKERFS, { blobs: sourceBlobs }, sourceMountPoint);
+    throwIfAborted(options.signal);
 
     options.onProgress?.({ stage: '音声ストリームを確認中', percent: -1 });
     for (const [assetId, { inputName }] of assetInputMap) {
+      throwIfAborted(options.signal);
       assetHasAudio.set(assetId, await probeInputHasAudio(ffmpeg, inputName));
     }
-    if (useStreamCopy && assetHasAudio.get(videoClips[0].assetId) === false) {
-      // The fast path would preserve "no audio", then the optional BGM mix
-      // expects 0:a. Normalize through the full path so silence is generated.
-      useStreamCopy = false;
-    }
-    if (useStreamCopy) {
-      options.onProgress?.({
-        stage: '高速モード: ストリームコピー (再エンコードなし)',
-        percent: -1,
-        log: '[exporter] fast path: -c copy (no libx264 re-encode)',
-      });
-    }
-
     progressState.phase = 'encode';
     progressState.startEpoch = Date.now();
 
     let videoOutput = 'video_only.mp4';
 
-    // -----------------------------------------------------------------------
-    // Stream-copy fast path — single clip, no re-encode
-    // -----------------------------------------------------------------------
-    if (useStreamCopy) {
-      const clip = videoClips[0];
-      const entry = assetInputMap.get(clip.assetId);
-      if (!entry) throw new Error('ソース素材が見つかりません');
-
-      options.onProgress?.({ stage: 'ストリームコピー中', percent: -1 });
-      await ffmpeg.exec([
-        '-threads', '1',
-        '-i', entry.inputName,
-        '-ss', clip.trimStart.toFixed(4),
-        '-to', clip.trimEnd.toFixed(4),
-        '-c', 'copy',
-        '-movflags', '+faststart',
-        '-y',
-        videoOutput,
-      ]);
-      options.onProgress?.({ stage: 'ストリームコピー完了', percent: 0.9 });
-    } else {
-      // -----------------------------------------------------------------------
-      // Full filter_complex encode path
-      // -----------------------------------------------------------------------
+      // Always use the normalized encode path. A stream-copy decision based on
+      // MIME/container metadata cannot prove codec, frame-rate, dimensions, or
+      // audio compatibility with the requested export settings.
       const clipFilterFragments: string[] = [];
       const vLabels: string[] = [];
       const aLabels: string[] = [];
-      // Output-timeline placement of each INCLUDED clip (clips are concatenated
-      // back-to-back), used to time-gate the text-overlay pass below.
       const includedTimeline: Array<{ clip: Clip; start: number; end: number }> = [];
 
-      let skippedCount = 0;
-      for (let i = 0; i < videoClips.length; i++) {
-        const clip = videoClips[i];
-        const asset = assets.find((a) => a.id === clip.assetId);
-        if (!asset) {
-          const msg = `[exporter] Clip ${i + 1} スキップ — 元素材なし (id=${clip.assetId})`;
-          console.warn(msg);
-          options.onProgress?.({ stage: 'クリップスキップ', percent: -1, log: msg });
-          skippedCount++;
+      for (let i = 0; i < timelinePlan.length; i++) {
+        throwIfAborted(options.signal);
+        const item = timelinePlan[i];
+        const duration = item.end - item.start;
+        const vLabel = item.kind === 'gap' ? `[gv${i}]` : `[cv${i}]`;
+        const aLabel = item.kind === 'gap' ? `[ga${i}]` : `[ca${i}]`;
+        vLabels.push(vLabel);
+        aLabels.push(aLabel);
+
+        if (item.kind === 'gap') {
+          // Preserve authored empty space as black video plus finite silence.
+          clipFilterFragments.push(
+            `color=c=black:s=${width}x${height}:r=${targetFps}:d=${duration.toFixed(4)},` +
+            `format=yuv420p,setsar=1,setpts=PTS-STARTPTS${vLabel};` +
+            `anullsrc=r=44100:cl=stereo,atrim=0:${duration.toFixed(4)},` +
+            `asetpts=PTS-STARTPTS${aLabel}`,
+          );
           continue;
         }
 
-        const entry = assetInputMap.get(asset.id);
-        if (!entry) continue;
+        const clip = item.clip;
+        const asset = assets.find((a) => a.id === clip.assetId);
+        if (!asset) {
+          throw new Error(`元素材が見つかりません。再リンクしてください: ${clip.assetId}`);
+        }
 
-        const vLabel = `[cv${i}]`;
-        const aLabel = `[ca${i}]`;
-        vLabels.push(vLabel);
-        aLabels.push(aLabel);
-        const durOut = (clip.trimEnd - clip.trimStart) / Math.max(0.01, clip.speed ?? 1);
-        const startOut = includedTimeline.length
-          ? includedTimeline[includedTimeline.length - 1].end
-          : 0;
-        includedTimeline.push({ clip, start: startOut, end: startOut + durOut });
+        const entry = assetInputMap.get(asset.id);
+        if (!entry) {
+          throw new Error(`元素材をFFmpegへ読み込めませんでした: ${asset.name}`);
+        }
+
+        includedTimeline.push({ clip, start: item.start, end: item.end });
 
         clipFilterFragments.push(
           buildClipFilters({
@@ -1835,16 +1841,7 @@ export async function exportProject(
 
       const n = vLabels.length;
       if (n === 0) {
-        throw new Error(
-          skippedCount > 0
-            ? `書き出し可能な映像クリップがありません (全${skippedCount}クリップの元素材が見つかりません)`
-            : '書き出し可能な映像クリップがありません',
-        );
-      }
-      if (skippedCount > 0) {
-        const msg = `[exporter] ${skippedCount} クリップをスキップ — 出力が短くなります`;
-        console.warn(msg);
-        options.onProgress?.({ stage: `${skippedCount}クリップをスキップ`, percent: -1, log: msg });
+        throw new Error('書き出し可能な映像クリップがありません');
       }
 
       const concatInputs = vLabels.map((v, i) => `${v}${aLabels[i]}`).join('');
@@ -1853,7 +1850,7 @@ export async function exportProject(
       const filterComplex = clipFilterFragments.join(';');
 
       options.onProgress?.({ stage: 'エンコード中', percent: -1 });
-      await ffmpeg.exec([
+      await execChecked(ffmpeg, [
         '-threads', '1',
         ...ffmpegInputArgs,
         '-filter_complex', filterComplex,
@@ -1870,7 +1867,7 @@ export async function exportProject(
         '-movflags', '+faststart',
         '-y',
         videoOutput,
-      ]);
+      ], '映像のエンコード');
 
       // -----------------------------------------------------------------------
       // Post-concat effects (motion-blur + speed-ramp + transform/color-grade)
@@ -1917,6 +1914,13 @@ export async function exportProject(
         (hudPreset === 'none' ? 0 : 1);
 
       if (enableMotionBlur || hasRamp || hasTransform) {
+        if (overFrameCap && (hasRamp || hasTransform)) {
+          throw new Error(
+            `この動画は約${effectFrames}フレームあり、速度リマップ/トランスフォーム/` +
+            `カラー/トランジションを正確に書き出せる上限 ${MAX_WEBGL_BLUR_FRAMES} を超えています。` +
+            '動画を短く分割して再試行してください。',
+          );
+        }
         progressState.startEpoch = Date.now();
         progressState.totalDuration = totalVideoSeconds;
 
@@ -1940,42 +1944,22 @@ export async function exportProject(
               hudPreset,
               hudMaskStrength,
               encoding,
+              signal: options.signal,
               onProgress: options.onProgress,
             });
           } catch (err) {
-            // Never fail the whole export over the fused pass — degrade exactly
-            // like the old per-pass fallbacks: motion-blur → whole-video tblend,
-            // speed-ramp & transform/grade → skipped (constant speed /
-            // untransformed). The preview still shows them correctly.
-            const m = `[exporter] fused effects pass failed (${err instanceof Error ? err.message : String(err)}) — degrading (blur→tblend, ramp/transform skipped)`;
-            console.warn(m);
-            options.onProgress?.({ stage: 'エフェクト適用に失敗（縮退処理）', percent: -1, log: m });
             try { await ffmpeg.deleteFile('fx_video.mp4'); } catch { /* ignore */ }
-            if (enableMotionBlur) {
-              const mbClip = videoClips.find((c) =>
-                c.effects.some((e) => e.type === 'motion-blur'),
-              );
-              const mbEffect = mbClip?.effects.find((e) => e.type === 'motion-blur');
-              videoOutput = await applyMotionBlur(ffmpeg, videoOutput, {
-                width,
-                height,
-                targetFps,
-                totalVideoSeconds,
-                intensity: mbEffect?.intensity ?? 50,
-                speed: mbClip?.speed ?? 1,
-                strengthOverride: options.motionBlurStrength,
-                segments: includedTimeline,
-                hudPreset,
-                hudMaskStrength,
-                encoding,
-                onProgress: options.onProgress,
-              });
-            }
+            throw new Error(
+              `エフェクトを正確に適用できなかったため、書き出しを中止しました: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+              { cause: err },
+            );
           }
         } else {
-          // Over the frame cap: motion-blur uses the whole-video tblend filter
-          // (applyMotionBlur routes there itself above the cap); ramp and
-          // transform/grade are skipped (preview-only for this export).
+          // The only remaining non-fused case is a long timeline whose sole
+          // post-process is motion blur. applyMotionBlur either uses the exact
+          // WebGL path or an explicitly constrained whole-video fallback.
           if (enableMotionBlur) {
             options.onProgress?.({ stage: 'モーションブラー適用中', percent: -1 });
             const mbClip = videoClips.find((c) =>
@@ -1994,25 +1978,8 @@ export async function exportProject(
               hudPreset,
               hudMaskStrength,
               encoding,
+              signal: options.signal,
               onProgress: options.onProgress,
-            });
-          }
-          if (hasRamp) {
-            const msg = `[exporter] speed-ramp: ~${effectFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping ramp (constant speed for this export)`;
-            console.warn(msg);
-            options.onProgress?.({
-              stage: '速度リマップ: 長尺のためスキップ（一定速度で書き出し）',
-              percent: -1,
-              log: msg,
-            });
-          }
-          if (hasTransform) {
-            const msg = `[exporter] clip transform: ~${effectFrames} frames > ${MAX_WEBGL_BLUR_FRAMES} cap — skipping transform (preview-only for this export)`;
-            console.warn(msg);
-            options.onProgress?.({
-              stage: 'トランスフォーム/カラー: 長尺のためスキップ（プレビューのみ）',
-              percent: -1,
-              log: msg,
             });
           }
         }
@@ -2025,6 +1992,7 @@ export async function exportProject(
       // ---------------------------------------------------------------------
       const overlaySpecs: OverlaySpec[] = [];
       for (const seg of includedTimeline) {
+        throwIfAborted(options.signal);
         if (!seg.clip.overlays || seg.clip.overlays.length === 0) continue;
         const vi = videoClips.indexOf(seg.clip);
         const tokens = {
@@ -2032,7 +2000,12 @@ export async function exportProject(
           total: String(videoClips.length),
         };
         const png = await rasterizeOverlays(seg.clip.overlays, width, height, tokens);
-        if (!png) continue;
+        if (!png) {
+          throw new Error(
+            `テキストを画像化できませんでした。クリップ ${vi >= 0 ? vi + 1 : seg.clip.id} の` +
+            'フォントまたは描画環境を確認してください。',
+          );
+        }
         const name = `ovl_${overlaySpecs.length}.png`;
         await ffmpeg.writeFile(name, png);
         // Intro animation for this clip's shared overlay PNG (matches preview).
@@ -2051,17 +2024,17 @@ export async function exportProject(
             encoding,
           );
         } catch (err) {
-          // Never let text compositing fail the whole export — degrade to no
-          // text (the prior behaviour) instead of throwing.
-          const m = `[exporter] overlay pass failed (${err instanceof Error ? err.message : String(err)}) — exporting without text`;
-          console.warn(m);
-          options.onProgress?.({ stage: 'テキスト合成に失敗（テキスト無しで継続）', percent: -1, log: m });
           for (const s of overlaySpecs) {
             try { await ffmpeg.deleteFile(s.name); } catch { /* ignore */ }
           }
+          throw new Error(
+            `テキストを正確に合成できなかったため、書き出しを中止しました: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+            { cause: err },
+          );
         }
       }
-    }
 
     // -----------------------------------------------------------------------
     // BGM mix pass — audio-only re-encode on top of the finished video.
@@ -2083,7 +2056,7 @@ export async function exportProject(
       options.onProgress?.({ stage: 'BGM 合成中', percent: -1 });
 
       // BGM auto-ducking (Phase P5): project the kill markers onto the OUTPUT
-      // timeline (the back-to-back video segments) and build a `volume`
+      // timeline (the authored absolute video segments) and build a `volume`
       // expression that dips the BGM around each kill. Computed once and applied
       // ONLY to the first audio (BGM) track's clips — SE / other audio tracks
       // play at full level. Resolved fields are clamped (lib/audioDucking).
@@ -2108,14 +2081,16 @@ export async function exportProject(
       let audioInputIndex = 1;
 
       for (let i = 0; i < playableAudioClips.length; i++) {
+        throwIfAborted(options.signal);
         const clip = playableAudioClips[i];
         const asset = assets.find((a) => a.id === clip.assetId);
         if (!asset) continue;
 
-        const ext = safeExt(asset.name, 'mp3');
-        const inputName = `ainput_${asset.id}.${ext}`;
+        const inputName = mountedInputsByAssetId.get(asset.id);
+        if (!inputName) {
+          throw new Error(`元素材をFFmpegへ読み込めませんでした: ${asset.name}`);
+        }
         if (!writtenAudioFilenames.has(asset.id)) {
-          await ffmpeg.writeFile(inputName, await readMediaAssetBytes(asset));
           writtenAudioFilenames.set(asset.id, inputName);
         }
         audioInputArgs.push('-i', inputName);
@@ -2147,16 +2122,10 @@ export async function exportProject(
         audioInputIndex++;
       }
 
-      const totalMixInputs = mixLabels.length + 1;
-      // normalize=1: amix divides the summed signal by the input count, so the
-      // master can NEVER exceed the loudest input → mathematically clip-proof,
-      // with no dependency on a limiter filter (alimiter's auto-level kept
-      // re-clipping). [0:a] (the gameplay/video audio) is listed FIRST so
-      // duration=first tracks the VIDEO length, not the first BGM clip.
       const mixFilterComplex =
-        `${audioFilterParts.join(';')};[0:a]${mixLabels.join('')}amix=inputs=${totalMixInputs}:duration=first:dropout_transition=0:normalize=1[aout]`;
+        `${audioFilterParts.join(';')};${buildAudioMixFilter(mixLabels)}`;
 
-      await ffmpeg.exec([
+      await execChecked(ffmpeg, [
         '-threads', '1',
         '-i', videoOutput,
         ...audioInputArgs,
@@ -2171,27 +2140,31 @@ export async function exportProject(
         '-movflags', '+faststart',
         '-y',
         'final.mp4',
-      ]);
+      ], 'BGM/効果音の合成');
       finalOutput = 'final.mp4';
     }
 
     options.onProgress?.({ stage: '完成', percent: 1 });
-    const data = await ffmpeg.readFile(finalOutput);
+    throwIfAborted(options.signal);
+    const data = await ffmpeg.readFile(finalOutput, 'binary', {
+      signal: options.signal,
+    });
+    throwIfAborted(options.signal);
     const bytes = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
-    // Ensure we return an ArrayBuffer-backed Uint8Array (not SharedArrayBuffer).
-    const ab = new Uint8Array(bytes.byteLength);
-    ab.set(bytes);
-    return new Blob([ab.buffer], { type: 'video/mp4' });
+    // readFile already returns a transferred ArrayBuffer-backed view. Passing
+    // it straight to Blob avoids one additional full-size renderer copy.
+    if (bytes.buffer instanceof ArrayBuffer) {
+      return new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'video/mp4' });
+    }
+    const fallback = new Uint8Array(bytes.byteLength);
+    fallback.set(bytes);
+    return new Blob([fallback], { type: 'video/mp4' });
 
   } finally {
     ffmpeg.off('log', logHandler);
-    // Clean up every WASM-FS file written by this export.
-    for (const { inputName } of assetInputMap.values()) {
-      try { await ffmpeg.deleteFile(inputName); } catch { /* ignore */ }
-    }
-    for (const inputName of writtenAudioFilenames.values()) {
-      try { await ffmpeg.deleteFile(inputName); } catch { /* ignore */ }
-    }
+    try { await ffmpeg.unmount(sourceMountPoint); } catch { /* reset/early failure */ }
+    try { await ffmpeg.deleteDir(sourceMountPoint); } catch { /* reset/early failure */ }
+    // Clean up every MEMFS file written by this export.
     try { await ffmpeg.deleteFile('video_only.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_blurred.mp4'); } catch { /* ignore */ }
     try { await ffmpeg.deleteFile('video_speedramped.mp4'); } catch { /* ignore */ }

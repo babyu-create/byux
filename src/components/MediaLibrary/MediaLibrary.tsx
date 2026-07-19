@@ -1,9 +1,10 @@
-import { useRef, useState, type DragEvent, type ChangeEvent } from 'react';
-import { Plus, Music, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { useEffect, useRef, useState, type DragEvent, type ChangeEvent } from 'react';
+import { AlertTriangle, Link2, Music, PanelLeftClose, PanelLeftOpen, Plus } from 'lucide-react';
 import { useMediaStore } from '../../stores/mediaStore';
-import { useProjectStore } from '../../stores/projectStore';
+import { clearHistory, useProjectStore } from '../../stores/projectStore';
 import { formatDuration, formatFileSize } from '../../lib/media';
 import type { MediaAsset } from '../../lib/types';
+import type { ProjectAssetRef } from '../../lib/project';
 import styles from './MediaLibrary.module.css';
 
 interface MediaLibraryProps {
@@ -22,8 +23,12 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
   const removeAsset = useMediaStore((s) => s.removeAsset);
   const clearError = useMediaStore((s) => s.clearError);
   const showMessage = useProjectStore((s) => s.showMessage);
+  const expectedAssets = useProjectStore((s) => s.expectedAssets);
+  const remapAssetIds = useProjectStore((s) => s.remapAssetIds);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const relinkInputRef = useRef<HTMLInputElement>(null);
+  const [relinkTarget, setRelinkTarget] = useState<ProjectAssetRef | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   // Track nested dragenter events so dragleave on a child doesn't flip the
   // overlay off while still hovering the parent drop zone.
@@ -31,11 +36,23 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
 
   const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    if (isImporting) {
+      showMessage('info', '現在の読み込みが終わるまでお待ちください', 2500);
+      return;
+    }
     const count = files.length;
-    void addFiles(files).then(() => {
-      // Show a brief acknowledgment so users know their drop registered
-      // even when the import list scrolls or the new items render below the fold.
-      showMessage('success', `${count}個のファイルを追加しました`, 1800);
+    void addFiles(files).then((created) => {
+      if (created.length === count) {
+        showMessage('success', `${created.length}個のファイルを追加しました`, 1800);
+      } else if (created.length > 0) {
+        showMessage(
+          'info',
+          `${created.length}個を追加、${count - created.length}個は読み込めませんでした`,
+          4000,
+        );
+      } else {
+        showMessage('error', 'ファイルを追加できませんでした。形式を確認してください', 4000);
+      }
     });
   };
 
@@ -64,6 +81,40 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
     e.preventDefault();
     dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
     if (dragDepthRef.current === 0) setIsDragging(false);
+  };
+
+  const chooseRelinkFile = (ref: ProjectAssetRef) => {
+    if (isImporting) {
+      showMessage('info', '現在の読み込みが終わるまでお待ちください', 2500);
+      return;
+    }
+    setRelinkTarget(ref);
+    window.setTimeout(() => relinkInputRef.current?.click(), 0);
+  };
+
+  const handleRelinkChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    const target = relinkTarget;
+    setRelinkTarget(null);
+    if (!file || !target) return;
+    const created = await addFiles([file]);
+    const asset = created[0];
+    if (!asset) {
+      showMessage('error', '選択したファイルを読み込めませんでした', 4000);
+      return;
+    }
+    if (asset.kind !== target.kind) {
+      removeAsset(asset.id);
+      showMessage(
+        'error',
+        target.kind === 'video' ? '動画ファイルを選択してください' : '音声ファイルを選択してください',
+        4000,
+      );
+      return;
+    }
+    remapAssetIds({ [target.id]: asset.id });
+    showMessage('success', `「${target.name}」を「${file.name}」へ再リンクしました`, 4000);
   };
 
   const videoAssets = assets.filter((a) => a.kind === 'video');
@@ -111,10 +162,17 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
         onDragOver={handleDragOver}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleClick();
+          }
+        }}
         role="button"
         tabIndex={0}
-        aria-label="動画ファイルをアップロード"
+        aria-label="動画または音声ファイルを追加"
         aria-dropeffect="copy"
+        aria-disabled={isImporting}
       >
         <div
           className={`${styles.dropZoneIcon} ${isDragging ? styles.dropZoneIconActive : ''}`}
@@ -136,16 +194,57 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
           accept="video/*,audio/*"
           multiple
           onChange={handleChange}
+          aria-label="動画または音声ファイルを選択"
           className={styles.fileInput}
         />
       </div>
 
       {importError && (
-        <div className={styles.error} onClick={clearError} role="alert">
+        <button
+          type="button"
+          className={styles.error}
+          onClick={clearError}
+          aria-label="読み込みエラーを閉じる"
+        >
           {importError}
-          <span className={styles.errorClose}>×</span>
-        </div>
+          <span className={styles.errorClose} aria-hidden="true">×</span>
+        </button>
       )}
+
+      {expectedAssets.length > 0 ? (
+        <section className={styles.missingSection} aria-labelledby="missing-media-title">
+          <div className={styles.missingHeader}>
+            <AlertTriangle size={14} aria-hidden="true" />
+            <span id="missing-media-title">見つからない素材（{expectedAssets.length}）</span>
+          </div>
+          <p className={styles.missingHelp}>移動・改名した元ファイルを選び直してください。</p>
+          {expectedAssets.map((ref) => (
+            <div key={ref.id} className={styles.missingItem}>
+              <span className={styles.missingName} title={ref.path ?? ref.name}>
+                {ref.name}
+              </span>
+              <button
+                type="button"
+                className={styles.relinkBtn}
+                onClick={() => chooseRelinkFile(ref)}
+                disabled={isImporting}
+                aria-label={`${ref.name}を再リンク`}
+              >
+                <Link2 size={13} aria-hidden="true" />
+                選び直す
+              </button>
+            </div>
+          ))}
+          <input
+            ref={relinkInputRef}
+            type="file"
+            accept={relinkTarget?.kind === 'audio' ? 'audio/*' : 'video/*'}
+            onChange={(event) => void handleRelinkChange(event)}
+            className={styles.fileInput}
+            aria-label="再リンクする元ファイルを選択"
+          />
+        </section>
+      ) : null}
 
       <div className={styles.list}>
         {assets.length === 0 ? (
@@ -214,11 +313,45 @@ interface MediaItemProps {
 
 function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
   const addClipFromAsset = useProjectStore((s) => s.addClipFromAsset);
+  const clips = useProjectStore((s) => s.clips);
+  const markers = useProjectStore((s) => s.markers);
+  const ioRanges = useProjectStore((s) => s.ioRanges);
+  const removeAssetReferences = useProjectStore((s) => s.removeAssetReferences);
   const tracks = useProjectStore((s) => s.tracks);
 
   const handleRemove = (e: React.MouseEvent) => {
     e.stopPropagation();
+    const clipCount = clips.filter((clip) => clip.assetId === asset.id).length;
+    const markerCount = markers.filter((marker) => marker.assetId === asset.id).length;
+    const rangeCount = ioRanges.filter((range) => range.assetId === asset.id).length;
+    const referenceCount = clipCount + markerCount + rangeCount;
+    const hadUndoHistory = useProjectStore.temporal.getState().pastStates.length > 0;
+    const referenceDetail =
+      referenceCount > 0
+        ? `\n関連するクリップ${clipCount}件、マーカー${markerCount}件、範囲${rangeCount}件も削除します。`
+        : '';
+    if (
+      !window.confirm(
+        `「${asset.name}」を素材一覧から削除しますか？${referenceDetail}\n` +
+        'この操作は取り消せません。参照切れを防ぐため、元に戻す・やり直す履歴もクリアされます。',
+      )
+    ) {
+      return;
+    }
+    removeAssetReferences(asset.id);
     onRemove(asset.id);
+    // Media resources live outside zundo. Clearing the document history keeps
+    // Ctrl+Z from resurrecting a clip whose source Blob/token was released.
+    clearHistory();
+    useProjectStore
+      .getState()
+      .showMessage(
+        'info',
+        hadUndoHistory || referenceCount > 0
+          ? '素材と関連項目を削除しました（編集履歴をクリア）'
+          : '素材を削除しました',
+        3500,
+      );
   };
 
   const handleAdd = (e: React.MouseEvent) => {
@@ -232,34 +365,28 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
   return (
     <div
       className={`${styles.item} ${isSelected ? styles.itemSelected : ''}`}
-      onClick={() => onSelect(asset.id)}
-      role="button"
-      tabIndex={0}
+      role="group"
+      aria-label={`${asset.name} の操作`}
     >
-      <div className={styles.thumbnail} data-kind={asset.kind}>
-        {asset.kind === 'video' ? (
-          <video
-            src={asset.url}
-            crossOrigin="anonymous"
-            muted
-            preload="metadata"
-            className={styles.thumbVideo}
-          />
-        ) : (
-          <div className={styles.thumbAudio}><Music size={22} strokeWidth={1.8} aria-hidden="true" /></div>
-        )}
-      </div>
-      <div className={styles.itemMeta}>
-        <div className={styles.itemName} title={asset.name}>
-          {asset.name}
+      <button
+        type="button"
+        className={styles.itemSelect}
+        onClick={() => onSelect(asset.id)}
+        aria-pressed={isSelected}
+      >
+        <LazyThumbnail asset={asset} />
+        <div className={styles.itemMeta}>
+          <div className={styles.itemName} title={asset.name}>
+            {asset.name}
+          </div>
+          <div className={styles.itemSub}>
+            <span>{formatDuration(asset.duration)}</span>
+            <span>·</span>
+            <span>{formatFileSize(asset.size)}</span>
+            {asset.previewProxy ? <span className={styles.proxyBadge}>互換プレビュー</span> : null}
+          </div>
         </div>
-        <div className={styles.itemSub}>
-          <span>{formatDuration(asset.duration)}</span>
-          <span>·</span>
-          <span>{formatFileSize(asset.size)}</span>
-          {asset.previewProxy ? <span className={styles.proxyBadge}>互換プレビュー</span> : null}
-        </div>
-      </div>
+      </button>
       <div className={styles.itemActions}>
         <button
           type="button"
@@ -280,6 +407,42 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
           ×
         </button>
       </div>
+    </div>
+  );
+}
+
+function LazyThumbnail({ asset }: { asset: MediaAsset }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || asset.kind !== 'video') return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setVisible(entry.isIntersecting),
+      { rootMargin: '100px 0px' },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [asset.kind]);
+
+  return (
+    <div ref={ref} className={styles.thumbnail} data-kind={asset.kind}>
+      {asset.kind === 'video' ? (
+        visible ? (
+          <video
+            src={asset.url}
+            crossOrigin="anonymous"
+            muted
+            preload="metadata"
+            className={styles.thumbVideo}
+          />
+        ) : null
+      ) : (
+        <div className={styles.thumbAudio}>
+          <Music size={22} strokeWidth={1.8} aria-hidden="true" />
+        </div>
+      )}
     </div>
   );
 }

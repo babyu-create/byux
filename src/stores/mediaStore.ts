@@ -18,13 +18,14 @@ interface MediaStoreState {
     source: { token: string; url: string; size: number },
   ) => MediaAsset;
   removeAsset: (id: string) => void;
+  clearAssets: () => void;
   selectAsset: (id: string | null) => void;
   clearError: () => void;
   setAssetBeats: (id: string, beats: number[]) => void;
   setAssetWaveform: (id: string, waveform: { peaks: Float32Array; peaksPerSecond: number }) => void;
 }
 
-export const useMediaStore = create<MediaStoreState>((set) => ({
+export const useMediaStore = create<MediaStoreState>((set, get) => ({
   assets: [],
   selectedAssetId: null,
   isImporting: false,
@@ -32,6 +33,7 @@ export const useMediaStore = create<MediaStoreState>((set) => ({
   importError: null,
 
   addFiles: async (files) => {
+    if (get().isImporting) return [];
     const list = Array.from(files);
     if (list.length === 0) return [];
 
@@ -93,6 +95,9 @@ export const useMediaStore = create<MediaStoreState>((set) => ({
           peaks: wf.peaks,
           peaksPerSecond: wf.peaksPerSecond,
         });
+      }).catch(() => {
+        // A corrupt/unsupported audio stream should not become an unhandled
+        // rejection after the import itself has already completed.
       });
     }
 
@@ -131,6 +136,21 @@ export const useMediaStore = create<MediaStoreState>((set) => ({
       const nextSelected =
         state.selectedAssetId === id ? (remaining[0]?.id ?? null) : state.selectedAssetId;
       return { assets: remaining, selectedAssetId: nextSelected };
+    });
+  },
+
+  clearAssets: () => {
+    const assets = get().assets;
+    for (const asset of assets) {
+      if (asset.url.startsWith('blob:')) URL.revokeObjectURL(asset.url);
+      if (asset.sourceToken) void window.fce?.releaseMediaFile?.(asset.sourceToken);
+    }
+    set({
+      assets: [],
+      selectedAssetId: null,
+      isImporting: false,
+      importStatus: null,
+      importError: null,
     });
   },
 

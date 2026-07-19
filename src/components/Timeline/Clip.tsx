@@ -1,4 +1,4 @@
-import { memo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { memo, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import type { Clip as ClipType, IORange, KillMarker, MediaAsset, TrackKind } from '../../lib/types';
 import { useProjectStore } from '../../stores/projectStore';
 import { useShallow } from 'zustand/react/shallow';
@@ -12,6 +12,7 @@ import {
   snapClipMove,
   snapTime,
   timeToPx,
+  timelineTimeAtSourceTime,
 } from '../../lib/timeline';
 import { formatDuration } from '../../lib/media';
 import { KillMarkerFlag } from './KillMarkerFlag';
@@ -32,6 +33,9 @@ interface ClipProps {
   asset?: MediaAsset;
   kind: TrackKind;
   locked?: boolean;
+  keyboardTabStop?: boolean;
+  previousClipId?: string;
+  nextClipId?: string;
 }
 
 type DragMode = 'move' | 'trim-start' | 'trim-end';
@@ -49,7 +53,16 @@ interface DragState {
   assetDuration: number;
 }
 
-export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false }: ClipProps) {
+export const Clip = memo(function Clip({
+  clip,
+  zoom,
+  asset,
+  kind,
+  locked = false,
+  keyboardTabStop = false,
+  previousClipId,
+  nextClipId,
+}: ClipProps) {
   const moveClip = useProjectStore((s) => s.moveClip);
   const trimClipStart = useProjectStore((s) => s.trimClipStart);
   const trimClipEnd = useProjectStore((s) => s.trimClipEnd);
@@ -63,6 +76,7 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
   };
 
   const dragRef = useRef<DragState | null>(null);
+  const clipElementRef = useRef<HTMLDivElement>(null);
   const lastClientXRef = useRef(0);
   const lastShiftKeyRef = useRef(false);
   const [draggingMode, setDraggingMode] = useState<DragMode | null>(null);
@@ -71,6 +85,41 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
 
   const left = timeToPx(clip.start, zoom);
   const width = Math.max(8, timeToPx(clipDuration(clip), zoom));
+
+  const handleTrimKeyDown = (
+    event: React.KeyboardEvent<HTMLDivElement>,
+    edge: 'start' | 'end',
+  ) => {
+    if (!asset || locked || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    selectClip(clip.id);
+    const step = event.shiftKey ? 1 : 0.1;
+    if (edge === 'start') {
+      const max = clip.trimEnd - 0.1;
+      const next =
+        event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? max
+            : Math.max(0, Math.min(max, clip.trimStart + (event.key === 'ArrowRight' ? step : -step)));
+      trimClipStart(clip.id, next);
+    } else {
+      const min = clip.trimStart + 0.1;
+      const next =
+        event.key === 'Home'
+          ? min
+          : event.key === 'End'
+            ? asset.duration
+            : Math.max(
+                min,
+                Math.min(asset.duration, clip.trimEnd + (event.key === 'ArrowRight' ? step : -step)),
+              );
+      trimClipEnd(clip.id, next);
+    }
+  };
 
   const startDrag = (e: ReactPointerEvent<HTMLDivElement>, mode: DragMode) => {
     // Left button only — otherwise a right-click both starts a "move" drag
@@ -130,10 +179,9 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
           if (c.trackId !== audioTrackId) continue;
           const a = mediaState.assets.find((x) => x.id === c.assetId);
           if (!a?.beats) continue;
-          const speed = c.speed ?? 1;
           for (const b of a.beats) {
             if (b < c.trimStart - 1e-6 || b > c.trimEnd + 1e-6) continue;
-            const t = c.start + (b - c.trimStart) / speed;
+            const t = timelineTimeAtSourceTime(c, b);
             points.push({ time: t, type: 'beat' });
           }
         }
@@ -224,6 +272,21 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
 
   const label = asset?.name ?? '(missing media)';
   const showThumbnail = asset?.kind === 'video' && pxPerSecond(zoom) > 24;
+  const [thumbnailVisible, setThumbnailVisible] = useState(false);
+
+  useEffect(() => {
+    const element = clipElementRef.current;
+    if (!element || !showThumbnail) {
+      setThumbnailVisible(false);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setThumbnailVisible(entry.isIntersecting),
+      { rootMargin: '0px 200px' },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [showThumbnail]);
 
   // Filter markers/ranges to THIS asset+trim-window inside the selector and
   // shallow-compare the result (useShallow). Adding a kill marker replaces the
@@ -262,19 +325,20 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
   );
 
   const pendingIn = useProjectStore((s) => s.pendingIn);
-  const clipSpeed = clip.speed ?? 1;
   const pendingInPx =
     pendingIn &&
     asset &&
     pendingIn.assetId === asset.id &&
     pendingIn.time >= clip.trimStart - 1e-6 &&
     pendingIn.time <= clip.trimEnd + 1e-6
-      ? timeToPx((pendingIn.time - clip.trimStart) / clipSpeed, zoom)
+      ? timeToPx(timelineTimeAtSourceTime(clip, pendingIn.time) - clip.start, zoom)
       : null;
 
   return (
     <div
+      ref={clipElementRef}
       className={`${styles.clip} ${isSelected ? styles.selected : ''} ${draggingMode ? styles.dragging : ''} ${locked ? styles.locked : ''}`}
+      data-timeline-clip="true"
       data-kind={kind}
       style={{ left, width }}
       onPointerDown={(e) => startDrag(e, 'move')}
@@ -282,19 +346,47 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       onClick={handleClick}
-      role="button"
-      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          event.stopPropagation();
+          selectClip(clip.id, event.shiftKey);
+        } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          event.stopPropagation();
+          const targetId = event.key === 'ArrowLeft' ? previousClipId : nextClipId;
+          if (!targetId) return;
+          const target = [...document.querySelectorAll<HTMLElement>('[data-timeline-clip="true"]')]
+            .find((element) => element.dataset.clipId === targetId);
+          target?.focus();
+          target?.click();
+        }
+      }}
+      role="group"
+      data-clip-id={clip.id}
+      tabIndex={keyboardTabStop ? 0 : -1}
+      aria-current={isSelected ? 'true' : undefined}
+      aria-label={`${label}、${formatDuration(clipDuration(clip))}、Enterで選択、左右矢印で前後のクリップへ移動`}
     >
-      <div
-        className={styles.handleStart}
-        onPointerDown={(e) => startDrag(e, 'trim-start')}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        style={locked ? { display: 'none' } : undefined}
-      />
+      {!locked && asset ? (
+        <div
+          className={styles.handleStart}
+          onPointerDown={(e) => startDrag(e, 'trim-start')}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onKeyDown={(event) => handleTrimKeyDown(event, 'start')}
+          role="slider"
+          tabIndex={isSelected ? 0 : -1}
+          aria-label={`${label}の開始位置`}
+          aria-valuemin={0}
+          aria-valuemax={Math.max(0, clip.trimEnd - 0.1)}
+          aria-valuenow={clip.trimStart}
+          aria-valuetext={formatDuration(clip.trimStart)}
+        />
+      ) : null}
       <div className={styles.body}>
-        {showThumbnail && asset?.url ? (
+        {showThumbnail && thumbnailVisible && asset?.url ? (
           <video
             src={asset.url}
             crossOrigin="anonymous"
@@ -322,26 +414,52 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
         {visibleRanges.map((r) => {
           const visibleStart = Math.max(r.inTime, clip.trimStart);
           const visibleEnd = Math.min(r.outTime, clip.trimEnd);
-          const leftPx = timeToPx((visibleStart - clip.trimStart) / clipSpeed, zoom);
-          const widthPx = timeToPx((visibleEnd - visibleStart) / clipSpeed, zoom);
+          const localStart = timelineTimeAtSourceTime(clip, visibleStart) - clip.start;
+          const localEnd = timelineTimeAtSourceTime(clip, visibleEnd) - clip.start;
+          const leftPx = timeToPx(localStart, zoom);
+          const widthPx = timeToPx(localEnd - localStart, zoom);
           if (widthPx <= 0) return null;
-          return <IORangeBar key={r.id} range={r} leftPx={leftPx} widthPx={widthPx} />;
+          return (
+            <IORangeBar
+              key={r.id}
+              range={r}
+              leftPx={leftPx}
+              widthPx={widthPx}
+              focusable={isSelected}
+            />
+          );
         })}
         {pendingInPx !== null ? <PendingInIndicator leftPx={pendingInPx} /> : null}
         {visibleMarkers.map((m) => {
-          const offsetSec = (m.time - clip.trimStart) / clipSpeed;
+          const offsetSec = timelineTimeAtSourceTime(clip, m.time) - clip.start;
           const localPx = timeToPx(offsetSec, zoom);
-          return <KillMarkerFlag key={m.id} marker={m} leftPx={localPx} />;
+          return (
+            <KillMarkerFlag
+              key={m.id}
+              marker={m}
+              leftPx={localPx}
+              focusable={isSelected}
+            />
+          );
         })}
       </div>
-      <div
-        className={styles.handleEnd}
-        onPointerDown={(e) => startDrag(e, 'trim-end')}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        style={locked ? { display: 'none' } : undefined}
-      />
+      {!locked && asset ? (
+        <div
+          className={styles.handleEnd}
+          onPointerDown={(e) => startDrag(e, 'trim-end')}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onKeyDown={(event) => handleTrimKeyDown(event, 'end')}
+          role="slider"
+          tabIndex={isSelected ? 0 : -1}
+          aria-label={`${label}の終了位置`}
+          aria-valuemin={clip.trimStart + 0.1}
+          aria-valuemax={asset.duration}
+          aria-valuenow={clip.trimEnd}
+          aria-valuetext={formatDuration(clip.trimEnd)}
+        />
+      ) : null}
     </div>
   );
 });

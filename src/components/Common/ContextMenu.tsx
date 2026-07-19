@@ -24,11 +24,19 @@ const MENU_WIDTH = 180;
 
 export function ContextMenu({ x, y, items, children, onClose, width = MENU_WIDTH }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const previousFocusRef = useRef<HTMLElement | null>(
+    document.activeElement instanceof HTMLElement ? document.activeElement : null,
+  );
   // Actual size isn't known until the content (button list or arbitrary
   // children) has rendered, so position in two passes: lay out at the raw
   // click point first (hidden), then measure and clamp before it's shown —
   // avoids both a wrong-size estimate and a visible jump.
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -41,11 +49,27 @@ export function ContextMenu({ x, y, items, children, onClose, width = MENU_WIDTH
   }, [x, y]);
 
   useEffect(() => {
+    const previousFocus = previousFocusRef.current;
     const handlePointerDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+      if (ref.current && !ref.current.contains(e.target as Node)) onCloseRef.current();
     };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+      const menuItems = Array.from(
+        ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [],
+      );
+      if (menuItems.length === 0) return;
+      e.preventDefault();
+      const index = menuItems.indexOf(document.activeElement as HTMLElement);
+      if (e.key === 'Home') menuItems[0].focus();
+      else if (e.key === 'End') menuItems[menuItems.length - 1].focus();
+      else if (e.key === 'ArrowDown') menuItems[(index + 1 + menuItems.length) % menuItems.length].focus();
+      else menuItems[(index - 1 + menuItems.length) % menuItems.length].focus();
     };
     // Capture phase so this fires before the click that opened the menu (a
     // right-click elsewhere) can be mistaken for a click inside it.
@@ -54,8 +78,16 @@ export function ContextMenu({ x, y, items, children, onClose, width = MENU_WIDTH
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true);
       document.removeEventListener('keydown', handleKeyDown);
+      if (previousFocus?.isConnected) previousFocus.focus();
     };
-  }, [onClose]);
+  }, []);
+
+  useEffect(() => {
+    if (!pos) return;
+    ref.current
+      ?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled]), button:not([disabled]), input:not([disabled])')
+      ?.focus();
+  }, [pos]);
 
   // Portal to <body> — the timeline's scroll container uses `contain: paint`
   // (Timeline.module.css `.scroll`) for perf, which makes IT the containing

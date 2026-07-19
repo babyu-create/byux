@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useProjectStore, useTimelineDuration } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
-import { clipDuration, timeToPx } from '../../lib/timeline';
+import { clipDuration, sourceTimeAtTimelineTime, timeToPx } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
 import { matchAction } from '../../lib/keybindings';
 import type { MediaAsset } from '../../lib/types';
@@ -71,7 +71,14 @@ export function Timeline() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      const target = e.target instanceof Element ? e.target : null;
+      const isInsideClip = Boolean(target?.closest('[data-timeline-clip="true"]'));
+      if (
+        target?.closest('input, textarea, select, [contenteditable="true"]') ||
+        (!isInsideClip &&
+          target?.closest('button, [role="button"], [role="slider"], [role="menuitem"]'))
+      ) {
         return;
       }
       const action = matchAction(e);
@@ -94,7 +101,18 @@ export function Timeline() {
       switch (action) {
         case 'playback.toggle':
           e.preventDefault();
-          state.togglePlay();
+          if (
+            state.clips.some((clip) =>
+              state.tracks.some(
+                (track) =>
+                  track.id === clip.trackId && track.kind === 'video' && !track.hidden,
+              ),
+            )
+          ) {
+            state.togglePlay();
+          } else {
+            state.showMessage('info', '動画をタイムラインに追加すると再生できます');
+          }
           return;
         case 'clip.split':
           if (state.selectedClipIds.length > 0) {
@@ -139,7 +157,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           state.addKillMarker(ac.assetId, sourceTime);
           state.showMessage('success', `キルマーカー @ ${formatTimecode(sourceTime)}`);
           return;
@@ -151,7 +169,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           const removed = state.removeNearestMarker(ac.assetId, sourceTime, 1.0);
           state.showMessage(
             removed ? 'success' : 'info',
@@ -174,7 +192,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           state.setIoIn(ac.assetId, sourceTime);
           state.showMessage('success', `開始 IN @ ${formatTimecode(sourceTime)}`);
           return;
@@ -186,7 +204,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           const wasPending = !!state.pendingIn;
           const id = state.setIoOut(ac.assetId, sourceTime);
           if (wasPending && id) {
@@ -205,7 +223,7 @@ export function Timeline() {
           e.preventDefault();
           const ac = findVideoActiveClip();
           if (!ac) return;
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           const removed = state.removeNearestRange(ac.assetId, sourceTime);
           state.showMessage(
             removed ? 'success' : 'info',

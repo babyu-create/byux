@@ -10,6 +10,7 @@ import {
   type ExportQualityPreset,
 } from '../../lib/exporter';
 import { clipDuration } from '../../lib/timeline';
+import { AccessibleDialog } from '../Common/AccessibleDialog';
 import styles from './ExportDialog.module.css';
 
 interface ExportDialogProps {
@@ -36,28 +37,36 @@ interface HumanizedError {
 function humanizeError(raw: string): HumanizedError {
   if (raw.includes('FFmpeg 初期化失敗') || raw.includes('ffmpeg-core')) {
     return {
-      message: 'FFmpeg の初期化に失敗しました',
+      message: '動画処理エンジンを開始できませんでした',
       steps: [
-        'ネットワーク接続を確認',
-        'ページをリロード（Ctrl+R / Cmd+R）',
-        '別ブラウザで再試行',
-        'それでも駄目なら GitHub Issue で報告',
+        'もう一度「再試行」を選ぶ',
+        '改善しない場合はアプリを再起動',
+        '解像度を 720p に下げて再試行',
       ],
       detail: raw,
     };
   }
   if (raw.includes('SharedArrayBuffer') || raw.includes('crossOriginIsolated')) {
     return {
-      message: 'マルチスレッドモードに必要な SharedArrayBuffer が利用できません',
+      message: '動画処理の高速化を開始できませんでした',
       steps: [
-        'ページをリロード',
-        'ブラウザのセキュリティ設定を確認（Cross-Origin Isolation）',
-        '単一スレッドモードで再試行',
+        'アプリを再起動',
+        '単一スレッドモードへの自動切替後に再試行',
       ],
       detail: raw,
     };
   }
-  if (raw.includes('映像クリップがありません') || raw.includes('元素材が見つかりません')) {
+  if (raw.includes('元素材が見つかりません') || raw.includes('元素材が見つからない')) {
+    return {
+      message: '元のメディアファイルを確認できません',
+      steps: [
+        'メディアライブラリの「見つからない素材」で「選び直す」を選ぶ',
+        '元の動画・音声ファイルを再リンクしてから書き出す',
+      ],
+      detail: raw,
+    };
+  }
+  if (raw.includes('映像クリップがありません')) {
     return {
       message: '書き出せる映像クリップがありません',
       steps: [
@@ -68,10 +77,9 @@ function humanizeError(raw: string): HumanizedError {
   }
   if (raw.includes('タイムアウト') || raw.includes('timed out')) {
     return {
-      message: 'FFmpeg コアの読み込みがタイムアウトしました',
+      message: '動画処理の開始に時間がかかりすぎました',
       steps: [
-        'ネットワーク接続を確認',
-        'ページをリロード',
+        'アプリを再起動',
         '時間を置いて再試行',
       ],
       detail: raw,
@@ -83,7 +91,7 @@ function humanizeError(raw: string): HumanizedError {
       steps: [
         '解像度を 720p に下げる',
         'クリップ数を減らして書き出し',
-        'ブラウザの他タブを閉じる',
+        '他のアプリを閉じる',
       ],
       detail: raw,
     };
@@ -91,7 +99,8 @@ function humanizeError(raw: string): HumanizedError {
   return {
     message: '書き出しに失敗しました',
     steps: [
-      'ページをリロードして再試行',
+      '再試行する',
+      '改善しない場合はアプリを再起動',
       '解像度やクリップ数を変えて再試行',
     ],
     detail: raw,
@@ -123,13 +132,19 @@ async function writeBlobToNative(
   token: string,
   blob: Blob,
   onProgress: (fraction: number) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const api = window.fce?.export;
   if (!api) throw new Error('保存機能を利用できません');
+  const sizeResult = await api.setSize(token, blob.size);
+  if (!sizeResult.ok) {
+    throw new Error(sizeResult.error ?? '動画ファイルの保存容量を確認できませんでした');
+  }
   const reader = blob.stream().getReader();
   let offset = 0;
   try {
     while (true) {
+      if (signal?.aborted) throw new DOMException('書き出しが中止されました', 'AbortError');
       const { done, value } = await reader.read();
       if (done) break;
       // IPC receives an owned ArrayBuffer so a pooled/SharedArrayBuffer-backed
@@ -140,6 +155,7 @@ async function writeBlobToNative(
       offset += chunk.byteLength;
       onProgress(blob.size > 0 ? offset / blob.size : 1);
     }
+    if (signal?.aborted) throw new DOMException('書き出しが中止されました', 'AbortError');
     const result = await api.writeChunk(token, offset, new Uint8Array(0), true);
     if (!result.ok || !result.complete || !result.path) {
       throw new Error(result.error ?? '動画ファイルを完了できませんでした');
@@ -180,6 +196,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const [fallbackFilename] = useState(() => `fps-clip-${Date.now()}.mp4`);
   const startTimeRef = useRef<number>(0);
   const [elapsedSec, setElapsedSec] = useState(0);
+  const [cancelling, setCancelling] = useState(false);
 
   // Derive core variant label for the badge (updates after FFmpeg loads).
   const [coreLabel, setCoreLabel] = useState<string>(getInitialCoreLabel);
@@ -213,7 +230,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
     mainVideoTrack && !mainVideoTrack.hidden
       ? clips
           .filter((clip) => clip.trackId === mainVideoTrack.id)
-          .reduce((sum, clip) => sum + clipDuration(clip), 0)
+          .reduce((end, clip) => Math.max(end, clip.start + clipDuration(clip)), 0)
       : 0;
   const estimatedBytes = estimateExportBytes(exportDuration, resolution, fps, quality);
   const estimatedSizeMb = estimatedBytes / (1024 * 1024);
@@ -227,11 +244,21 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const downloadFilename = customFilename.trim() || defaultName;
 
   const isExportingRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const nativeTokenRef = useRef<string | null>(null);
+  const cancelRequestedRef = useRef(false);
+  const [cleanupPending, setCleanupPending] = useState(false);
+  const [cleanupRetrying, setCleanupRetrying] = useState(false);
 
   const handleStart = async () => {
     if (isExportingRef.current) return;
     isExportingRef.current = true;
+    cancelRequestedRef.current = false;
+    setCancelling(false);
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
     let nativeToken: string | null = null;
+    let nativeCommitted = false;
     try {
       const nativeExport = window.fce?.export;
       if (nativeExport) {
@@ -244,6 +271,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           throw new Error(destination.error ?? '動画の保存先を選択できませんでした');
         }
         nativeToken = destination.token;
+        nativeTokenRef.current = nativeToken;
         setSavedPath(destination.path ?? null);
       }
 
@@ -277,7 +305,9 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           // Carry the project's BGM auto-ducking into the export so the dipped
           // BGM in the preview matches the exported MP4 (Phase P5).
           audioDucking,
+          signal: abortController.signal,
           onProgress: ({ stage: s, percent, log }) => {
+            if (cancelRequestedRef.current) return;
             // Update core label whenever we receive a stage update that
             // mentions the variant (FFmpeg just finished loading).
             if (s.includes('MT') || s.includes('ST')) {
@@ -308,23 +338,60 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           },
         },
       );
+      if (abortController.signal.aborted) {
+        throw new DOMException('書き出しが中止されました', 'AbortError');
+      }
       if (nativeToken) {
         setStage('動画ファイルを保存中');
         const path = await writeBlobToNative(nativeToken, blob, (fraction) => {
           setProgress(0.95 + Math.min(1, fraction) * 0.05);
-        });
+        }, abortController.signal);
         nativeToken = null;
+        nativeTokenRef.current = null;
         setSavedPath(path);
+        nativeCommitted = true;
       } else {
         const url = URL.createObjectURL(blob);
         setDownloadUrl(url);
+      }
+      if (abortController.signal.aborted && !nativeCommitted) {
+        throw new DOMException('書き出しが中止されました', 'AbortError');
       }
       setFileSizeMb(blob.size / (1024 * 1024));
       setProgress(1);
       setPhase('done');
     } catch (e) {
+      let cleanupError: unknown = null;
       if (nativeToken) {
-        await window.fce?.export?.abandon(nativeToken);
+        try {
+          await window.fce?.export?.abandon(nativeToken);
+        } catch (error) {
+          cleanupError = error;
+        }
+      }
+      if (cleanupError) {
+        nativeTokenRef.current = nativeToken;
+        setCleanupPending(true);
+        setError({
+          message: '作成途中のファイルを削除できませんでした',
+          steps: [
+            '保存先で「.part」で終わる一時ファイルを使用中のアプリを閉じてください',
+            '「一時ファイルの削除を再試行」を選んでください',
+            cleanupError instanceof Error ? cleanupError.message : '保存先の権限と空き容量を確認してください',
+          ],
+        });
+        setPhase('error');
+        return;
+      }
+      nativeTokenRef.current = null;
+      setCleanupPending(false);
+      if (cancelRequestedRef.current || (e instanceof Error && e.name === 'AbortError')) {
+        setError({
+          message: '書き出しを中止しました',
+          steps: ['設定を変更して、必要なときにもう一度書き出せます'],
+        });
+        setPhase('error');
+        return;
       }
       const rawMsg = e instanceof Error ? e.message : '不明なエラー';
       setError(humanizeError(rawMsg));
@@ -335,11 +402,67 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
       // reset, every subsequent attempt would hit the same dead handle.
       resetFFmpeg();
     } finally {
+      abortControllerRef.current = null;
+      setCancelling(false);
       isExportingRef.current = false;
     }
   };
 
-  const handleRetry = () => {
+  const handleCancelExport = async () => {
+    if (!isExportingRef.current || cancelRequestedRef.current) return;
+    cancelRequestedRef.current = true;
+    setCancelling(true);
+    setStage('書き出しを中止しています');
+    abortControllerRef.current?.abort();
+    resetFFmpeg();
+    const token = nativeTokenRef.current;
+    nativeTokenRef.current = null;
+    if (token) {
+      try {
+        const result = await window.fce?.export?.abandon(token);
+        // Atomic rename is the commit point. If cancellation raced with it,
+        // the completed file wins and the main export flow reports success.
+        if (result && result.committed) {
+          cancelRequestedRef.current = false;
+          if (result.path) setSavedPath(result.path);
+        }
+      } catch {
+        // The main export flow retries cleanup and presents the actionable
+        // error; avoid creating an unhandled rejection from the button click.
+      }
+    }
+  };
+
+  const handleRetry = async () => {
+    const cleanupToken = nativeTokenRef.current;
+    if (cleanupToken) {
+      setError(null);
+      setCleanupRetrying(true);
+      try {
+        const result = await window.fce?.export?.abandon(cleanupToken);
+        nativeTokenRef.current = null;
+        setCleanupPending(false);
+        if (result && result.committed) {
+          if (result.path) setSavedPath(result.path);
+          setProgress(1);
+          setPhase('done');
+          return;
+        }
+        setPhase('idle');
+        return;
+      } catch (error) {
+        setError({
+          message: '一時ファイルをまだ削除できません',
+          steps: [
+            '保存先のファイルを使用中のアプリを閉じて、もう一度お試しください',
+            error instanceof Error ? error.message : '保存先の権限を確認してください',
+          ],
+        });
+        return;
+      } finally {
+        setCleanupRetrying(false);
+      }
+    }
     setError(null);
     setPhase('idle');
     // Schedule the actual start on the next tick so the UI reflects the
@@ -350,10 +473,15 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   };
 
   return (
-    <div className={styles.backdrop} role="dialog" aria-modal="true">
-      <div className={styles.modal}>
+    <AccessibleDialog
+      backdropClassName={styles.backdrop}
+      dialogClassName={styles.modal}
+      titleId="export-dialog-title"
+      onClose={onClose}
+      dismissible={phase !== 'rendering' && !cleanupPending}
+    >
         <div className={styles.header}>
-          <span className={styles.title}>書き出し</span>
+          <span id="export-dialog-title" className={styles.title}>書き出し</span>
           <div className={styles.headerRight}>
             {coreLabel ? (
               <span
@@ -367,7 +495,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                 {coreLabel}
               </span>
             ) : null}
-            {phase !== 'rendering' ? (
+            {phase !== 'rendering' && !cleanupPending ? (
               <button
                 type="button"
                 className={styles.closeBtn}
@@ -401,6 +529,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.qualityBtn} ${quality === 'recommended' ? styles.qualityActive : ''}`}
                     onClick={() => setQuality('recommended')}
+                    aria-pressed={quality === 'recommended'}
                   >
                     <strong>おすすめ</strong>
                     <small>画質と速さのバランス</small>
@@ -409,6 +538,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.qualityBtn} ${quality === 'high' ? styles.qualityActive : ''}`}
                     onClick={() => setQuality('high')}
+                    aria-pressed={quality === 'high'}
                   >
                     <strong>高画質</strong>
                     <small>時間と容量を多めに使用</small>
@@ -417,6 +547,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.qualityBtn} ${quality === 'compact' ? styles.qualityActive : ''}`}
                     onClick={() => setQuality('compact')}
+                    aria-pressed={quality === 'compact'}
                   >
                     <strong>軽量</strong>
                     <small>共有しやすい小さめ容量</small>
@@ -430,6 +561,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.optBtn} ${resolution === '720p' ? styles.optActive : ''}`}
                     onClick={() => setResolution('720p')}
+                    aria-pressed={resolution === '720p'}
                   >
                     720p
                   </button>
@@ -437,6 +569,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.optBtn} ${resolution === '1080p' ? styles.optActive : ''}`}
                     onClick={() => setResolution('1080p')}
+                    aria-pressed={resolution === '1080p'}
                   >
                     1080p
                   </button>
@@ -449,6 +582,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.optBtn} ${fps === 30 ? styles.optActive : ''}`}
                     onClick={() => setFps(30)}
+                    aria-pressed={fps === 30}
                   >
                     30
                   </button>
@@ -456,6 +590,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.optBtn} ${fps === 60 ? styles.optActive : ''}`}
                     onClick={() => setFps(60)}
+                    aria-pressed={fps === 60}
                   >
                     60
                   </button>
@@ -469,6 +604,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.optBtn} ${!motionBlur ? styles.optActive : ''}`}
                     onClick={() => setMotionBlur(false)}
+                    aria-pressed={!motionBlur}
                   >
                     OFF（高速）
                   </button>
@@ -476,6 +612,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                     type="button"
                     className={`${styles.optBtn} ${motionBlur ? styles.optActive : ''}`}
                     onClick={() => setMotionBlur(true)}
+                    aria-pressed={motionBlur}
                   >
                     ON（低速）
                   </button>
@@ -483,8 +620,9 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
               </div>
 
               <div className={styles.optionRow}>
-                <span className={styles.optionLabel}>ファイル名</span>
+                <label className={styles.optionLabel} htmlFor="export-filename">ファイル名</label>
                 <input
+                  id="export-filename"
                   type="text"
                   className={styles.filenameInput}
                   placeholder={defaultName}
@@ -530,10 +668,18 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           {phase === 'rendering' ? (
             <>
               <div className={styles.progressLabel}>
-                <span className={styles.stageText}>{stage}</span>
+                <span className={styles.stageText} aria-live="polite">{stage}</span>
                 <span className={styles.progressNum}>{Math.round(progress * 100)}%</span>
               </div>
-              <div className={styles.progressBar}>
+              <div
+                className={styles.progressBar}
+                role="progressbar"
+                aria-label="動画の書き出し"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(progress * 100)}
+                aria-valuetext={`${stage} ${Math.round(progress * 100)}%`}
+              >
                 <div
                   className={styles.progressFill}
                   style={{ width: `${progress * 100}%` }}
@@ -546,7 +692,10 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                 ) : null}
               </div>
               {logs.length > 0 ? (
-                <pre className={styles.log}>{logs.slice(-12).join('\n')}</pre>
+                <details>
+                  <summary>技術ログを表示</summary>
+                  <pre className={styles.log}>{logs.slice(-12).join('\n')}</pre>
+                </details>
               ) : null}
             </>
           ) : null}
@@ -611,16 +760,25 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             </>
           ) : phase === 'error' ? (
             <>
-              <button type="button" className={styles.btnCancel} onClick={onClose}>
+              <button
+                type="button"
+                className={styles.btnCancel}
+                onClick={onClose}
+                disabled={cleanupPending}
+              >
                 閉じる
               </button>
               <button
                 type="button"
                 className={styles.btnPrimary}
-                onClick={handleRetry}
-                disabled={totalClips === 0}
+                onClick={() => void handleRetry()}
+                disabled={cleanupRetrying || (!cleanupPending && totalClips === 0)}
               >
-                再試行
+                {cleanupRetrying
+                  ? '一時ファイルを削除中…'
+                  : cleanupPending
+                    ? '一時ファイルの削除を再試行'
+                    : '再試行'}
               </button>
             </>
           ) : phase === 'done' ? (
@@ -628,10 +786,21 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
               閉じる
             </button>
           ) : (
-            <span className={styles.renderingHint}>書き出し中はこの画面を閉じないでください</span>
+            <>
+              <span className={styles.renderingHint}>
+                {cancelling ? '安全に中止しています…' : 'この画面で進捗を確認できます'}
+              </span>
+              <button
+                type="button"
+                className={styles.btnCancel}
+                onClick={() => void handleCancelExport()}
+                disabled={cancelling}
+              >
+                {cancelling ? '中止中…' : '書き出しを中止'}
+              </button>
+            </>
           )}
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 }

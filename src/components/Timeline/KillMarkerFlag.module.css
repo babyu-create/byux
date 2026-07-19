@@ -25,6 +25,11 @@
   transform: scale(1.15);
 }
 
+.root:focus-visible .flag {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
 .selected .flag {
   background: var(--text);
   outline: 2px solid var(--accent);

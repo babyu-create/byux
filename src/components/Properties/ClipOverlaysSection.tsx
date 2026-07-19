@@ -157,6 +157,7 @@ export function ClipOverlaysSection({ clip }: ClipOverlaysSectionProps) {
                       fontSize: parseFloat(e.target.value),
                     })
                   }
+                  aria-label={`${o.text || 'テキスト'}の文字サイズ`}
                 />
                 <span className={styles.sliderValue}>{o.fontSize.toFixed(1)}</span>
               </div>

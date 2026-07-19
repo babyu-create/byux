@@ -3,6 +3,7 @@ import { Settings, Keyboard, Palette, Mic, AlertTriangle, RotateCcw } from 'luci
 import {
   ACTIONS,
   DEFAULT_BINDINGS,
+  RESERVED_BINDINGS,
   type ActionId,
   eventToKey,
   formatKey,
@@ -12,6 +13,7 @@ import {
   subscribeBindings,
 } from '../../lib/keybindings';
 import { ThemeSettings } from './ThemeSettings';
+import { AccessibleDialog } from './AccessibleDialog';
 import styles from './SettingsDialog.module.css';
 
 type SettingsTab = 'shortcuts' | 'theme';
@@ -43,6 +45,14 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
         return;
       }
       const newKey = eventToKey(e);
+      const reserved = RESERVED_BINDINGS[newKey];
+      if (reserved) {
+        setConflictWarning(
+          `「${formatKey(newKey)}」は「${reserved}」で使用する予約キーです`,
+        );
+        window.setTimeout(() => setConflictWarning(null), 2500);
+        return;
+      }
       // Check for conflicts
       const all = getBindings();
       const conflict = ACTIONS.find(
@@ -69,10 +79,18 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   }, {});
 
   return (
-    <div className={styles.backdrop} role="dialog" aria-modal="true" onClick={onClose}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <AccessibleDialog
+      backdropClassName={styles.backdrop}
+      dialogClassName={styles.modal}
+      titleId="settings-dialog-title"
+      onClose={onClose}
+    >
         <div className={styles.header}>
-          <span className={styles.title} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <span
+            id="settings-dialog-title"
+            className={styles.title}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+          >
             <Settings size={16} strokeWidth={2} aria-hidden="true" />
             設定
           </span>
@@ -90,9 +108,20 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
           <button
             type="button"
             role="tab"
+            id="settings-tab-shortcuts"
+            aria-controls="settings-panel-shortcuts"
             aria-selected={tab === 'shortcuts'}
+            tabIndex={tab === 'shortcuts' ? 0 : -1}
+            data-dialog-initial-focus
             className={`${styles.tabBtn} ${tab === 'shortcuts' ? styles.tabActive : ''}`}
             onClick={() => setTab('shortcuts')}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                event.preventDefault();
+                setTab('theme');
+                document.getElementById('settings-tab-theme')?.focus();
+              }
+            }}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             <Keyboard size={14} strokeWidth={2} aria-hidden="true" />
@@ -101,9 +130,19 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
           <button
             type="button"
             role="tab"
+            id="settings-tab-theme"
+            aria-controls="settings-panel-theme"
             aria-selected={tab === 'theme'}
+            tabIndex={tab === 'theme' ? 0 : -1}
             className={`${styles.tabBtn} ${tab === 'theme' ? styles.tabActive : ''}`}
             onClick={() => setTab('theme')}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                event.preventDefault();
+                setTab('shortcuts');
+                document.getElementById('settings-tab-shortcuts')?.focus();
+              }
+            }}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             <Palette size={14} strokeWidth={2} aria-hidden="true" />
@@ -125,13 +164,23 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
         ) : null}
 
         {tab === 'theme' ? (
-          <div className={styles.body}>
+          <div
+            id="settings-panel-theme"
+            role="tabpanel"
+            aria-labelledby="settings-tab-theme"
+            className={styles.body}
+          >
             <ThemeSettings />
           </div>
         ) : null}
 
         {tab === 'shortcuts' ? (
-        <div className={styles.body}>
+        <div
+          id="settings-panel-shortcuts"
+          role="tabpanel"
+          aria-labelledby="settings-tab-shortcuts"
+          className={styles.body}
+        >
           {Object.entries(grouped).map(([group, items]) => (
             <section key={group} className={styles.group}>
               <h3 className={styles.groupTitle}>{group}</h3>
@@ -192,7 +241,6 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
             完了
           </button>
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 }

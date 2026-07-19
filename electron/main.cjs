@@ -7,6 +7,7 @@ const {
   session,
   protocol,
   net,
+  Menu,
 } = require('electron');
 const path = require('node:path');
 const http = require('node:http');
@@ -15,6 +16,7 @@ const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
+const { shouldClearRecovery } = require('./projectState.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -37,6 +39,28 @@ let appServer = null;
 
 let mainWindow = null;
 let isDirty = false;
+let closePromptOpen = false;
+let allowQuitAfterDiscard = false;
+let pendingCloseSaveRequest = null;
+let activeProjectSaves = 0;
+let autosaveCleanupRequired = false;
+let autosaveWritesBlocked = false;
+
+// Autosave, recent-project metadata, and export destinations are intentionally
+// single-writer resources. A second process could race atomic renames or show
+// two conflicting recovery prompts, so redirect subsequent launches to the
+// existing window.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
 
 function isTrustedRendererUrl(url) {
   try {
@@ -66,6 +90,51 @@ ipcMain.on('app:dirty', (event, dirty) => {
   isDirty = Boolean(dirty);
 });
 
+ipcMain.on('app:save-before-close-result', (event, payload) => {
+  if (
+    !isTrustedIpcEvent(event) ||
+    !pendingCloseSaveRequest ||
+    payload?.id !== pendingCloseSaveRequest.id
+  ) {
+    return;
+  }
+  const request = pendingCloseSaveRequest;
+  pendingCloseSaveRequest = null;
+  clearTimeout(request.timeout);
+  request.resolve(payload.success === true && !isDirty);
+});
+
+function cancelPendingCloseSaveRequest() {
+  if (!pendingCloseSaveRequest) return;
+  const request = pendingCloseSaveRequest;
+  pendingCloseSaveRequest = null;
+  clearTimeout(request.timeout);
+  request.resolve(false);
+}
+
+function requestRendererSaveBeforeClose() {
+  if (
+    pendingCloseSaveRequest ||
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    mainWindow.webContents.isDestroyed()
+  ) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const id = crypto.randomUUID();
+    const timeout = setTimeout(() => {
+      if (pendingCloseSaveRequest?.id !== id) return;
+      pendingCloseSaveRequest.timedOut = true;
+      resolve(false);
+      void showCloseCleanupError(new Error('保存処理が時間内に完了しませんでした。'));
+    }, 2 * 60 * 1000);
+    timeout.unref?.();
+    pendingCloseSaveRequest = { id, timeout, resolve };
+    mainWindow.webContents.send('app:save-before-close', { id });
+  });
+}
+
 ipcMain.on('app:get-version-sync', (event) => {
   if (!isTrustedIpcEvent(event)) {
     event.returnValue = '';
@@ -82,6 +151,9 @@ const MAX_PROJECT_TEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RECENT_PROJECTS = 10;
 let currentProjectPath = null;
 let pendingProjectPath = null;
+let pendingProjectSessionId = null;
+let pendingRecovery = null;
+let documentSessionId = crypto.randomUUID();
 
 function projectTextIsValid(text) {
   return (
@@ -111,20 +183,43 @@ function recentProjectsPath() {
   return path.join(app.getPath('userData'), 'recent-projects.json');
 }
 
-async function atomicWriteText(targetPath, text) {
-  const directory = path.dirname(targetPath);
-  await fs.mkdir(directory, { recursive: true });
-  const temporaryPath = path.join(
-    directory,
-    `.${path.basename(targetPath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
-  );
+const atomicWriteQueues = new Map();
+
+async function withPathQueue(targetPath, operation) {
+  const key = path.resolve(targetPath);
+  const previous = atomicWriteQueues.get(key) ?? Promise.resolve();
+  const run = previous.then(operation);
+  const queued = run.catch(() => {});
+  atomicWriteQueues.set(key, queued);
   try {
-    await fs.writeFile(temporaryPath, text, { encoding: 'utf8', flag: 'wx' });
-    await fs.rename(temporaryPath, targetPath);
-  } catch (error) {
-    await fs.rm(temporaryPath, { force: true }).catch(() => {});
-    throw error;
+    return await run;
+  } finally {
+    if (atomicWriteQueues.get(key) === queued) atomicWriteQueues.delete(key);
   }
+}
+
+async function atomicWriteText(targetPath, text) {
+  return withPathQueue(targetPath, async () => {
+    const directory = path.dirname(targetPath);
+    await fs.mkdir(directory, { recursive: true });
+    const temporaryPath = path.join(
+      directory,
+      `.${path.basename(targetPath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
+    );
+    let handle = null;
+    try {
+      handle = await fs.open(temporaryPath, 'wx');
+      await handle.writeFile(text, { encoding: 'utf8' });
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await fs.rename(temporaryPath, targetPath);
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      await fs.rm(temporaryPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  });
 }
 
 async function readProjectText(filePath) {
@@ -195,11 +290,14 @@ async function rememberRecentProject(filePath) {
 }
 
 async function clearAutosave() {
-  await fs.rm(autosavePath(), { force: true }).catch(() => {});
+  const targetPath = autosavePath();
+  await withPathQueue(targetPath, () => fs.rm(targetPath, { force: true }));
+  autosaveCleanupRequired = false;
 }
 
 ipcMain.handle('project:open-dialog', async (event) => {
   if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  const requestSessionId = documentSessionId;
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Byuxプロジェクトを開く',
     properties: ['openFile'],
@@ -212,7 +310,11 @@ ipcMain.handle('project:open-dialog', async (event) => {
   const filePath = result.filePaths[0];
   try {
     const text = await readProjectText(filePath);
+    if (requestSessionId !== documentSessionId) {
+      return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
+    }
     pendingProjectPath = filePath;
+    pendingProjectSessionId = requestSessionId;
     return { ok: true, canceled: false, path: filePath, text };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -224,26 +326,49 @@ ipcMain.handle('project:save', async (event, payload) => {
   if (!payload || !projectTextIsValid(payload.text)) {
     return { ok: false, error: 'プロジェクトデータが不正です' };
   }
-
-  let targetPath = currentProjectPath;
-  if (!targetPath || payload.saveAs === true) {
-    const suggestedName = `${safeProjectStem(payload.suggestedName)}.fce.json`;
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: 'Byuxプロジェクトを保存',
-      defaultPath: currentProjectPath ?? path.join(app.getPath('documents'), suggestedName),
-      filters: [{ name: 'Byuxプロジェクト', extensions: ['json'] }],
-    });
-    if (result.canceled || !result.filePath) return { ok: true, canceled: true };
-    targetPath = ensureProjectExtension(result.filePath);
-  }
-
+  activeProjectSaves += 1;
   try {
-    await atomicWriteText(targetPath, payload.text);
-    currentProjectPath = targetPath;
-    await Promise.all([rememberRecentProject(targetPath), clearAutosave()]);
-    return { ok: true, canceled: false, path: targetPath };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    const requestSessionId = documentSessionId;
+
+    let targetPath = currentProjectPath;
+    if (!targetPath || payload.saveAs === true) {
+      const suggestedName = `${safeProjectStem(payload.suggestedName)}.fce.json`;
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: 'Byuxプロジェクトを保存',
+        defaultPath: currentProjectPath ?? path.join(app.getPath('documents'), suggestedName),
+        filters: [{ name: 'Byuxプロジェクト', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePath) return { ok: true, canceled: true };
+      targetPath = ensureProjectExtension(result.filePath);
+    }
+
+    try {
+      if (requestSessionId !== documentSessionId) {
+        return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
+      }
+      await atomicWriteText(targetPath, payload.text);
+      if (requestSessionId !== documentSessionId) {
+        return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
+      }
+      currentProjectPath = targetPath;
+      let warning;
+      try {
+        await rememberRecentProject(targetPath);
+      } catch {
+        warning = '保存しましたが、最近使ったプロジェクトの更新に失敗しました';
+      }
+      return {
+        ok: true,
+        canceled: false,
+        path: targetPath,
+        sessionId: requestSessionId,
+        warning,
+      };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  } finally {
+    activeProjectSaves = Math.max(0, activeProjectSaves - 1);
   }
 });
 
@@ -252,30 +377,51 @@ ipcMain.handle('project:confirm-open', async (event, openedPath) => {
     !isTrustedIpcEvent(event) ||
     typeof openedPath !== 'string' ||
     !pendingProjectPath ||
+    pendingProjectSessionId !== documentSessionId ||
     path.resolve(openedPath) !== path.resolve(pendingProjectPath)
   ) {
     return false;
   }
+  try {
+    await clearAutosave();
+  } catch {
+    return false;
+  }
   currentProjectPath = pendingProjectPath;
   pendingProjectPath = null;
-  await rememberRecentProject(currentProjectPath);
+  pendingProjectSessionId = null;
+  documentSessionId = crypto.randomUUID();
+  isDirty = false;
+  await rememberRecentProject(currentProjectPath).catch(() => {});
   return true;
 });
 
 ipcMain.handle('project:autosave', async (event, payload) => {
   if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  if (autosaveWritesBlocked) {
+    return { ok: false, stale: true, error: 'アプリの終了処理中です' };
+  }
   if (!payload || !projectTextIsValid(payload.text)) {
     return { ok: false, error: '自動保存データが不正です' };
   }
+  const requestSessionId = documentSessionId;
+  const generation = crypto.randomUUID();
   try {
     const wrapper = JSON.stringify({
       version: 1,
+      generation,
       savedAt: new Date().toISOString(),
       projectPath: currentProjectPath,
       text: payload.text,
     });
+    if (requestSessionId !== documentSessionId) {
+      return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
+    }
     await atomicWriteText(autosavePath(), wrapper);
-    return { ok: true };
+    if (requestSessionId !== documentSessionId) {
+      return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
+    }
+    return { ok: true, generation, sessionId: requestSessionId };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -299,8 +445,9 @@ ipcMain.handle('project:check-recovery', async (event) => {
       await clearAutosave();
       return { ok: true, recovered: false };
     }
-  } catch {
-    return { ok: true, recovered: false };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true, recovered: false };
+    return { ok: false, error: '自動保存データを安全に確認できませんでした' };
   }
 
   const choice = await dialog.showMessageBox(mainWindow, {
@@ -312,18 +459,110 @@ ipcMain.handle('project:check-recovery', async (event) => {
     message: '前回終了時の自動保存データが見つかりました。',
     detail: `${new Date(recovery.savedAt).toLocaleString('ja-JP')} の状態を復元しますか？`,
   });
-  await clearAutosave();
-  if (choice.response !== 0) return { ok: true, recovered: false };
-  currentProjectPath =
+  if (choice.response !== 0) {
+    pendingRecovery = null;
+    try {
+      await clearAutosave();
+      return { ok: true, recovered: false };
+    } catch {
+      return { ok: false, error: '自動保存データを破棄できませんでした' };
+    }
+  }
+  const recoveryId = crypto.randomUUID();
+  const recoveredProjectPath =
     typeof recovery.projectPath === 'string' && path.isAbsolute(recovery.projectPath)
       ? recovery.projectPath
       : null;
+  // Keep the recovery file until the renderer has parsed and applied it.
+  // A malformed document or renderer crash must not destroy the only copy.
+  pendingRecovery = { id: recoveryId, projectPath: recoveredProjectPath };
   return {
     ok: true,
     recovered: true,
     text: recovery.text,
-    path: currentProjectPath,
+    path: recoveredProjectPath,
+    recoveryId,
+    generation: typeof recovery.generation === 'string' ? recovery.generation : null,
   };
+});
+
+ipcMain.handle('project:new-session', async (event, payload) => {
+  if (!isTrustedIpcEvent(event)) return false;
+  // Invalidate every in-flight save/autosave before clearing recovery, while
+  // retaining the current path and dirty authority until cleanup succeeds.
+  // Otherwise a failed cleanup could leave the renderer showing the old dirty
+  // project while the main process incorrectly considered it safe to close.
+  pendingProjectPath = null;
+  pendingProjectSessionId = null;
+  pendingRecovery = null;
+  documentSessionId = crypto.randomUUID();
+  try {
+    await clearAutosave();
+    currentProjectPath = null;
+    isDirty = false;
+    return true;
+  } catch {
+    if (payload?.detachOnFailure === true) {
+      // The renderer has already applied a different document. Never retain
+      // authority to overwrite the old project's path, even though recovery
+      // cleanup failed; keep close protection active instead.
+      currentProjectPath = null;
+      isDirty = true;
+    }
+    return false;
+  }
+});
+
+ipcMain.handle('project:commit-save', async (event, payload) => {
+  if (
+    !isTrustedIpcEvent(event) ||
+    !payload ||
+    !projectTextIsValid(payload.savedText) ||
+    typeof payload.sessionId !== 'string' ||
+    payload.sessionId !== documentSessionId
+  ) {
+    return false;
+  }
+  const autosaveGeneration =
+    typeof payload.autosaveGeneration === 'string' ? payload.autosaveGeneration : null;
+  try {
+    const targetPath = autosavePath();
+    let cleared = false;
+    await withPathQueue(targetPath, async () => {
+      const recovery = JSON.parse(await fs.readFile(targetPath, 'utf8'));
+      if (shouldClearRecovery(recovery, payload.savedText, autosaveGeneration)) {
+        // Direct rm while holding this path's queue. Calling clearAutosave()
+        // here would enqueue behind this transaction and deadlock.
+        await fs.rm(targetPath, { force: true });
+        cleared = true;
+      }
+    });
+    if (!cleared) autosaveCleanupRequired = true;
+    return cleared;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return true;
+    autosaveCleanupRequired = true;
+    return false;
+  }
+});
+
+ipcMain.handle('project:confirm-recovery', async (event, recoveryId) => {
+  if (
+    !isTrustedIpcEvent(event) ||
+    typeof recoveryId !== 'string' ||
+    !pendingRecovery ||
+    pendingRecovery.id !== recoveryId
+  ) {
+    return false;
+  }
+  currentProjectPath = pendingRecovery.projectPath;
+  pendingRecovery = null;
+  documentSessionId = crypto.randomUUID();
+  isDirty = true;
+  // Keep the recovered generation until an explicit successful save. If the
+  // renderer crashes immediately after restoration, this remains the only
+  // durable copy and must be offered again on the next launch.
+  return true;
 });
 
 ipcMain.handle('project:list-recent', async (event) => {
@@ -335,6 +574,7 @@ ipcMain.handle('project:open-recent', async (event, requestedPath) => {
   if (!isTrustedIpcEvent(event) || typeof requestedPath !== 'string') {
     return { ok: false, error: 'untrusted sender' };
   }
+  const requestSessionId = documentSessionId;
   const entries = await loadRecentProjects();
   const entry = entries.find(
     (candidate) => path.resolve(candidate.path) === path.resolve(requestedPath),
@@ -344,7 +584,11 @@ ipcMain.handle('project:open-recent', async (event, requestedPath) => {
   }
   try {
     const text = await readProjectText(entry.path);
+    if (requestSessionId !== documentSessionId) {
+      return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
+    }
     pendingProjectPath = entry.path;
+    pendingProjectSessionId = requestSessionId;
     return { ok: true, canceled: false, path: entry.path, text };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -366,6 +610,7 @@ ipcMain.handle('project:remove-recent', async (event, requestedPath) => {
 // to an opaque main-process token instead of cloning one giant ArrayBuffer over
 // IPC. The only writable path is the one the user selected in showSaveDialog.
 const MAX_EXPORT_CHUNK_BYTES = 8 * 1024 * 1024;
+const MAX_EXPORT_FILE_BYTES = 64 * 1024 * 1024 * 1024;
 const pendingExports = new Map();
 let lastExportPath = null;
 
@@ -378,15 +623,166 @@ function safeExportFilename(value) {
   return name.toLowerCase().endsWith('.mp4') ? name : `${name}.mp4`;
 }
 
+async function cleanupExportFiles(entry, removePartial = true) {
+  let cleanupError = null;
+  try {
+    await entry.handle?.close();
+  } catch (error) {
+    cleanupError = error;
+  }
+  entry.handle = null;
+  if (removePartial && !entry.committed) {
+    try {
+      await fs.rm(entry.temporaryPath, { force: true });
+    } catch (error) {
+      cleanupError ??= error;
+    }
+  }
+  if (cleanupError) throw cleanupError;
+}
+
 async function abandonExport(token, removePartial = true) {
   const entry = pendingExports.get(token);
   if (!entry) return false;
-  pendingExports.delete(token);
-  await entry.handle?.close().catch(() => {});
-  if (removePartial && entry.started) {
-    await fs.rm(entry.temporaryPath, { force: true }).catch(() => {});
+  if (entry.cleanupPromise) return entry.cleanupPromise;
+  entry.cancelled = true;
+  const cleanupPromise = (async () => {
+    // Keep the entry in pendingExports until its queued disk operation and
+    // cleanup have really completed. A second close request must not be able
+    // to terminate the process while a large partial file is still open.
+    await entry.operation.catch(() => {});
+    await cleanupExportFiles(entry, removePartial);
+    if (pendingExports.get(token) === entry) pendingExports.delete(token);
+    return {
+      ok: true,
+      abandoned: !entry.committed,
+      committed: entry.committed,
+      path: entry.committed ? entry.path : undefined,
+    };
+  })();
+  entry.cleanupPromise = cleanupPromise;
+  try {
+    return await cleanupPromise;
+  } catch (error) {
+    // Keep the cancelled entry visible to close protection and allow an
+    // explicit retry if antivirus or another process temporarily held it.
+    entry.cleanupPromise = null;
+    throw error;
   }
-  return true;
+}
+
+function queueExportOperation(entry, operation) {
+  const run = entry.operation.then(operation);
+  entry.operation = run.catch(() => {});
+  return run;
+}
+
+function assertActiveExport(token, entry) {
+  if (entry.cancelled || pendingExports.get(token) !== entry) {
+    throw new Error('書き出しが中止されました');
+  }
+}
+
+async function failExportEntry(token, entry) {
+  entry.cancelled = true;
+  await cleanupExportFiles(entry);
+  if (pendingExports.get(token) === entry) pendingExports.delete(token);
+}
+
+function resetDocumentSession() {
+  currentProjectPath = null;
+  pendingProjectPath = null;
+  pendingProjectSessionId = null;
+  pendingRecovery = null;
+  documentSessionId = crypto.randomUUID();
+  isDirty = false;
+}
+
+function abandonAllExports() {
+  return Promise.all(
+    [...pendingExports.keys()].map((token) => abandonExport(token)),
+  );
+}
+
+async function confirmDiscardBeforeClose() {
+  if (activeProjectSaves > 0) return false;
+  if (pendingCloseSaveRequest) {
+    if (!pendingCloseSaveRequest.timedOut) return false;
+    // The main-process file write has settled, so a second explicit close may
+    // safely re-enter the normal save/discard prompt. Any late renderer reply
+    // is ignored, but can no longer overwrite a project file.
+    cancelPendingCloseSaveRequest();
+  }
+  const hasExport = pendingExports.size > 0;
+  const hasChanges = isDirty;
+  if (!hasExport && !hasChanges && !autosaveCleanupRequired) return true;
+  if (!hasExport && !hasChanges && autosaveCleanupRequired) {
+    autosaveWritesBlocked = true;
+    try {
+      await clearAutosave();
+      return true;
+    } catch (error) {
+      autosaveWritesBlocked = false;
+      throw error;
+    }
+  }
+  const buttons = hasChanges
+    ? [
+        hasExport ? '保存して書き出しを中止・終了' : '保存して終了',
+        hasExport ? '書き出しと変更を破棄して終了' : '保存せずに終了',
+        'キャンセル',
+      ]
+    : ['書き出しを中止して終了', 'キャンセル'];
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons,
+    defaultId: hasChanges ? 2 : 1,
+    cancelId: hasChanges ? 2 : 1,
+    title:
+      hasExport && hasChanges
+        ? '書き出し中で、未保存の変更があります'
+        : hasExport
+          ? '動画を書き出しています'
+          : '未保存の変更があります',
+    message: hasChanges
+      ? '変更を保存してから終了できます。'
+      : '書き出しを中止してアプリを終了しますか？',
+    detail: hasExport
+      ? '作成途中のファイルは削除されます。'
+      : '先に「保存」(Ctrl+S) を実行すると変更を残せます。',
+  });
+  if (choice.response === (hasChanges ? 2 : 1)) return false;
+  if (hasChanges && choice.response === 0) {
+    const saved = await requestRendererSaveBeforeClose();
+    if (!saved || isDirty) return false;
+  }
+  if (hasChanges) autosaveCleanupRequired = true;
+  autosaveWritesBlocked = true;
+  try {
+    await Promise.all([
+      hasExport ? abandonAllExports() : Promise.resolve(),
+      hasChanges ? clearAutosave() : Promise.resolve(),
+    ]);
+    isDirty = false;
+    return true;
+  } catch (error) {
+    autosaveWritesBlocked = false;
+    throw error;
+  }
+}
+
+async function showCloseCleanupError(error) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  await dialog.showMessageBox(mainWindow, {
+    type: 'error',
+    buttons: ['OK'],
+    title: '終了の準備に失敗しました',
+    message: '安全のため、アプリを終了しませんでした。',
+    detail:
+      error instanceof Error
+        ? `${error.message}\nもう一度終了するか、プロジェクトを別名で保存してください。`
+        : 'もう一度終了するか、プロジェクトを別名で保存してください。',
+  });
 }
 
 ipcMain.handle('export:choose-output', async (event, payload) => {
@@ -426,6 +822,16 @@ ipcMain.handle('export:choose-output', async (event, payload) => {
       handle: null,
       written: 0,
       started: false,
+      headerBytes: Buffer.alloc(0),
+      expectedBytes: null,
+      cancelled: false,
+      committed: false,
+      operation: Promise.resolve(),
+      cleanupPromise: null,
+      maxBytes: Math.min(
+        MAX_EXPORT_FILE_BYTES,
+        Math.max(512 * 1024 * 1024, estimatedBytes > 0 ? estimatedBytes * 4 : 0),
+      ),
     });
     return {
       ok: true,
@@ -439,48 +845,112 @@ ipcMain.handle('export:choose-output', async (event, payload) => {
   }
 });
 
+ipcMain.handle('export:set-size', async (event, token, totalBytes) => {
+  if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  const entry = typeof token === 'string' ? pendingExports.get(token) : null;
+  if (!entry) return { ok: false, error: '書き出しファイルのサイズが不正です' };
+  return queueExportOperation(entry, async () => {
+    try {
+      assertActiveExport(token, entry);
+      if (
+        entry.started ||
+        entry.expectedBytes !== null ||
+        !Number.isSafeInteger(totalBytes) ||
+        totalBytes < 12 ||
+        totalBytes > MAX_EXPORT_FILE_BYTES
+      ) {
+        throw new Error('書き出しファイルのサイズが不正です');
+      }
+      const stats = await fs.statfs(path.dirname(entry.path));
+      assertActiveExport(token, entry);
+      const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+      const safetyMargin = 256 * 1024 * 1024;
+      if (freeBytes < totalBytes + safetyMargin) {
+        throw new Error('保存先の空き容量が不足しています。別のドライブを選択してください。');
+      }
+      entry.expectedBytes = totalBytes;
+      entry.maxBytes = totalBytes;
+      return { ok: true, freeBytes };
+    } catch (error) {
+      await failExportEntry(token, entry);
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+});
+
 ipcMain.handle('export:write-chunk', async (event, token, offset, chunk, final) => {
   if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
   const entry = typeof token === 'string' ? pendingExports.get(token) : null;
+  if (!entry) return { ok: false, error: '書き出しチャンクが不正です' };
   const byteLength = chunk?.byteLength;
-  if (
-    !entry ||
-    !Number.isSafeInteger(offset) ||
-    offset !== entry.written ||
-    !Number.isSafeInteger(byteLength) ||
-    byteLength < 0 ||
-    byteLength > MAX_EXPORT_CHUNK_BYTES ||
-    (byteLength === 0 && final !== true)
-  ) {
-    return { ok: false, error: '書き出しチャンクが不正です' };
-  }
-  try {
-    if (!entry.handle) {
-      entry.handle = await fs.open(entry.temporaryPath, 'wx');
-      entry.started = true;
+  return queueExportOperation(entry, async () => {
+    try {
+      assertActiveExport(token, entry);
+      if (
+        entry.expectedBytes === null ||
+        !Number.isSafeInteger(offset) ||
+        offset !== entry.written ||
+        !Number.isSafeInteger(byteLength) ||
+        byteLength < 0 ||
+        byteLength > MAX_EXPORT_CHUNK_BYTES ||
+        offset + byteLength > entry.maxBytes ||
+        (byteLength === 0 && final !== true)
+      ) {
+        throw new Error('書き出しチャンクが不正です');
+      }
+      if (!entry.handle) {
+        const openedHandle = await fs.open(entry.temporaryPath, 'wx');
+        if (entry.cancelled || pendingExports.get(token) !== entry) {
+          await openedHandle.close().catch(() => {});
+          await fs.rm(entry.temporaryPath, { force: true }).catch(() => {});
+          throw new Error('書き出しが中止されました');
+        }
+        entry.handle = openedHandle;
+        entry.started = true;
+      }
+      if (byteLength > 0) {
+        const buffer = Buffer.from(chunk.buffer, chunk.byteOffset, byteLength);
+        if (entry.headerBytes.length < 12) {
+          entry.headerBytes = Buffer.concat([
+            entry.headerBytes,
+            buffer.subarray(0, 12 - entry.headerBytes.length),
+          ]);
+        }
+        const { bytesWritten } = await entry.handle.write(buffer, 0, byteLength, offset);
+        assertActiveExport(token, entry);
+        if (bytesWritten !== byteLength) {
+          throw new Error('ファイルへの書き込みが途中で停止しました');
+        }
+        entry.written += bytesWritten;
+      }
+      if (final === true) {
+        if (
+          entry.written !== entry.expectedBytes ||
+          entry.written < 12 ||
+          entry.headerBytes.length < 12 ||
+          entry.headerBytes.toString('ascii', 4, 8) !== 'ftyp'
+        ) {
+          throw new Error('書き出されたファイルが有効なMP4ではありません');
+        }
+        await entry.handle.sync();
+        assertActiveExport(token, entry);
+        await entry.handle.close();
+        entry.handle = null;
+        assertActiveExport(token, entry);
+        // Keep an existing export intact until every byte of the new one has
+        // landed and been fsynced. rename replaces it only at successful commit.
+        await fs.rename(entry.temporaryPath, entry.path);
+        entry.committed = true;
+        pendingExports.delete(token);
+        lastExportPath = entry.path;
+        return { ok: true, complete: true, path: entry.path, bytesWritten: entry.written };
+      }
+      return { ok: true, complete: false, bytesWritten: entry.written };
+    } catch (error) {
+      await failExportEntry(token, entry);
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    if (byteLength > 0) {
-      const buffer = Buffer.from(chunk.buffer, chunk.byteOffset, byteLength);
-      const { bytesWritten } = await entry.handle.write(buffer, 0, byteLength, offset);
-      if (bytesWritten !== byteLength) throw new Error('ファイルへの書き込みが途中で停止しました');
-      entry.written += bytesWritten;
-    }
-    if (final === true) {
-      await entry.handle.sync();
-      await entry.handle.close();
-      entry.handle = null;
-      // Keep an existing export intact until every byte of the new one has
-      // landed and been fsynced. rename replaces it only at successful commit.
-      await fs.rename(entry.temporaryPath, entry.path);
-      pendingExports.delete(token);
-      lastExportPath = entry.path;
-      return { ok: true, complete: true, path: entry.path, bytesWritten: entry.written };
-    }
-    return { ok: true, complete: false, bytesWritten: entry.written };
-  } catch (error) {
-    await abandonExport(token);
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
+  });
 });
 
 ipcMain.handle('export:abandon', async (event, token) => {
@@ -839,7 +1309,11 @@ async function startAppServer() {
 // powers our export pipeline. Without these headers Chromium refuses
 // to instantiate SAB and the export falls back to single-thread (~3x
 // slower). In production we also attach the CSP above.
+let crossOriginIsolationEnabled = false;
+
 function enableCrossOriginIsolation() {
+  if (crossOriginIsolationEnabled) return;
+  crossOriginIsolationEnabled = true;
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = {
       ...details.responseHeaders,
@@ -853,13 +1327,17 @@ function enableCrossOriginIsolation() {
   });
 }
 
-function createWindow() {
+async function createWindow() {
   enableCrossOriginIsolation();
+  autosaveWritesBlocked = false;
+  // A BrowserWindow is a fresh renderer document. Never let it inherit the
+  // previous renderer's save-path authority (macOS close→activate included).
+  resetDocumentSession();
   mainWindow = new BrowserWindow({
     width: 1600,
     height: 1000,
-    minWidth: 1200,
-    minHeight: 720,
+    minWidth: 980,
+    minHeight: 640,
     title: 'Byux',
     // Explicit so the title bar / taskbar icon is correct in both `electron .`
     // dev runs and packaged builds, instead of relying on the exe resource.
@@ -896,8 +1374,8 @@ function createWindow() {
   // Never open a second renderer window. http(s) links go to the OS browser;
   // everything else (javascript:, file:, custom schemes) is denied outright.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://') || url.startsWith('http://')) {
-      shell.openExternal(url);
+    if (url.startsWith('https://')) {
+      void shell.openExternal(url).catch(() => {});
     }
     return { action: 'deny' };
   });
@@ -909,37 +1387,73 @@ function createWindow() {
     if (!isTrustedRendererUrl(navigationUrl)) event.preventDefault();
   });
 
+  // Reload/crash creates a new renderer document with empty in-memory state.
+  // Revoke the old document's implicit save target before it can Ctrl+S over
+  // the project that was open before the reload.
+  mainWindow.webContents.on(
+    'did-start-navigation',
+    (_event, _url, isInPlace, isMainFrame) => {
+      if (!isMainFrame || isInPlace) return;
+      cancelPendingCloseSaveRequest();
+      resetDocumentSession();
+      void abandonAllExports().catch((error) => {
+        console.error('[main] export cleanup after navigation failed', error);
+      });
+    },
+  );
+  mainWindow.webContents.on('render-process-gone', () => {
+    cancelPendingCloseSaveRequest();
+    resetDocumentSession();
+    void abandonAllExports().catch((error) => {
+      console.error('[main] export cleanup after renderer crash failed', error);
+    });
+  });
+  if (!isDev) {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      const key = String(input.key || '').toLowerCase();
+      if (key === 'f5' || ((input.control || input.meta) && key === 'r')) {
+        event.preventDefault();
+      }
+    });
+  }
+
   if (isDev) {
-    mainWindow.loadURL(VITE_DEV_URL);
+    await mainWindow.loadURL(VITE_DEV_URL);
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
-    mainWindow.loadURL(prodEntryUrl);
+    await mainWindow.loadURL(prodEntryUrl);
   }
 
   // Warn before discarding unsaved edits. `isDirty` is pushed from the
   // renderer (see preload.cjs `setDirty` / App.tsx) whenever the zundo
   // undo-history depth diverges from the last save/load point.
   mainWindow.on('close', (event) => {
-    if (!isDirty) return;
-    event.preventDefault();
-    const choice = dialog.showMessageBoxSync(mainWindow, {
-      type: 'warning',
-      buttons: ['保存せずに終了', 'キャンセル'],
-      defaultId: 1,
-      cancelId: 1,
-      title: '未保存の変更があります',
-      message: '保存していない変更があります。保存せずに終了しますか?',
-      detail: '「保存」(Ctrl+S) でプロジェクトファイルを保存できます。',
-    });
-    if (choice === 0) {
-      isDirty = false;
-      void clearAutosave().finally(() => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
-      });
+    if (
+      pendingExports.size === 0 &&
+      !isDirty &&
+      activeProjectSaves === 0 &&
+      !pendingCloseSaveRequest &&
+      !autosaveCleanupRequired
+    ) {
+      return;
     }
+    event.preventDefault();
+    if (closePromptOpen) return;
+    closePromptOpen = true;
+    void confirmDiscardBeforeClose()
+      .then((confirmed) => {
+        closePromptOpen = false;
+        if (!confirmed) return;
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+      })
+      .catch((error) => {
+        closePromptOpen = false;
+        void showCloseCleanupError(error);
+      });
   });
 
   mainWindow.on('closed', () => {
+    cancelPendingCloseSaveRequest();
     mainWindow = null;
   });
 }
@@ -950,9 +1464,30 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
-  for (const token of pendingExports.keys()) {
-    void abandonExport(token);
+app.on('before-quit', (event) => {
+  if (
+    (pendingExports.size > 0 ||
+      isDirty ||
+      activeProjectSaves > 0 ||
+      pendingCloseSaveRequest ||
+      autosaveCleanupRequired) &&
+    !allowQuitAfterDiscard
+  ) {
+    event.preventDefault();
+    if (closePromptOpen) return;
+    closePromptOpen = true;
+    void confirmDiscardBeforeClose()
+      .then((confirmed) => {
+        closePromptOpen = false;
+        if (!confirmed) return;
+        allowQuitAfterDiscard = true;
+        app.quit();
+      })
+      .catch((error) => {
+        closePromptOpen = false;
+        void showCloseCleanupError(error);
+      });
+    return;
   }
   appServer?.close();
   appServer = null;
@@ -960,6 +1495,7 @@ app.on('before-quit', () => {
 
 app.whenReady().then(async () => {
   if (!isDev) await startAppServer();
+  if (!isDev) Menu.setApplicationMenu(null);
   // This editor does not need camera, microphone, geolocation, notifications,
   // USB, etc. Electron otherwise approves some permission requests by default.
   session.defaultSession.setPermissionCheckHandler(() => false);
@@ -994,16 +1530,31 @@ app.whenReady().then(async () => {
       return new Response('Unable to read media', { status: 500 });
     }
   });
-  createWindow();
+  await createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      void createWindow().catch((error) => {
+        console.error('[main] failed to recreate window', error);
+        dialog.showErrorBox('Byuxを起動できません', 'アプリ画面の再作成に失敗しました。');
+      });
     }
   });
+}).catch((error) => {
+  console.error('[main] startup failed', error);
+  dialog.showErrorBox(
+    'Byuxを起動できません',
+    '必要なファイルを読み込めませんでした。再インストールしてもう一度お試しください。',
+  );
+  app.quit();
 });
 
-// Avoid noisy dialog on update errors during dev or no-network cases.
+let fatalExceptionHandled = false;
 process.on('uncaughtException', (err) => {
+  if (fatalExceptionHandled) {
+    app.exit(1);
+    return;
+  }
+  fatalExceptionHandled = true;
   console.error('[main] uncaught', err);
   if (!isDev) {
     // Generic user-facing text — don't surface internal paths / stack details
@@ -1013,4 +1564,7 @@ process.on('uncaughtException', (err) => {
       'アプリケーションで予期しないエラーが発生しました。お手数ですが再起動してください。',
     );
   }
+  // Continuing after an uncaught exception risks writing with corrupted
+  // in-memory authority/state. Recovery data already on disk is kept intact.
+  app.exit(1);
 });

@@ -193,8 +193,15 @@ export async function readMediaAssetBytes(asset: MediaAsset): Promise<Uint8Array
 /** Materialize a re-linked asset as a File for browser APIs such as Web Audio. */
 export async function mediaAssetToFile(asset: MediaAsset): Promise<File> {
   if (asset.file) return asset.file;
-  const bytes = await readMediaAssetBytes(asset);
-  return new File([bytes], asset.name, { type: asset.mimeType });
+  const response = await fetch(asset.url);
+  if (!response.ok) throw new Error(`素材を読み込めません: ${asset.name}`);
+  const blob = await response.blob();
+  if (blob.size !== asset.size) {
+    throw new Error(`素材の読み込みが途中で失敗しました: ${asset.name}`);
+  }
+  // Keep the browser-managed Blob backing rather than allocating a second
+  // multi-GB Uint8Array in the renderer.
+  return new File([blob], asset.name, { type: asset.mimeType });
 }
 
 export function formatDuration(seconds: number): string {

@@ -55,21 +55,51 @@ export function Splitter({
         const next = Math.max(min, Math.min(max, base + signed));
         onResize(next);
       };
-      const onUp = () => {
+      let cleanedUp = false;
+      const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', cleanup);
+        window.removeEventListener('pointercancel', cleanup);
+        window.removeEventListener('blur', cleanup);
+        target.removeEventListener('lostpointercapture', cleanup);
         try {
-          target.releasePointerCapture(e.pointerId);
+          if (target.hasPointerCapture(e.pointerId)) {
+            target.releasePointerCapture(e.pointerId);
+          }
         } catch {
           // Pointer capture already released (e.g. element was briefly removed).
         }
         target.classList.remove(styles.dragging);
         document.body.style.cursor = '';
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
       };
       window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointerup', cleanup);
+      window.addEventListener('pointercancel', cleanup);
+      window.addEventListener('blur', cleanup);
+      target.addEventListener('lostpointercapture', cleanup);
     },
     [orientation, value, min, max, reverse, onResize],
+  );
+
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const decreaseKey = orientation === 'vertical' ? 'ArrowLeft' : 'ArrowUp';
+      const increaseKey = orientation === 'vertical' ? 'ArrowRight' : 'ArrowDown';
+      let next: number | null = null;
+      if (event.key === 'Home') next = min;
+      else if (event.key === 'End') next = max;
+      else if (event.key === decreaseKey) next = value - (event.shiftKey ? 32 : 8);
+      else if (event.key === increaseKey) next = value + (event.shiftKey ? 32 : 8);
+      if (next === null) return;
+      event.preventDefault();
+      const signed = reverse && !['Home', 'End'].includes(event.key)
+        ? value - (next - value)
+        : next;
+      onResize(Math.max(min, Math.min(max, signed)));
+    },
+    [max, min, onResize, orientation, reverse, value],
   );
 
   return (
@@ -80,10 +110,12 @@ export function Splitter({
       aria-valuenow={Math.round(value)}
       aria-valuemin={Math.round(min)}
       aria-valuemax={Math.round(max)}
+      tabIndex={0}
       className={`${styles.splitter} ${
         orientation === 'vertical' ? styles.vertical : styles.horizontal
       }`}
       onPointerDown={handlePointerDown}
+      onKeyDown={handleKeyDown}
     />
   );
 }

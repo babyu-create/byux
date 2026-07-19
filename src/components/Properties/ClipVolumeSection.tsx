@@ -50,6 +50,8 @@ export function ClipVolumeSection({ clip }: ClipVolumeSectionProps) {
           onChange={(e) => setVolume(clip.id, parseFloat(e.target.value))}
           className={styles.slider}
           disabled={muted}
+          aria-label="クリップ音量"
+          aria-valuetext={`${percent}%`}
         />
         <span className={styles.value}>{percent}%</span>
       </div>
@@ -63,6 +65,7 @@ export function ClipVolumeSection({ clip }: ClipVolumeSectionProps) {
               !muted && Math.abs(volume - v) < 0.01 ? styles.active : ''
             }`}
             onClick={() => setVolume(clip.id, v)}
+            aria-pressed={!muted && Math.abs(volume - v) < 0.01}
           >
             {v === 0 ? '0' : `${Math.round(v * 100)}`}
           </button>

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   parseProjectFile,
+  serialiseProject,
   buildAssetIdMap,
   remapClipAssetIds,
   type ProjectFile,
@@ -199,6 +200,37 @@ describe('parseProjectFile', () => {
   it('rejects a structurally invalid audioDucking (non-numeric amount)', () => {
     const broken = JSON.parse(JSON.stringify(validProject()));
     broken.audioDucking = { enabled: true, amountDb: 'loud', attack: 0.1, release: 0.4 };
+    expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
+  });
+
+  it('persists HUD protection and vertical framing while accepting legacy defaults', () => {
+    const project = validProject();
+    const saved = serialiseProject({
+      name: project.name,
+      aspectRatio: project.aspectRatio,
+      fps: project.fps,
+      resolution: project.resolution,
+      tracks: project.tracks,
+      clips: project.clips,
+      markers: project.markers,
+      ioRanges: project.ioRanges,
+      preRollSec: project.preRollSec,
+      postRollSec: project.postRollSec,
+      assets: project.assets,
+      hudPreset: 'cs2',
+      verticalReframe: -0.4,
+    });
+    const parsed = parseProjectFile(JSON.stringify(saved));
+    expect(parsed.hudPreset).toBe('cs2');
+    expect(parsed.verticalReframe).toBe(-0.4);
+
+    const legacy = parseProjectFile(JSON.stringify(validProject()));
+    expect(legacy.hudPreset).toBeUndefined();
+    expect(legacy.verticalReframe).toBeUndefined();
+  });
+
+  it('rejects vertical framing outside the supported range', () => {
+    const broken = { ...validProject(), verticalReframe: 1.2 };
     expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
   });
 });

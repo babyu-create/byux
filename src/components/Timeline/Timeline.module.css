@@ -9,7 +9,7 @@
 .body {
   flex: 1;
   display: grid;
-  grid-template-columns: 120px 1fr;
+  grid-template-columns: 176px 1fr;
   min-height: 0;
   overflow: hidden;
 }
