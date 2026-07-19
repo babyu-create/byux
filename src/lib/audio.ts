@@ -93,10 +93,14 @@ export async function detectBeats(
   const lookback = Math.max(4, Math.floor(1 / windowSec));
   const beats: number[] = [];
   let lastBeat = -Infinity;
+  // Running-sum sliding window: maintain the sum of the `lookback` windows
+  // preceding `w` in O(1) per step instead of re-summing them (was
+  // O(windowCount * lookback) — ~1.4M adds on a 3-min track). Mathematically
+  // identical to the previous inner-loop average.
+  let windowSum = 0;
+  for (let k = 0; k < lookback && k < windowCount; k++) windowSum += energies[k];
   for (let w = lookback; w < windowCount; w++) {
-    let avg = 0;
-    for (let k = w - lookback; k < w; k++) avg += energies[k];
-    avg /= lookback;
+    const avg = windowSum / lookback;
     if (avg > 0 && energies[w] > avg * threshold) {
       const t = w * windowSec;
       if (t - lastBeat >= minSep) {
@@ -104,6 +108,8 @@ export async function detectBeats(
         lastBeat = t;
       }
     }
+    // Slide the window forward: drop energies[w-lookback], add energies[w].
+    windowSum += energies[w] - energies[w - lookback];
   }
   return beats;
 }

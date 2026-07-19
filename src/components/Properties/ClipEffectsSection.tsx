@@ -12,6 +12,7 @@ export function ClipEffectsSection({ clip }: ClipEffectsSectionProps) {
 
   const fadeIn = clip.effects.find((e) => e.type === 'fade-in');
   const fadeOut = clip.effects.find((e) => e.type === 'fade-out');
+  const motionBlur = clip.effects.find((e) => e.type === 'motion-blur');
 
   return (
     <div className={styles.root}>
@@ -54,6 +55,56 @@ export function ClipEffectsSection({ clip }: ClipEffectsSectionProps) {
                 {(fadeIn.duration ?? 0.4).toFixed(1)}s
               </span>
             </label>
+          </div>
+        ) : null}
+      </div>
+
+      {/* Motion Blur */}
+      <div className={`${styles.effect} ${motionBlur ? styles.active : ''}`}>
+        <div className={styles.effectHeader}>
+          <button
+            type="button"
+            className={`${styles.toggle} ${motionBlur ? styles.toggleOn : ''}`}
+            onClick={() => toggleEffect(clip.id, 'motion-blur')}
+            aria-pressed={!!motionBlur}
+          >
+            <span className={styles.toggleIcon}>≋</span>
+            <span>モーションブラー</span>
+            <span className={styles.toggleHint}>
+              フリック検出型（動いてる時だけ残像、エイム合わせ中は鮮明）
+            </span>
+          </button>
+        </div>
+        {motionBlur ? (
+          <div className={styles.controls}>
+            <div className={styles.intensityRow}>
+              <span className={styles.rowLabel}>強さ</span>
+              <span className={styles.intensityDescriptor} aria-hidden="true">
+                弱
+              </span>
+              <input
+                type="range"
+                min={5}
+                max={100}
+                step={5}
+                value={motionBlur.intensity ?? 40}
+                onChange={(e) =>
+                  updateEffect(clip.id, 'motion-blur', {
+                    intensity: parseInt(e.target.value, 10),
+                  })
+                }
+                aria-label="モーションブラー強度 (5から100)"
+                aria-valuemin={5}
+                aria-valuemax={100}
+                aria-valuenow={motionBlur.intensity ?? 40}
+              />
+              <span className={styles.intensityDescriptor} aria-hidden="true">
+                強
+              </span>
+              <span className={styles.rowValue}>
+                {(motionBlur.intensity ?? 40).toFixed(0)}
+              </span>
+            </div>
           </div>
         ) : null}
       </div>

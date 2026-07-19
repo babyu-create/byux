@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Target } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { formatTimecode } from '../../lib/media';
@@ -73,7 +74,10 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
     });
     let sourceTime = 0;
     if (activeClip) {
-      sourceTime = activeClip.trimStart + (playhead - activeClip.start);
+      // Convert timeline time → source time: multiply the timeline offset by the
+      // clip's playback speed (a 2× clip covers 2 source-seconds per timeline-
+      // second). Mirrors extractCurrentRange / jumpToAdjacentMarker in the store.
+      sourceTime = activeClip.trimStart + (playhead - activeClip.start) * (activeClip.speed ?? 1);
     }
     addMarker(asset.id, sourceTime);
   };
@@ -121,7 +125,7 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
       <div className={styles.list}>
         {sortedMarkers.length === 0 ? (
           <div className={styles.empty}>
-            動画再生中に <kbd>K</kbd> キーで追加
+            動画再生中に <kbd>W</kbd> キーで追加
           </div>
         ) : (
           sortedMarkers.map((m, idx) => (
@@ -184,7 +188,8 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
           onClick={beginAutoClip}
           disabled={sortedMarkers.length === 0}
         >
-          🎯 マーカーから自動切り出し
+          <Target size={15} strokeWidth={2} aria-hidden="true" />
+          <span>マーカーから自動切り出し</span>
         </button>
 
         {resultMessage ? <div className={styles.toast}>{resultMessage}</div> : null}

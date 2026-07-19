@@ -1,5 +1,17 @@
 import { useProjectStore } from '../../stores/projectStore';
-import type { Clip, OverlayPosition, OverlayText } from '../../lib/types';
+import type {
+  Clip,
+  OverlayDecoration,
+  OverlayIntroKind,
+  OverlayPosition,
+  OverlayText,
+} from '../../lib/types';
+import {
+  DEFAULT_FONT_ID,
+  ensureFontLoaded,
+  getFontGroups,
+  getFontStack,
+} from '../../lib/fonts';
 import styles from './ClipOverlaysSection.module.css';
 
 interface ClipOverlaysSectionProps {
@@ -16,6 +28,21 @@ const POSITIONS: { value: OverlayPosition; label: string }[] = [
   { value: 'bottom-right', label: '右下' },
 ];
 
+const DECORATIONS: { value: OverlayDecoration; label: string }[] = [
+  { value: 'none', label: 'なし' },
+  { value: 'glow', label: 'グロー' },
+  { value: 'shadow', label: 'シャドウ' },
+  { value: 'gradient', label: 'グラデ' },
+];
+
+const INTROS: { value: OverlayIntroKind; label: string }[] = [
+  { value: 'none', label: 'なし' },
+  { value: 'fade', label: 'フェード' },
+  { value: 'slide-up', label: '下から' },
+  { value: 'slide-left', label: '右から' },
+  { value: 'scale-in', label: 'ズーム' },
+];
+
 function buildDefaultOverlay(): Omit<OverlayText, 'id'> {
   return {
     text: 'テキスト',
@@ -25,8 +52,11 @@ function buildDefaultOverlay(): Omit<OverlayText, 'id'> {
     weight: 700,
     outline: true,
     outlineColor: '#000000',
+    fontFamily: DEFAULT_FONT_ID,
   };
 }
+
+const FONT_GROUPS = getFontGroups();
 
 export function ClipOverlaysSection({ clip }: ClipOverlaysSectionProps) {
   const addOverlay = useProjectStore((s) => s.addClipOverlay);
@@ -129,6 +159,85 @@ export function ClipOverlaysSection({ clip }: ClipOverlaysSectionProps) {
                   }
                 />
                 <span className={styles.sliderValue}>{o.fontSize.toFixed(1)}</span>
+              </div>
+              <div className={styles.fontRow}>
+                <span className={styles.sliderLabel}>フォント</span>
+                <select
+                  className={styles.fontSelect}
+                  value={o.fontFamily ?? DEFAULT_FONT_ID}
+                  style={{ fontFamily: getFontStack(o.fontFamily) }}
+                  onChange={(e) => {
+                    void ensureFontLoaded(e.target.value);
+                    updateOverlay(clip.id, o.id, { fontFamily: e.target.value });
+                  }}
+                  aria-label="フォント"
+                >
+                  {FONT_GROUPS.map((group) => (
+                    <optgroup key={group.category} label={group.label}>
+                      {group.fonts.map((f) => (
+                        <option
+                          key={f.id}
+                          value={f.id}
+                          style={{ fontFamily: f.stack }}
+                        >
+                          {f.label} — {f.sample ?? f.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+
+              <div className={styles.fontRow}>
+                <span className={styles.sliderLabel}>装飾</span>
+                <select
+                  className={styles.fontSelect}
+                  value={o.decoration ?? 'none'}
+                  onChange={(e) =>
+                    updateOverlay(clip.id, o.id, {
+                      decoration: e.target.value as OverlayDecoration,
+                    })
+                  }
+                  aria-label="装飾"
+                >
+                  {DECORATIONS.map((d) => (
+                    <option key={d.value} value={d.value}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+                {(o.decoration === 'glow' || o.decoration === 'gradient') ? (
+                  <input
+                    type="color"
+                    value={o.decorationColor ?? o.color}
+                    onChange={(e) =>
+                      updateOverlay(clip.id, o.id, { decorationColor: e.target.value })
+                    }
+                    className={styles.colorInput}
+                    aria-label={o.decoration === 'gradient' ? 'グラデ下色' : 'グロー色'}
+                    title={o.decoration === 'gradient' ? 'グラデーション下端の色' : 'グローの色'}
+                  />
+                ) : null}
+              </div>
+
+              <div className={styles.fontRow}>
+                <span className={styles.sliderLabel}>登場</span>
+                <select
+                  className={styles.fontSelect}
+                  value={o.intro ?? 'none'}
+                  onChange={(e) =>
+                    updateOverlay(clip.id, o.id, {
+                      intro: e.target.value as OverlayIntroKind,
+                    })
+                  }
+                  aria-label="登場アニメーション"
+                >
+                  {INTROS.map((it) => (
+                    <option key={it.value} value={it.value}>
+                      {it.label}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
           ))}

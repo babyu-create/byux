@@ -1,23 +1,44 @@
 import { useSelectedAsset } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { formatDuration, formatFileSize, formatTimecode } from '../../lib/media';
+import type { MediaAsset } from '../../lib/types';
+import { clipHasTransform } from '../../lib/clipTransform';
+import { clipHasColorGrade } from '../../lib/colorGrade';
+import { clipHasTransition } from '../../lib/transitions';
+import { hasSpeedRamp } from '../../lib/speedRamp';
+import { CollapsibleSection } from './CollapsibleSection';
 import { KillMarkerSection } from './KillMarkerSection';
 import { IORangeSection } from './IORangeSection';
 import { ClipEffectsSection } from './ClipEffectsSection';
 import { ClipSpeedSection } from './ClipSpeedSection';
+import { ClipStretchSection } from './ClipStretchSection';
+import { ClipTransformSection } from './ClipTransformSection';
+import { ClipColorSection } from './ClipColorSection';
+import { ClipTransitionSection } from './ClipTransitionSection';
 import { ClipVolumeSection } from './ClipVolumeSection';
 import { ClipOverlaysSection } from './ClipOverlaysSection';
+import { ClipPresetsSection } from './ClipPresetsSection';
 import { BeatDetectionSection } from './BeatDetectionSection';
+import { AudioDuckingSection } from './AudioDuckingSection';
 import styles from './PropertiesPanel.module.css';
 
 export function PropertiesPanel() {
   const asset = useSelectedAsset();
   const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
   const clips = useProjectStore((s) => s.clips);
+  const tracks = useProjectStore((s) => s.tracks);
   const selectedClip =
     selectedClipIds.length === 1
       ? (clips.find((c) => c.id === selectedClipIds[0]) ?? null)
       : null;
+  const selectedClipTrackKind = selectedClip
+    ? (tracks.find((t) => t.id === selectedClip.trackId)?.kind ?? null)
+    : null;
+  // The FIRST audio track is the BGM lane; auto-ducking is a BGM feature, so
+  // the ducking control only shows for a clip on that track (not SE etc.).
+  const bgmTrackId = tracks.find((t) => t.kind === 'audio')?.id ?? null;
+  const isBgmClip = !!selectedClip && selectedClip.trackId === bgmTrackId;
+  const isVideoClip = selectedClipTrackKind !== 'audio';
 
   return (
     <div className={styles.root}>
@@ -26,71 +47,171 @@ export function PropertiesPanel() {
         <div className={styles.empty}>メディアが未選択です</div>
       ) : (
         <div className={styles.content}>
-          <div className={styles.section}>
-            <div className={styles.sectionLabel}>ファイル</div>
-            <PropRow label="名前" value={asset.name} mono />
-            <PropRow label="種類" value={asset.kind === 'video' ? '動画' : '音声'} />
-            <PropRow label="サイズ" value={formatFileSize(asset.file.size)} mono />
-            <PropRow label="MIME" value={asset.file.type || '-'} mono />
-          </div>
-
-          <div className={styles.section}>
-            <div className={styles.sectionLabel}>メタデータ</div>
-            <PropRow label="長さ" value={formatDuration(asset.duration)} mono />
-            <PropRow
-              label="長さ (frames)"
-              value={formatTimecode(asset.duration)}
-              mono
-            />
-            {asset.kind === 'video' && asset.width && asset.height ? (
-              <>
-                <PropRow label="解像度" value={`${asset.width} × ${asset.height}`} mono />
-                <PropRow
-                  label="アスペクト"
-                  value={(asset.width / asset.height).toFixed(3)}
-                  mono
-                />
-              </>
-            ) : null}
-          </div>
-
           {selectedClip ? (
             <>
-              <div className={styles.markerSlot}>
+              {/* High-frequency FPS-montage control: open by default. */}
+              <CollapsibleSection
+                id="speed"
+                title="再生速度"
+                defaultOpen
+                active={
+                  (selectedClip.speed ?? 1) !== 1 || hasSpeedRamp(selectedClip.speedRamp)
+                }
+                badge={`${selectedClip.speed ?? 1}×`}
+              >
                 <ClipSpeedSection clip={selectedClip} />
-              </div>
-              <div className={styles.markerSlot}>
+              </CollapsibleSection>
+
+              {/* Also high-frequency: kept open and right after speed so it
+                  never needs scrolling past the video-only sections below. */}
+              <CollapsibleSection
+                id="volume"
+                title="音量"
+                defaultOpen
+                active={(selectedClip.volume ?? 1) !== 1 || (selectedClip.muted ?? false)}
+                badge={
+                  selectedClip.muted
+                    ? 'MUTE'
+                    : `${Math.round((selectedClip.volume ?? 1) * 100)}%`
+                }
+              >
                 <ClipVolumeSection clip={selectedClip} />
-              </div>
-              <div className={styles.markerSlot}>
+              </CollapsibleSection>
+
+              {isVideoClip ? (
+                <CollapsibleSection
+                  id="stretch"
+                  title="引き伸ばし"
+                  active={selectedClip.stretchToFill ?? false}
+                >
+                  <ClipStretchSection clip={selectedClip} />
+                </CollapsibleSection>
+              ) : null}
+
+              {isVideoClip ? (
+                <CollapsibleSection
+                  id="transform"
+                  title="トランスフォーム"
+                  active={clipHasTransform(selectedClip.transform)}
+                >
+                  <ClipTransformSection clip={selectedClip} />
+                </CollapsibleSection>
+              ) : null}
+
+              {isVideoClip ? (
+                <CollapsibleSection
+                  id="color"
+                  title="カラー"
+                  defaultOpen
+                  active={clipHasColorGrade(selectedClip.colorGrade)}
+                >
+                  <ClipColorSection clip={selectedClip} />
+                </CollapsibleSection>
+              ) : null}
+
+              {isVideoClip ? (
+                <CollapsibleSection
+                  id="transition"
+                  title="トランジション"
+                  active={clipHasTransition(
+                    selectedClip.transitionIn,
+                    selectedClip.transitionOut,
+                  )}
+                >
+                  <ClipTransitionSection clip={selectedClip} />
+                </CollapsibleSection>
+              ) : null}
+
+              {isBgmClip ? (
+                <CollapsibleSection id="ducking" title="BGMダッキング">
+                  <AudioDuckingSection />
+                </CollapsibleSection>
+              ) : null}
+
+              <CollapsibleSection
+                id="effects"
+                title="エフェクト"
+                active={selectedClip.effects.length > 0}
+                badge={String(selectedClip.effects.length)}
+              >
                 <ClipEffectsSection clip={selectedClip} />
-              </div>
-              {selectedClip.assetId &&
-              clips.find((c) => c.id === selectedClip.id)?.trackId !== 'track-audio' ? (
-                <div className={styles.markerSlot}>
+              </CollapsibleSection>
+
+              {selectedClip.assetId && isVideoClip ? (
+                <CollapsibleSection
+                  id="overlays"
+                  title="テキストオーバーレイ"
+                  active={(selectedClip.overlays?.length ?? 0) > 0}
+                  badge={String(selectedClip.overlays?.length ?? 0)}
+                >
                   <ClipOverlaysSection clip={selectedClip} />
-                </div>
+                </CollapsibleSection>
+              ) : null}
+
+              {isVideoClip ? (
+                <CollapsibleSection id="presets" title="プリセット">
+                  <ClipPresetsSection clip={selectedClip} />
+                </CollapsibleSection>
               ) : null}
             </>
           ) : null}
+          {selectedClipIds.length > 1 ? (
+            // Multi-select: per-clip sliders make no sense, but the WHOLE point
+            // of presets is grading many clips identically — so keep an
+            // apply-only preset panel reachable (no single `clip` to save from).
+            <CollapsibleSection id="presets-multi" title="プリセット" defaultOpen>
+              <ClipPresetsSection />
+            </CollapsibleSection>
+          ) : null}
           {asset.kind === 'video' ? (
             <>
-              <div className={styles.markerSlot}>
+              {/* High-frequency FPS-montage control: open by default. */}
+              <CollapsibleSection id="kill-markers" title="キルマーカー" defaultOpen>
                 <KillMarkerSection asset={asset} />
-              </div>
-              <div className={styles.markerSlot}>
+              </CollapsibleSection>
+              <CollapsibleSection id="io-range" title="A/D レンジ">
                 <IORangeSection asset={asset} />
-              </div>
+              </CollapsibleSection>
             </>
           ) : null}
           {asset.kind === 'audio' ? (
-            <div className={styles.markerSlot}>
+            <CollapsibleSection id="beat-detection" title="ビート検出">
               <BeatDetectionSection asset={asset} />
-            </div>
+            </CollapsibleSection>
           ) : null}
+
+          {/* Reference-only info, not needed for editing — collapsed and
+              pushed to the bottom so it never competes with the controls
+              above for space. */}
+          <CollapsibleSection id="file-info" title="ファイル情報">
+            <AssetInfoSection asset={asset} />
+          </CollapsibleSection>
         </div>
       )}
     </div>
+  );
+}
+
+function AssetInfoSection({ asset }: { asset: MediaAsset }) {
+  return (
+    <>
+      <PropRow label="名前" value={asset.name} mono />
+      <PropRow label="種類" value={asset.kind === 'video' ? '動画' : '音声'} />
+      <PropRow label="サイズ" value={formatFileSize(asset.size)} mono />
+      <PropRow label="MIME" value={asset.mimeType || '-'} mono />
+      <PropRow label="長さ" value={formatDuration(asset.duration)} mono />
+      <PropRow label="長さ (frames)" value={formatTimecode(asset.duration)} mono />
+      {asset.kind === 'video' && asset.width && asset.height ? (
+        <>
+          <PropRow label="解像度" value={`${asset.width} × ${asset.height}`} mono />
+          <PropRow
+            label="アスペクト"
+            value={(asset.width / asset.height).toFixed(3)}
+            mono
+          />
+        </>
+      ) : null}
+    </>
   );
 }
 

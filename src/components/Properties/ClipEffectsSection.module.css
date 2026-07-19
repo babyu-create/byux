@@ -116,12 +116,48 @@
   accent-color: var(--accent);
 }
 
+.row input[type='range']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
 .rowValue {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
   color: var(--text);
   text-align: right;
+}
+
+/* Motion-blur intensity row: same layout as .row but with weak/strong
+   descriptors flanking the slider. The grid keeps the labels aligned
+   across multiple instances. */
+.intensityRow {
+  display: grid;
+  grid-template-columns: 60px 14px 1fr 14px 38px;
+  align-items: center;
+  gap: 6px;
+}
+
+.intensityRow input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.intensityRow input[type='range']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.intensityDescriptor {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: center;
+  user-select: none;
+  font-weight: 600;
+  letter-spacing: 0.03em;
 }
 
 .speedGroup {

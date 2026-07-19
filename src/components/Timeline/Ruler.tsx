@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react';
 import { buildRulerTicks, timeToPx } from '../../lib/timeline';
 import { useScrub } from '../../hooks/useScrub';
 import styles from './Ruler.module.css';
@@ -7,8 +8,9 @@ interface RulerProps {
   zoom: number;
 }
 
-export function Ruler({ totalSec, zoom }: RulerProps) {
-  const ticks = buildRulerTicks(totalSec, zoom);
+export const Ruler = memo(function Ruler({ totalSec, zoom }: RulerProps) {
+  // Ticks are only recomputed when zoom or totalSec actually changes
+  const ticks = useMemo(() => buildRulerTicks(totalSec, zoom), [totalSec, zoom]);
   const scrub = useScrub();
 
   return (
@@ -24,4 +26,4 @@ export function Ruler({ totalSec, zoom }: RulerProps) {
       ))}
     </div>
   );
-}
+});

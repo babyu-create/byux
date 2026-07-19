@@ -1,5 +1,10 @@
-import { create } from 'zustand';
-import type { Clip, IORange, KillMarker, PendingIn, Track } from '../lib/types';
+import { create, useStore } from 'zustand';
+import { temporal } from 'zundo';
+import type { Clip, IORange, KillMarker, MediaAsset, PendingIn, Track } from '../lib/types';
+import { useMediaStore } from './mediaStore';
+import type { HudPreset } from '../lib/motionBlurCore';
+import type { AudioDucking } from '../lib/audioDucking';
+import { applyClipLook } from '../lib/presets';
 import {
   clamp,
   clipDuration,
@@ -11,8 +16,8 @@ import {
 
 const DEFAULT_TRACKS: Track[] = [
   { id: 'track-video', kind: 'video', label: '映像メイン', locked: false, muted: false, hidden: false },
-  { id: 'track-overlay', kind: 'overlay', label: 'オーバーレイ', locked: false, muted: false, hidden: false },
-  { id: 'track-audio', kind: 'audio', label: 'BGM / SE', locked: false, muted: false, hidden: false },
+  { id: 'track-audio', kind: 'audio', label: 'BGM', locked: false, muted: false, hidden: false },
+  { id: 'track-audio-2', kind: 'audio', label: 'SE', locked: false, muted: false, hidden: false },
 ];
 
 interface ProjectStoreState {
@@ -23,11 +28,30 @@ interface ProjectStoreState {
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];
+  /**
+   * Project-level BGM auto-ducking (Phase P5). Undefined = no ducking. Lives at
+   * project scope (like hudPreset) so the BGM is dipped identically in the live
+   * preview and the export. See lib/audioDucking.
+   */
+  audioDucking?: AudioDucking;
   selectedClipIds: string[];
   selectedMarkerId: string | null;
   playhead: number;
   zoom: number;
   snapEnabled: boolean;
+  /**
+   * HUD positional-protect preset for motion blur (game-specific). Lives at
+   * project scope — not Preview-local — so the export uses the SAME preset the
+   * user selected in the preview toolbar (otherwise export silently defaulted
+   * to 'valorant').
+   */
+  hudPreset: HudPreset;
+  /**
+   * Horizontal reframe for 9:16 vertical export, -1 (left) .. 0 (center) .. 1
+   * (right). When the 16:9 source is cropped to fill a vertical frame, this
+   * pans which slice is kept so the action/crosshair stays in view.
+   */
+  verticalReframe: number;
   snapIndicator: { time: number; type: string } | null;
   isPlaying: boolean;
   preRollSec: number;
@@ -35,7 +59,14 @@ interface ProjectStoreState {
   ioRanges: IORange[];
   pendingIn: PendingIn | null;
   selectedRangeId: string | null;
-  transientMessage: { kind: 'info' | 'error' | 'success'; text: string; key: number } | null;
+  transientMessage: {
+    kind: 'info' | 'error' | 'success';
+    text: string;
+    key: number;
+    /** Total visible duration in milliseconds — used by the Toast to render a
+     *  visible progress bar so users see when the message will disappear. */
+    durationMs: number;
+  } | null;
 
   addClipFromAsset: (
     assetId: string,
@@ -56,6 +87,10 @@ interface ProjectStoreState {
   zoomIn: () => void;
   zoomOut: () => void;
   toggleSnap: () => void;
+  setHudPreset: (preset: HudPreset) => void;
+  setVerticalReframe: (value: number) => void;
+  /** Set (or clear with null) the project-level BGM auto-ducking. */
+  setAudioDucking: (ducking: AudioDucking | null) => void;
   splitSelectedAtPlayhead: () => void;
   setIsPlaying: (playing: boolean) => void;
   togglePlay: () => void;
@@ -92,14 +127,35 @@ interface ProjectStoreState {
   clearMessage: () => void;
 
   setClipEffects: (clipId: string, effects: import('../lib/types').ClipEffect[]) => void;
-  toggleClipEffect: (clipId: string, type: 'fade-in' | 'fade-out') => void;
+  toggleClipEffect: (
+    clipId: string,
+    type: import('../lib/types').ClipEffectType,
+  ) => void;
   updateClipEffect: (
     clipId: string,
-    type: 'fade-in' | 'fade-out',
+    type: import('../lib/types').ClipEffectType,
     patch: Partial<import('../lib/types').ClipEffect>,
   ) => void;
   setClipSpeed: (clipId: string, speed: number) => void;
+  setClipSpeedRamp: (
+    clipId: string,
+    ramp: import('../lib/speedRamp').SpeedRamp | null,
+  ) => void;
   setClipVolume: (clipId: string, volume: number) => void;
+  setClipStretch: (clipId: string, stretchToFill: boolean) => void;
+  setClipTransform: (
+    clipId: string,
+    transform: import('../lib/types').ClipTransform,
+  ) => void;
+  setClipColorGrade: (
+    clipId: string,
+    grade: import('../lib/types').ColorGrade | null,
+  ) => void;
+  setClipTransition: (
+    clipId: string,
+    edge: 'in' | 'out',
+    transition: import('../lib/transitions').ClipTransition | null,
+  ) => void;
   toggleClipMuted: (clipId: string) => void;
   addClipOverlay: (clipId: string, overlay: import('../lib/types').OverlayText) => void;
   updateClipOverlay: (
@@ -112,18 +168,106 @@ interface ProjectStoreState {
     clipIds: string[],
     overlay: import('../lib/types').OverlayText,
   ) => void;
+  /**
+   * Apply a saved clip-look preset (Phase P6) to one or more clips. The clips'
+   * identity / placement / audio are preserved; their visual look (transform,
+   * color grade, effects, text overlays, transitions, speed) is replaced by the
+   * preset's. Clips on locked tracks are skipped. See lib/presets.
+   */
+  applyPresetToClips: (
+    clipIds: string[],
+    look: import('../lib/presets').ClipLook,
+  ) => number;
   loadProject: (file: import('../lib/project').ProjectFile, idMap: Record<string, string>) => void;
   /** Pending asset references from a loaded project, used to auto-relink later. */
   expectedAssets: import('../lib/project').ProjectAssetRef[];
   remapAssetIds: (idMap: Record<string, string>) => void;
   clearExpectedAssets: () => void;
+  /** Immutable document snapshot from the last successful save/load. */
+  savedDocument: DocState | null;
+  /** Serialized media-library identity from the last successful save/load. */
+  savedAssetsFingerprint: string;
 }
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 8;
 const MIN_CLIP_DURATION = 0.1;
 
-export const useProjectStore = create<ProjectStoreState>((set, get) => ({
+// --- Undo / redo (zundo temporal) ------------------------------------------
+// Only the editable "document" is undoable; ephemeral UI state (playhead,
+// zoom, selection, isPlaying, transient messages, export prefs) is excluded so
+// playback/scrubbing never pollute history.
+type DocState = Pick<
+  ProjectStoreState,
+  | 'name' | 'aspectRatio' | 'fps' | 'resolution'
+  | 'tracks' | 'clips' | 'markers' | 'ioRanges'
+  | 'preRollSec' | 'postRollSec' | 'audioDucking'
+>;
+
+function partializeDoc(s: ProjectStoreState): DocState {
+  return {
+    name: s.name,
+    aspectRatio: s.aspectRatio,
+    fps: s.fps,
+    resolution: s.resolution,
+    tracks: s.tracks,
+    clips: s.clips,
+    markers: s.markers,
+    ioRanges: s.ioRanges,
+    preRollSec: s.preRollSec,
+    postRollSec: s.postRollSec,
+    audioDucking: s.audioDucking,
+  };
+}
+
+// Reference equality per doc field — the store mutates immutably, so a changed
+// ref means a real edit. Lets temporal skip non-doc sets (playhead @60fps,
+// selection, …) cheaply without deep comparison.
+function docEqual(a: DocState, b: DocState): boolean {
+  return (
+    a.name === b.name &&
+    a.aspectRatio === b.aspectRatio &&
+    a.fps === b.fps &&
+    a.resolution === b.resolution &&
+    a.tracks === b.tracks &&
+    a.clips === b.clips &&
+    a.markers === b.markers &&
+    a.ioRanges === b.ioRanges &&
+    a.preRollSec === b.preRollSec &&
+    a.postRollSec === b.postRollSec &&
+    a.audioDucking === b.audioDucking
+  );
+}
+
+function assetsFingerprint(assets: MediaAsset[]): string {
+  return JSON.stringify(
+    assets.map((asset) => ({
+      id: asset.id,
+      name: asset.name,
+      size: asset.size,
+      kind: asset.kind,
+      duration: asset.duration,
+      width: asset.width,
+      height: asset.height,
+      path: asset.path,
+    })),
+  );
+}
+
+// Coalesce rapid edits (clip/slider drags fire ~60/s) into a single history
+// entry by debouncing when temporal records. 150ms groups per-frame drags
+// while staying well under human undo-reaction time.
+function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): (...args: A) => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return (...args: A) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+export const useProjectStore = create<ProjectStoreState>()(
+  temporal(
+    (set, get) => ({
   name: 'untitled',
   aspectRatio: '16:9',
   fps: 60,
@@ -131,11 +275,14 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   tracks: DEFAULT_TRACKS,
   clips: [],
   markers: [],
+  audioDucking: undefined,
   selectedClipIds: [],
   selectedMarkerId: null,
   playhead: 0,
   zoom: 1,
   snapEnabled: true,
+  hudPreset: 'valorant',
+  verticalReframe: 0,
   snapIndicator: null,
   isPlaying: false,
   preRollSec: 3,
@@ -145,6 +292,8 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   selectedRangeId: null,
   transientMessage: null,
   expectedAssets: [],
+  savedDocument: null,
+  savedAssetsFingerprint: '[]',
 
   addClipFromAsset: (assetId, trackId, durationSec, atTime) => {
     if (durationSec <= 0) return null;
@@ -344,6 +493,16 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   zoomOut: () => set((s) => ({ zoom: clamp(s.zoom / 1.4, MIN_ZOOM, MAX_ZOOM) })),
   toggleSnap: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
 
+  setHudPreset: (hudPreset) => set({ hudPreset }),
+
+  setVerticalReframe: (value) =>
+    set({ verticalReframe: Math.max(-1, Math.min(1, value)) }),
+
+  setAudioDucking: (ducking) =>
+    // Null clears the setting so the project serialises back to a ducking-free
+    // (backward-compatible) shape, mirroring setClipColorGrade(null) etc.
+    set({ audioDucking: ducking ?? undefined }),
+
   splitSelectedAtPlayhead: () => {
     const { selectedClipIds, playhead, splitClipAt } = get();
     selectedClipIds.forEach((id) => splitClipAt(id, playhead));
@@ -429,14 +588,14 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
   autoClipFromMarkers: (assetId, options) => {
     const state = get();
-    const asset = { id: assetId };
     const markers = state.markers
       .filter((m) => m.assetId === assetId)
       .sort((a, b) => a.time - b.time);
     if (markers.length === 0) return 0;
 
-    const videoTrackId =
-      state.tracks.find((t) => t.kind === 'video')?.id ?? 'track-video';
+    const videoTrack = state.tracks.find((t) => t.kind === 'video');
+    if (!videoTrack) return 0;
+    const videoTrackId = videoTrack.id;
 
     // Optionally drop existing clips of this asset on the video track.
     let baseClips = state.clips;
@@ -476,7 +635,6 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       clips: [...baseClips, ...newClips],
       selectedClipIds: newClips.map((c) => c.id),
     });
-    void asset;
     return newClips.length;
   },
 
@@ -548,18 +706,28 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     const state = get();
     const pending = state.pendingIn;
     if (!pending) return null;
-    // Find current source time at playhead via the active video clip.
-    const videoTrackId = state.tracks.find((t) => t.kind === 'video')?.id;
-    if (!videoTrackId) return null;
+    // Find current source time at playhead via the active video clip,
+    // searching ALL video tracks (the project may have multiple).
+    const videoTrackIds = new Set(
+      state.tracks.filter((t) => t.kind === 'video').map((t) => t.id),
+    );
+    if (videoTrackIds.size === 0) return null;
     const activeClip = state.clips.find((c) => {
-      if (c.trackId !== videoTrackId) return false;
+      if (!videoTrackIds.has(c.trackId)) return false;
       if (c.assetId !== pending.assetId) return false;
       const end = c.start + clipDuration(c);
       return state.playhead >= c.start - 1e-6 && state.playhead < end - 1e-6;
     });
     if (!activeClip) return null;
+    // Speed-adjust the timeline→source mapping. A 2× clip covers twice
+    // the source time per timeline second; omitting this caused IO
+    // ranges to land off by (1 - 1/speed) on any time-warped clip.
+    const clipSpeed = activeClip.speed ?? 1;
     const sourceTime =
-      activeClip.trimStart + (state.playhead - activeClip.start);
+      activeClip.trimStart + (state.playhead - activeClip.start) * clipSpeed;
+    // Resolve the destination track id from the active clip itself so
+    // multi-video-track projects place the new clip on the correct lane.
+    const videoTrackId = activeClip.trackId;
     const a = Math.min(pending.time, sourceTime);
     const b = Math.max(pending.time, sourceTime);
     if (b - a < 0.05) return null;
@@ -594,8 +762,9 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       .filter((r) => r.assetId === assetId)
       .sort((a, b) => a.inTime - b.inTime);
     if (ranges.length === 0) return 0;
-    const videoTrackId =
-      state.tracks.find((t) => t.kind === 'video')?.id ?? 'track-video';
+    const videoTrack = state.tracks.find((t) => t.kind === 'video');
+    if (!videoTrack) return 0;
+    const videoTrackId = videoTrack.id;
 
     let baseClips = state.clips;
     if (options.deleteSourceClips) {
@@ -635,7 +804,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
   showMessage: (kind, text, durationMs = 1800) => {
     const key = Date.now() + Math.random();
-    set({ transientMessage: { kind, text, key } });
+    set({ transientMessage: { kind, text, key, durationMs } });
     window.setTimeout(() => {
       const cur = get().transientMessage;
       if (cur && cur.key === key) set({ transientMessage: null });
@@ -659,9 +828,13 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
         if (has) {
           return { ...c, effects: c.effects.filter((e) => e.type !== type) };
         }
-        const defaults: Record<typeof type, import('../lib/types').ClipEffect> = {
+        const defaults: Record<
+          import('../lib/types').ClipEffectType,
+          import('../lib/types').ClipEffect
+        > = {
           'fade-in': { type: 'fade-in', duration: 0.4 },
           'fade-out': { type: 'fade-out', duration: 0.4 },
+          'motion-blur': { type: 'motion-blur', intensity: 40 },
         };
         return { ...c, effects: [...c.effects, defaults[type]] };
       }),
@@ -687,14 +860,43 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       if (!target) return state;
       const track = state.tracks.find((t) => t.id === target.trackId);
       if (track?.locked) return state;
-      const others = state.clips.filter(
-        (c) => c.trackId === target.trackId && c.id !== clipId,
-      );
-      void others;
       return {
         clips: state.clips.map((c) =>
           c.id === clipId ? { ...c, speed: clamped } : c,
         ),
+      };
+    });
+  },
+
+  setClipSpeedRamp: (clipId, ramp) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      return {
+        clips: state.clips.map((c) => {
+          if (c.id !== clipId) return c;
+          if (ramp === null) {
+            // Drop the ramp entirely so the clip reverts to constant speed and
+            // serialises back to a ramp-free (backward-compatible) shape.
+            const { speedRamp: _drop, ...rest } = c;
+            void _drop;
+            return rest;
+          }
+          // Clamp the relative weights to a sane positive range so a
+          // hand-edited / extreme value can't drive playbackRate to 0.
+          const clampWeight = (n: number): number =>
+            Math.max(0.0625, Math.min(8, n));
+          return {
+            ...c,
+            speedRamp: {
+              from: clampWeight(ramp.from),
+              to: clampWeight(ramp.to),
+              easing: ramp.easing,
+            },
+          };
+        }),
       };
     });
   },
@@ -706,6 +908,80 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
         c.id === clipId ? { ...c, volume: clamped } : c,
       ),
     }));
+  },
+
+  setClipStretch: (clipId, stretchToFill) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      return {
+        clips: state.clips.map((c) =>
+          c.id === clipId ? { ...c, stretchToFill } : c,
+        ),
+      };
+    });
+  },
+
+  setClipTransform: (clipId, transform) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      return {
+        clips: state.clips.map((c) =>
+          c.id === clipId ? { ...c, transform } : c,
+        ),
+      };
+    });
+  },
+
+  setClipColorGrade: (clipId, grade) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      return {
+        clips: state.clips.map((c) => {
+          if (c.id !== clipId) return c;
+          if (grade === null) {
+            // Drop the grade entirely so the clip reverts to neutral and
+            // serialises back to a grade-free (backward-compatible) shape.
+            const { colorGrade: _drop, ...rest } = c;
+            void _drop;
+            return rest;
+          }
+          return { ...c, colorGrade: grade };
+        }),
+      };
+    });
+  },
+
+  setClipTransition: (clipId, edge, transition) => {
+    set((state) => {
+      const target = state.clips.find((c) => c.id === clipId);
+      if (!target) return state;
+      const track = state.tracks.find((t) => t.id === target.trackId);
+      if (track?.locked) return state;
+      const key = edge === 'in' ? 'transitionIn' : 'transitionOut';
+      return {
+        clips: state.clips.map((c) => {
+          if (c.id !== clipId) return c;
+          if (transition === null || transition.type === 'none') {
+            // Drop the boundary transition entirely so the clip reverts to a
+            // hard cut and serialises back to a transition-free (backward-
+            // compatible) shape.
+            const { [key]: _drop, ...rest } = c;
+            void _drop;
+            return rest;
+          }
+          return { ...c, [key]: transition };
+        }),
+      };
+    });
   },
 
   toggleClipMuted: (clipId) => {
@@ -768,6 +1044,24 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     }));
   },
 
+  applyPresetToClips: (clipIds, look) => {
+    const targetIds = new Set(clipIds);
+    let applied = 0;
+    set((state) => {
+      const lockedTrackIds = new Set(
+        state.tracks.filter((t) => t.locked).map((t) => t.id),
+      );
+      const clips = state.clips.map((c) => {
+        if (!targetIds.has(c.id)) return c;
+        if (lockedTrackIds.has(c.trackId)) return c; // skip locked tracks
+        applied += 1;
+        return applyClipLook(c, look);
+      });
+      return applied > 0 ? { clips } : state;
+    });
+    return applied;
+  },
+
   loadProject: (file, idMap) => {
     const remap = <T extends { assetId: string }>(items: T[]): T[] =>
       items.map((it) => ({ ...it, assetId: idMap[it.assetId] ?? it.assetId }));
@@ -782,6 +1076,8 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       ioRanges: remap(file.ioRanges),
       preRollSec: file.preRollSec,
       postRollSec: file.postRollSec,
+      // Absent in old files → undefined (no ducking). Backward compatible.
+      audioDucking: file.audioDucking,
       selectedClipIds: [],
       selectedMarkerId: null,
       selectedRangeId: null,
@@ -820,16 +1116,23 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
   jumpToAdjacentMarker: (direction) => {
     const state = get();
-    // Find the asset at the playhead via the active video clip.
-    const videoTrackId = state.tracks.find((t) => t.kind === 'video')?.id;
-    if (!videoTrackId) return;
+    // Search across ALL video tracks for the clip under the playhead.
+    // Restricting to `tracks[0]` only would miss clips placed on the
+    // secondary video track (track-video-2) in the multi-track layout.
+    const videoTrackIds = new Set(
+      state.tracks.filter((t) => t.kind === 'video').map((t) => t.id),
+    );
+    if (videoTrackIds.size === 0) return;
     const activeClip = state.clips.find((c) => {
-      if (c.trackId !== videoTrackId) return false;
+      if (!videoTrackIds.has(c.trackId)) return false;
       const end = c.start + clipDuration(c);
       return state.playhead >= c.start - 1e-6 && state.playhead < end - 1e-6;
     });
     if (!activeClip) return;
-    const localTime = activeClip.trimStart + (state.playhead - activeClip.start);
+    // Speed-adjust the timeline→source mapping (timeline 1s = source `speed`s).
+    const clipSpeed = activeClip.speed ?? 1;
+    const localTime =
+      activeClip.trimStart + (state.playhead - activeClip.start) * clipSpeed;
     const sourceMarkers = state.markers
       .filter((m) => m.assetId === activeClip.assetId)
       .sort((a, b) => a.time - b.time);
@@ -841,15 +1144,80 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       target = [...sourceMarkers].reverse().find((m) => m.time < localTime - 1e-3);
     }
     if (!target) return;
-    const newPlayhead = activeClip.start + (target.time - activeClip.trimStart);
+    // Reverse mapping: source seconds → timeline seconds via /speed.
+    const newPlayhead =
+      activeClip.start + (target.time - activeClip.trimStart) / clipSpeed;
     set({ playhead: Math.max(0, newPlayhead), selectedMarkerId: target.id });
   },
-}));
+    }),
+    {
+      partialize: partializeDoc,
+      equality: docEqual,
+      limit: 100,
+      handleSet: (handleSet) => debounce(handleSet, 150),
+    },
+  ),
+);
 
-export const useTimelineDuration = (): number => {
-  const clips = useProjectStore((s) => s.clips);
-  return clips.reduce(
-    (max, c) => Math.max(max, c.start + clipDuration(c)),
-    0,
+// Derive the reduced number INSIDE the selector so Zustand's Object.is
+// comparison runs on the scalar result rather than the clips array. The
+// previous form (subscribe to clips, then reduce in component body) caused
+// every Preview / WaveformPanel / ExportDialog to re-render on every clip
+// mutation (slider drag = 60/s), even when the duration was unchanged.
+export const useTimelineDuration = (): number =>
+  useProjectStore((s) =>
+    s.clips.reduce((max, c) => Math.max(max, c.start + clipDuration(c)), 0),
+  );
+
+// --- Undo / redo public API -------------------------------------------------
+/** Revert the last document edit. */
+export const undo = (): void => useProjectStore.temporal.getState().undo();
+/** Re-apply the last undone edit. */
+export const redo = (): void => useProjectStore.temporal.getState().redo();
+/** Clear undo/redo history (e.g. after loading a project). */
+export const clearHistory = (): void => useProjectStore.temporal.getState().clear();
+
+/** Reactive: is there anything to undo? */
+export const useCanUndo = (): boolean =>
+  useStore(useProjectStore.temporal, (s) => s.pastStates.length > 0);
+/** Reactive: is there anything to redo? */
+export const useCanRedo = (): boolean =>
+  useStore(useProjectStore.temporal, (s) => s.futureStates.length > 0);
+
+// --- Unsaved-changes tracking ------------------------------------------------
+// Compare the actual immutable document fields, not zundo history depth.
+// History recording is debounced and can branch after undo, so its array
+// length is neither immediate nor a unique identity for the current document.
+
+/** Call after a successful save (or load) to mark the current state as clean. */
+export const markProjectSaved = (): void => {
+  useProjectStore.setState({
+    savedDocument: partializeDoc(useProjectStore.getState()),
+    savedAssetsFingerprint: assetsFingerprint(useMediaStore.getState().assets),
+  });
+};
+
+/** Reactive: are there unsaved edits since the last save/load? */
+export const useIsDirty = (): boolean => {
+  const documentDirty = useProjectStore((s) =>
+    s.savedDocument === null ? false : !docEqual(partializeDoc(s), s.savedDocument),
+  );
+  const savedAssetsFingerprint = useProjectStore((s) => s.savedAssetsFingerprint);
+  const currentAssetsFingerprint = useMediaStore((s) => assetsFingerprint(s.assets));
+  return documentDirty || currentAssetsFingerprint !== savedAssetsFingerprint;
+};
+
+/** Non-hook form used by the main-window integration and regression tests. */
+export const isProjectDirty = (): boolean => {
+  const state = useProjectStore.getState();
+  const documentDirty =
+    state.savedDocument !== null &&
+    !docEqual(partializeDoc(state), state.savedDocument);
+  return (
+    documentDirty ||
+    assetsFingerprint(useMediaStore.getState().assets) !== state.savedAssetsFingerprint
   );
 };
+
+// The initial empty document is the first clean baseline.
+markProjectSaved();

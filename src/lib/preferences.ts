@@ -19,3 +19,14 @@ export function setBoolPref(name: string, value: boolean): void {
 }
 
 export const PREF_SKIP_AUTO_CLIP_CONFIRM = 'skipAutoClipConfirm';
+
+// Collapsible property-section open/closed state is persisted per section id
+// under a shared namespace so that the user's progressive-disclosure choices
+// survive reloads and clip re-selection.
+export function getSectionOpenPref(id: string, fallback: boolean): boolean {
+  return getBoolPref(`section.${id}`, fallback);
+}
+
+export function setSectionOpenPref(id: string, open: boolean): void {
+  setBoolPref(`section.${id}`, open);
+}

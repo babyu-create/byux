@@ -45,6 +45,10 @@
 
 .primaryBtn {
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--clip-audio);
@@ -52,6 +56,22 @@
   font-size: 12px;
   font-weight: 700;
   transition: filter var(--t-fast);
+}
+
+.spin {
+  animation: bd-spin 0.9s linear infinite;
+}
+
+@keyframes bd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
 }
 
 .primaryBtn:hover:not(:disabled) {

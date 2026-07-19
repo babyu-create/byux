@@ -27,6 +27,9 @@
   position: relative;
   overflow-x: auto;
   overflow-y: hidden;
+  /* Contain paint to the scroll viewport — child clips outside the scroll
+     area are clipped by the browser without triggering layout recalcs */
+  contain: paint;
 }
 
 .scrollInner {
@@ -41,4 +44,6 @@
   flex-direction: column;
   height: calc(100% - 28px);
   min-height: 0;
+  /* Isolate layout/style recalculation to this subtree */
+  contain: layout style;
 }

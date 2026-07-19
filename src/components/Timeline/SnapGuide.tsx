@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { timeToPx } from '../../lib/timeline';
 import styles from './SnapGuide.module.css';
@@ -14,7 +15,7 @@ const TYPE_LABEL: Record<string, string> = {
   beat: 'ビート',
 };
 
-export function SnapGuide({ zoom }: SnapGuideProps) {
+export const SnapGuide = memo(function SnapGuide({ zoom }: SnapGuideProps) {
   const indicator = useProjectStore((s) => s.snapIndicator);
   if (!indicator) return null;
 
@@ -28,4 +29,4 @@ export function SnapGuide({ zoom }: SnapGuideProps) {
       <div className={styles.badge}>{TYPE_LABEL[indicator.type] ?? indicator.type}</div>
     </div>
   );
-}
+});

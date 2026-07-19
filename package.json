@@ -1,17 +1,17 @@
 {
   "name": "highlight-maker",
-  "productName": "FPS Clip Editor",
+  "productName": "Byux",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.17",
   "license": "MIT",
   "description": "FPSキル集編集に特化したシンプルな動画エディタ",
-  "homepage": "https://github.com/babyu-create/highlight-maker",
+  "homepage": "https://github.com/babyu-create/byux",
   "repository": {
     "type": "git",
-    "url": "https://github.com/babyu-create/highlight-maker.git"
+    "url": "https://github.com/babyu-create/byux.git"
   },
   "bugs": {
-    "url": "https://github.com/babyu-create/highlight-maker/issues"
+    "url": "https://github.com/babyu-create/byux/issues"
   },
   "author": {
     "name": "babyu-create",
@@ -22,6 +22,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "eslint .",
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"npm:dev\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
@@ -43,12 +45,17 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "electron-updater": "^6.8.3",
+    "lucide-react": "^1.17.0",
+    "mp4-muxer": "^5.2.2",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
+    "zod": "^4.4.3",
+    "zundo": "^2.3.0",
     "zustand": "^5.0.13"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@ffmpeg/core-mt": "^0.12.10",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
@@ -63,12 +70,16 @@
     "globals": "^17.5.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
-    "vite": "^8.0.10",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.7",
     "wait-on": "^9.0.5"
+  },
+  "overrides": {
+    "js-yaml": "4.3.0"
   },
   "build": {
     "appId": "com.fceditor.app",
-    "productName": "FPS Clip Editor",
+    "productName": "Byux",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -93,15 +104,14 @@
           ]
         }
       ],
-      "icon": "build/icon.png",
-      "signAndEditExecutable": false
+      "icon": "build/icon.png"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "FPS Clip Editor",
+      "shortcutName": "Byux",
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "portable": {
@@ -133,7 +143,7 @@
       {
         "provider": "github",
         "owner": "babyu-create",
-        "repo": "highlight-maker",
+        "repo": "byux",
         "releaseType": "release"
       }
     ]

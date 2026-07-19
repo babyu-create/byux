@@ -1,6 +1,9 @@
 .app {
   display: grid;
-  grid-template-rows: 48px 1fr 320px;
+  /* header / workspace / horizontal splitter / timeline.
+     Heights for the timeline are driven by --layout-timeline-h, set
+     inline by App() from the persisted LayoutSizes. */
+  grid-template-rows: 48px 1fr auto var(--layout-timeline-h, 320px);
   height: 100vh;
   background: var(--bg-app);
   color: var(--text);
@@ -22,18 +25,12 @@
 }
 
 .logoMark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--text-inverse);
-  font-family: var(--font-en);
-  font-weight: 700;
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  object-fit: cover;
+  display: block;
+  flex: 0 0 auto;
 }
 
 .logoText {
@@ -60,7 +57,10 @@
 }
 
 .navBtn {
-  padding: 6px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
@@ -73,7 +73,39 @@
   color: var(--text);
 }
 
+.iconNavBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  transition: background var(--t-fast), color var(--t-fast), opacity var(--t-fast);
+}
+
+.iconNavBtn:hover:not(:disabled) {
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
+.iconNavBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.navDivider {
+  width: 1px;
+  align-self: stretch;
+  margin: 6px 4px;
+  background: var(--border);
+}
+
 .exportBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 14px;
   border-radius: var(--radius-sm);
   background: var(--accent);
@@ -93,9 +125,11 @@
 
 .workspace {
   display: grid;
-  grid-template-columns: 280px 1fr 280px;
-  gap: 1px;
-  background: var(--border);
+  /* left / vertical splitter / center / vertical splitter / right.
+     Widths come from --layout-left-w / --layout-right-w (App() sets them
+     inline). The 'auto' columns are taken by the <Splitter> elements. */
+  grid-template-columns: var(--layout-left-w, 280px) auto 1fr auto var(--layout-right-w, 280px);
+  background: var(--bg-app);
   overflow: hidden;
   min-height: 0;
 }
@@ -112,22 +146,33 @@
   background: var(--bg-app);
 }
 
-.panelTitle {
-  padding: 10px 14px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  border-bottom: 1px solid var(--border-soft);
-  background: var(--bg-elevated);
+.panelRight {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panelRightProperties {
+  /* Fixed height, driven by --layout-properties-h. The waveform below
+     consumes the remainder of the right panel. */
+  flex: 0 0 var(--layout-properties-h, 420px);
+  min-height: 0;
+  max-height: calc(100% - 160px);
+  overflow: hidden;
+}
+
+.panelRightWaveform {
+  flex: 1 1 0;
+  min-height: 120px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .timelineSection {
   display: flex;
   flex-direction: column;
   background: var(--bg-timeline);
-  border-top: 1px solid var(--border);
   overflow: hidden;
   min-height: 0;
 }

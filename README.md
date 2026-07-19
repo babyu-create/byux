@@ -1,4 +1,4 @@
-# FPS Clip Editor
+# Byux
 
 FPSキル集編集に特化したシンプルな動画エディタ。VALORANT / Apex / CS2 など、ゲームの録画から「キル集」を最短ルートで作るためのツール。
 
@@ -17,8 +17,8 @@ FPSキル集編集に特化したシンプルな動画エディタ。VALORANT / 
 
 [最新リリース](../../releases/latest) からインストーラを取得してください。
 
-- Windows: `FPS Clip Editor-Setup-X.Y.Z.exe` (インストーラ) または `FPS Clip Editor-Portable-X.Y.Z.exe` (ポータブル)
-- Linux: `FPS Clip Editor-X.Y.Z.tar.gz` (展開して実行)
+- Windows: `Byux-Setup-X.Y.Z.exe` (インストーラ) または `Byux-Portable-X.Y.Z.exe` (ポータブル)
+- Linux: `Byux-X.Y.Z.tar.gz` (展開して実行)
 - macOS: 準備中
 
 ## クイックスタート

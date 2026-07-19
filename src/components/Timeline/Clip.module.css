@@ -13,9 +13,12 @@
     transform var(--t-fast);
   outline: none;
   border: 1.5px solid transparent;
+  /* Isolate each clip's layout/style from siblings */
+  contain: layout style;
 }
 
-.clip:active,
+/* Driven by JS state (.dragging), not CSS :active — :active fires for ANY
+   mouse button, which would show a "grabbing" cursor on a right-click too. */
 .dragging {
   cursor: grabbing;
 }

@@ -1,3 +1,4 @@
+import { memo, useCallback } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import type { KillMarker } from '../../lib/types';
 import styles from './KillMarkerFlag.module.css';
@@ -8,23 +9,33 @@ interface KillMarkerFlagProps {
   leftPx: number;
 }
 
-export function KillMarkerFlag({ marker, leftPx }: KillMarkerFlagProps) {
+export const KillMarkerFlag = memo(function KillMarkerFlag({
+  marker,
+  leftPx,
+}: KillMarkerFlagProps) {
   const isSelected = useProjectStore((s) => s.selectedMarkerId === marker.id);
   const selectMarker = useProjectStore((s) => s.selectMarker);
+
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      selectMarker(marker.id);
+    },
+    [selectMarker, marker.id],
+  );
 
   return (
     <div
       className={`${styles.root} ${isSelected ? styles.selected : ''}`}
       style={{ left: leftPx }}
-      onClick={(e) => {
-        e.stopPropagation();
-        selectMarker(marker.id);
+      onClick={handleClick}
+      onPointerDown={(e) => {
+        if (e.button === 0) e.stopPropagation();
       }}
-      onPointerDown={(e) => e.stopPropagation()}
       title={`キル ${marker.label ? `(${marker.label})` : ''}`}
     >
       <div className={styles.flag} />
       <div className={styles.line} />
     </div>
   );
-}
+});

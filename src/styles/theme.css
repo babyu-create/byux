@@ -20,10 +20,10 @@
   --text-muted: #a1a1a6;
   --text-inverse: #ffffff;
 
-  /* Accent (CapCut signature red) */
-  --accent: #ff3b30;
-  --accent-hover: #e0322a;
-  --accent-soft: rgba(255, 59, 48, 0.12);
+  /* Accent (brand azure — matches the app icon #01ADFD) */
+  --accent: #0490d8;
+  --accent-hover: #0379b8;
+  --accent-soft: rgba(10, 174, 253, 0.12);
 
   /* Semantic */
   --success: #34c759;
@@ -39,8 +39,8 @@
   --clip-audio-bg: rgba(74, 222, 128, 0.18);
 
   /* Beat marker */
-  --beat-line: rgba(255, 59, 48, 0.4);
-  --playhead: #ff3b30;
+  --beat-line: rgba(10, 174, 253, 0.4);
+  --playhead: #0490d8;
 
   /* Layout */
   --panel-padding: 12px;
@@ -61,4 +61,158 @@
   /* Transition */
   --t-fast: 0.12s ease;
   --t: 0.2s ease;
+
+  /* Gaming-only glow (no-op in light) */
+  --glow: 0 0 0 transparent;
+}
+
+/* Dark theme — neutral near-black surfaces (no blue tint), low-glare */
+:root[data-theme='dark'] {
+  --bg-app: #0a0a0a;
+  --bg-panel: #141414;
+  --bg-panel-2: #1c1c1c;
+  --bg-timeline: #0d0d0d;
+  --bg-track: #151515;
+  --bg-track-alt: #191919;
+  --bg-elevated: #171717;
+  --bg-overlay: rgba(0, 0, 0, 0.74);
+
+  /* Borders lifted toward white for clearer structure on the blacker bg. */
+  --border: #3a3a3a;
+  --border-soft: #2b2b2b;
+  --border-strong: #4e4e4e;
+
+  --text: #ededed;
+  --text-dim: #a2a2a2;
+  --text-muted: #6c6c6c;
+  --text-inverse: #0a0a0a;
+
+  --accent: #0aaefd;
+  --accent-hover: #3fc0ff;
+  --accent-soft: rgba(10, 174, 253, 0.18);
+
+  --clip-video: #5b9dff;
+  --clip-video-bg: rgba(91, 157, 255, 0.22);
+  --clip-overlay: #ffb547;
+  --clip-overlay-bg: rgba(255, 181, 71, 0.22);
+  --clip-audio: #4ade80;
+  --clip-audio-bg: rgba(74, 222, 128, 0.22);
+
+  --beat-line: rgba(10, 174, 253, 0.45);
+  --playhead: #0aaefd;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+/* Gaming theme — dark base + saturated accents + soft glow.
+   Accent colors and clip colors come from inline CSS custom properties
+   set by applyTheme() at runtime, so this rule only owns the surfaces. */
+:root[data-theme='gaming'] {
+  --bg-app: #0a0014;
+  --bg-panel: #11091f;
+  --bg-panel-2: #180f2b;
+  --bg-timeline: #0d0620;
+  --bg-track: #150b28;
+  --bg-track-alt: #1a0f30;
+  --bg-elevated: #150b28;
+  --bg-overlay: rgba(8, 0, 18, 0.78);
+
+  --border: #2a1248;
+  --border-soft: #20103a;
+  --border-strong: #3d1d65;
+
+  --text: #f4eaff;
+  --text-dim: #b8a8d8;
+  --text-muted: #7a6a98;
+  --text-inverse: #0a0014;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.6);
+  --shadow: 0 2px 14px rgba(0, 0, 0, 0.7);
+  --shadow-lg: 0 18px 44px rgba(0, 0, 0, 0.8);
+
+  --glow: 0 0 12px var(--accent-soft);
+}
+
+:root[data-theme='gaming'] button:focus-visible,
+:root[data-theme='gaming'] input:focus-visible,
+:root[data-theme='gaming'] select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px var(--accent-soft), 0 0 16px var(--accent-soft);
+}
+
+/* RGB-keyboard style hue cycle.
+   @property registers --rgb-hue as an interpolable angle so the keyframe
+   animation smoothly sweeps the hue. The HSL expressions below feed the
+   running angle into accent, playhead, clip-video, clip-overlay, clip-audio
+   and beat-line, each offset by 60-120deg to keep the palette readable. */
+@property --rgb-hue {
+  syntax: '<angle>';
+  inherits: true;
+  initial-value: 0deg;
+}
+
+@keyframes fce-rgb-cycle {
+  from { --rgb-hue: 0deg; }
+  to   { --rgb-hue: 360deg; }
+}
+
+:root[data-rgb-cycle] {
+  animation: fce-rgb-cycle linear infinite;
+}
+
+:root[data-rgb-cycle='slow']   { animation-duration: 24s; }
+:root[data-rgb-cycle='normal'] { animation-duration: 8s;  }
+:root[data-rgb-cycle='fast']   { animation-duration: 3s;  }
+
+/* Per-target attribute scopes. Each rule only applies when both the parent
+   data-rgb-cycle attribute (driving the animation) AND the corresponding
+   data-rgb-<target> attribute are present, so the user can pick which
+   layers of the UI participate in the hue cycle. */
+
+:root[data-rgb-cycle][data-rgb-accent] {
+  --accent:        hsl(var(--rgb-hue) 100% 60%);
+  --accent-hover:  hsl(var(--rgb-hue) 100% 68%);
+  --accent-soft:   hsl(var(--rgb-hue) 100% 60% / 0.22);
+  --playhead:      hsl(var(--rgb-hue) 100% 60%);
+  --beat-line:     hsl(var(--rgb-hue) 100% 60% / 0.45);
+}
+
+:root[data-rgb-cycle][data-rgb-clip] {
+  --clip-video:      hsl(calc(var(--rgb-hue) + 120deg) 100% 60%);
+  --clip-video-bg:   hsl(calc(var(--rgb-hue) + 120deg) 100% 60% / 0.22);
+  --clip-overlay:    hsl(calc(var(--rgb-hue) + 60deg)  100% 60%);
+  --clip-overlay-bg: hsl(calc(var(--rgb-hue) + 60deg)  100% 60% / 0.22);
+  --clip-audio:      hsl(calc(var(--rgb-hue) + 240deg) 100% 60%);
+  --clip-audio-bg:   hsl(calc(var(--rgb-hue) + 240deg) 100% 60% / 0.22);
+}
+
+/* Surfaces — dark hue-tinted base (lightness 5-11%) so the room is "lit"
+   without crushing text legibility. */
+:root[data-rgb-cycle][data-rgb-bg] {
+  --bg-app:       hsl(var(--rgb-hue) 70% 5%);
+  --bg-panel:     hsl(var(--rgb-hue) 60% 8%);
+  --bg-panel-2:   hsl(var(--rgb-hue) 55% 11%);
+  --bg-timeline:  hsl(var(--rgb-hue) 65% 6%);
+  --bg-track:     hsl(var(--rgb-hue) 55% 9%);
+  --bg-track-alt: hsl(var(--rgb-hue) 55% 11%);
+  --bg-elevated:  hsl(var(--rgb-hue) 55% 10%);
+}
+
+/* Borders — lifted lightness so they pop against the dark hue-tinted bg.
+   Saturation is reduced so they read as structure, not accent. */
+:root[data-rgb-cycle][data-rgb-border] {
+  --border:        hsl(var(--rgb-hue) 55% 42%);
+  --border-soft:   hsl(var(--rgb-hue) 50% 30%);
+  --border-strong: hsl(var(--rgb-hue) 65% 55%);
+}
+
+:root[data-rgb-cycle][data-rgb-glow] {
+  --glow: 0 0 16px hsl(var(--rgb-hue) 100% 60% / 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-rgb-cycle] { animation: none; }
 }

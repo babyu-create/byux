@@ -30,3 +30,8 @@
 .hidden {
   opacity: 0.5;
 }
+
+.dragOver {
+  outline: 2px solid var(--accent, #6ea8fe);
+  outline-offset: -2px;
+}

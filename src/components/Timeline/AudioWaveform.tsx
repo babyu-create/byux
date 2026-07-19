@@ -68,7 +68,7 @@ export function AudioWaveform({
 
     // Overlay beat tick lines.
     if (showBeats && asset.beats && asset.beats.length > 0) {
-      ctx.fillStyle = 'rgba(255, 59, 48, 0.85)';
+      ctx.fillStyle = 'rgba(10, 174, 253, 0.85)';
       const visibleDur = trimEnd - trimStart;
       if (visibleDur > 0) {
         for (const b of asset.beats) {

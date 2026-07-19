@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Settings, Keyboard, Palette, Mic, AlertTriangle, RotateCcw } from 'lucide-react';
 import {
   ACTIONS,
   DEFAULT_BINDINGS,
@@ -10,13 +11,17 @@ import {
   setBinding,
   subscribeBindings,
 } from '../../lib/keybindings';
+import { ThemeSettings } from './ThemeSettings';
 import styles from './SettingsDialog.module.css';
+
+type SettingsTab = 'shortcuts' | 'theme';
 
 interface SettingsDialogProps {
   onClose: () => void;
 }
 
 export function SettingsDialog({ onClose }: SettingsDialogProps) {
+  const [tab, setTab] = useState<SettingsTab>('shortcuts');
   const [bindings, setBindingsState] = useState(() => getBindings());
   const [recordingId, setRecordingId] = useState<ActionId | null>(null);
   const [conflictWarning, setConflictWarning] = useState<string | null>(null);
@@ -67,7 +72,10 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
     <div className={styles.backdrop} role="dialog" aria-modal="true" onClick={onClose}>
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div className={styles.header}>
-          <span className={styles.title}>⚙ ショートカット設定</span>
+          <span className={styles.title} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <Settings size={16} strokeWidth={2} aria-hidden="true" />
+            設定
+          </span>
           <button
             type="button"
             className={styles.closeBtn}
@@ -78,15 +86,51 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
           </button>
         </div>
 
-        {recordingId ? (
-          <div className={styles.recordingBanner}>
-            🎙 新しいキーを押してください (Escでキャンセル)
+        <div className={styles.tabBar} role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'shortcuts'}
+            className={`${styles.tabBtn} ${tab === 'shortcuts' ? styles.tabActive : ''}`}
+            onClick={() => setTab('shortcuts')}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <Keyboard size={14} strokeWidth={2} aria-hidden="true" />
+            ショートカット
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'theme'}
+            className={`${styles.tabBtn} ${tab === 'theme' ? styles.tabActive : ''}`}
+            onClick={() => setTab('theme')}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <Palette size={14} strokeWidth={2} aria-hidden="true" />
+            テーマ
+          </button>
+        </div>
+
+        {tab === 'shortcuts' && recordingId ? (
+          <div className={styles.recordingBanner} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Mic size={15} strokeWidth={2} aria-hidden="true" />
+            新しいキーを押してください (Escでキャンセル)
           </div>
         ) : null}
-        {conflictWarning ? (
-          <div className={styles.conflictBanner}>⚠ {conflictWarning}</div>
+        {tab === 'shortcuts' && conflictWarning ? (
+          <div className={styles.conflictBanner} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertTriangle size={15} strokeWidth={2} aria-hidden="true" />
+            {conflictWarning}
+          </div>
         ) : null}
 
+        {tab === 'theme' ? (
+          <div className={styles.body}>
+            <ThemeSettings />
+          </div>
+        ) : null}
+
+        {tab === 'shortcuts' ? (
         <div className={styles.body}>
           {Object.entries(grouped).map(([group, items]) => (
             <section key={group} className={styles.group}>
@@ -114,7 +158,7 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                           title="デフォルトに戻す"
                           aria-label="リセット"
                         >
-                          ↺
+                          <RotateCcw size={13} strokeWidth={2} aria-hidden="true" />
                         </button>
                       ) : (
                         <span className={styles.resetSpacer} />
@@ -126,19 +170,24 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
             </section>
           ))}
         </div>
+        ) : null}
 
         <div className={styles.footer}>
-          <button
-            type="button"
-            className={styles.btnReset}
-            onClick={() => {
-              if (window.confirm('全てのショートカットをデフォルトに戻しますか？')) {
-                resetBindings();
-              }
-            }}
-          >
-            全てリセット
-          </button>
+          {tab === 'shortcuts' ? (
+            <button
+              type="button"
+              className={styles.btnReset}
+              onClick={() => {
+                if (window.confirm('全てのショートカットをデフォルトに戻しますか？')) {
+                  resetBindings();
+                }
+              }}
+            >
+              全てリセット
+            </button>
+          ) : (
+            <span />
+          )}
           <button type="button" className={styles.btnDone} onClick={onClose}>
             完了
           </button>
