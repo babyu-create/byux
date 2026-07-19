@@ -73,6 +73,10 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
   const width = Math.max(8, timeToPx(clipDuration(clip), zoom));
 
   const startDrag = (e: ReactPointerEvent<HTMLDivElement>, mode: DragMode) => {
+    // Left button only — otherwise a right-click both starts a "move" drag
+    // AND (since preventDefault on the pointerdown suppresses the follow-up
+    // contextmenu event) silently swallows the right-click menu entirely.
+    if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
     if (!asset) return;
@@ -113,7 +117,7 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
 
     const state = useProjectStore.getState();
     const useSnap = state.snapEnabled && !shiftKey;
-    let points = useSnap
+    const points = useSnap
       ? collectSnapPoints(state.clips, clip.id, state.playhead)
       : [];
 
@@ -130,7 +134,7 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
           for (const b of a.beats) {
             if (b < c.trimStart - 1e-6 || b > c.trimEnd + 1e-6) continue;
             const t = c.start + (b - c.trimStart) / speed;
-            points = [...points, { time: t, type: 'beat' }];
+            points.push({ time: t, type: 'beat' });
           }
         }
       }
@@ -138,7 +142,7 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
 
     if (drag.mode === 'move') {
       const desired = drag.origStart + deltaSec;
-      const duration = drag.origTrimEnd - drag.origTrimStart;
+      const duration = (drag.origTrimEnd - drag.origTrimStart) / drag.origSpeed;
       const result = useSnap
         ? snapClipMove(desired, duration, points, SNAP_THRESHOLD_PX, zoom)
         : { time: desired, snappedTo: null };
@@ -293,6 +297,7 @@ export const Clip = memo(function Clip({ clip, zoom, asset, kind, locked = false
         {showThumbnail && asset?.url ? (
           <video
             src={asset.url}
+            crossOrigin="anonymous"
             className={styles.thumbVideo}
             muted
             playsInline

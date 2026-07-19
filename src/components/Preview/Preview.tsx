@@ -67,6 +67,62 @@ const HUD_PRESET_TITLES: Record<HudPreset, string> = {
 };
 const HUD_PRESET_ORDER: HudPreset[] = ['valorant', 'cs2', 'apex', 'none'];
 
+interface PreviewAudioLayerProps {
+  clip: Clip;
+  asset: MediaAsset;
+  playhead: number;
+  isPlaying: boolean;
+  trackMuted: boolean;
+  gain: number;
+}
+
+function PreviewAudioLayer({
+  clip,
+  asset,
+  playhead,
+  isPlaying,
+  trackMuted,
+  gain,
+}: PreviewAudioLayerProps) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const speed = clip.speed ?? 1;
+    const target = clip.trimStart + (playhead - clip.start) * speed;
+    const clamped = Math.max(0, Math.min(asset.duration, target));
+    const drift = Math.abs(audio.currentTime - clamped);
+    if (drift > (isPlaying ? 0.35 : 1 / 30)) {
+      audio.currentTime = clamped;
+    }
+    audio.playbackRate = Math.max(0.0625, Math.min(4, speed));
+    const volume = clip.volume ?? 1;
+    audio.volume = Math.max(0, Math.min(1, volume * gain));
+    audio.muted = trackMuted || (clip.muted ?? false) || volume === 0;
+    if (isPlaying) {
+      audio.play().catch(() => {});
+    } else {
+      audio.pause();
+    }
+  }, [asset.duration, clip, gain, isPlaying, playhead, trackMuted]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    return () => audio?.pause();
+  }, []);
+
+  return (
+    <audio
+      ref={audioRef}
+      src={asset.url}
+      crossOrigin="anonymous"
+      preload="auto"
+      style={{ display: 'none' }}
+    />
+  );
+}
+
 export function Preview() {
   const fallbackAsset = useSelectedAsset();
   const assets = useMediaStore((s) => s.assets);
@@ -92,12 +148,11 @@ export function Preview() {
   const videoTrackHidden = videoTrack?.hidden ?? false;
   const videoTrackMuted = videoTrack?.muted ?? false;
 
-  const audioTrack = useMemo(
-    () => tracks.find((t) => t.kind === 'audio') ?? null,
+  const audioTracks = useMemo(
+    () => tracks.filter((track) => track.kind === 'audio'),
     [tracks],
   );
-  const audioTrackId = audioTrack?.id ?? null;
-  const audioTrackMuted = audioTrack?.muted ?? false;
+  const bgmTrackId = audioTracks[0]?.id ?? null;
 
   const activeClip = useMemo<Clip | null>(() => {
     if (!videoTrackId) return null;
@@ -122,20 +177,18 @@ export function Preview() {
   const showFallback = clips.length === 0 && fallbackAsset?.kind === 'video';
   const displayAsset: MediaAsset | null = activeAsset ?? (showFallback ? fallbackAsset : null);
 
-  // Find the active audio clip at the playhead.
-  const activeAudioClip = useMemo<Clip | null>(() => {
-    if (!audioTrackId) return null;
-    return (
-      clips.find((c) => {
-        if (c.trackId !== audioTrackId) return false;
-        const end = c.start + clipDuration(c);
-        return playhead >= c.start - 1e-6 && playhead < end - 1e-6;
-      }) ?? null
-    );
-  }, [clips, audioTrackId, playhead]);
-  const activeAudioAsset = activeAudioClip
-    ? (assetMap[activeAudioClip.assetId] ?? null)
-    : null;
+  // One active clip per audio lane can play concurrently (BGM + SE + ...).
+  const activeAudioLayers = useMemo(() => {
+    return audioTracks.flatMap((track) => {
+      const clip = clips.find((candidate) => {
+        if (candidate.trackId !== track.id) return false;
+        const end = candidate.start + clipDuration(candidate);
+        return playhead >= candidate.start - 1e-6 && playhead < end - 1e-6;
+      });
+      const asset = clip ? assetMap[clip.assetId] : undefined;
+      return clip && asset ? [{ track, clip, asset }] : [];
+    });
+  }, [assetMap, audioTracks, clips, playhead]);
 
   // BGM auto-ducking (Phase P5, preview best-effort). Project the kill markers
   // onto the timeline through the VIDEO clips (each at its own clip.start, since
@@ -314,9 +367,11 @@ export function Preview() {
   }, [activeClip?.colorGrade]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
   const playingRef = useRef(isPlaying);
-  playingRef.current = isPlaying;
+
+  useEffect(() => {
+    playingRef.current = isPlaying;
+  }, [isPlaying]);
 
   // HUD preset for the motion blur canvas. Each preset wraps a per-game
   // set of view-locked UI zones. 'valorant' (default) preserves the
@@ -329,68 +384,6 @@ export function Preview() {
   // preset the user picks here — see projectStore.hudPreset.
   const hudPreset = useProjectStore((s) => s.hudPreset);
   const setHudPreset = useProjectStore((s) => s.setHudPreset);
-
-
-  // Sync audio element to active audio clip + playhead (similar to video).
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !activeAudioAsset) return;
-    const speed = activeAudioClip?.speed ?? 1;
-    const target = activeAudioClip
-      ? activeAudioClip.trimStart + (playhead - activeAudioClip.start) * speed
-      : 0;
-    const clamped = Math.max(0, Math.min(activeAudioAsset.duration, target));
-    // Reseeking the <audio> element re-buffers it (audible click). During
-    // playback the element runs on its own clock and the playhead follows the
-    // video (the master), so correcting the few-ms drift EVERY frame produced
-    // continuous clicks that sounded like the BGM was distorting. Mirror the
-    // video: tight sync only while scrubbing; while playing, reseek only on a
-    // genuine jump (clip change / manual seek), not normal clock drift.
-    const drift = Math.abs(audio.currentTime - clamped);
-    if (drift > (isPlaying ? 0.35 : 1 / 30)) {
-      audio.currentTime = clamped;
-    }
-    audio.playbackRate = Math.max(0.0625, Math.min(4, speed));
-    const v = activeAudioClip?.volume ?? 1;
-    // BGM auto-ducking (preview best-effort): the active audio clip lives on the
-    // FIRST audio track (audioTrackId = the BGM lane), so dip its volume by the
-    // live duck gain around kill moments — matching the export's BGM-only duck.
-    const bgmGain = duckActive ? duckGain : 1;
-    audio.volume = Math.max(0, Math.min(1, v * bgmGain));
-    audio.muted = audioTrackMuted || (activeAudioClip?.muted ?? false) || v === 0;
-    if (isPlaying) {
-      audio.play().catch(() => {});
-    } else {
-      audio.pause();
-    }
-    // Cleanup: ensure audio is paused when the effect tears down (clip
-    // switch, asset swap, component unmount). Without this, briefly two
-    // <audio> elements can play concurrently between react's render and
-    // unmount of the old keyed element.
-    return () => {
-      if (audio && !audio.paused) {
-        audio.pause();
-      }
-    };
-  }, [
-    activeAudioClip?.id,
-    activeAudioAsset?.id,
-    playhead,
-    isPlaying,
-    audioTrackMuted,
-    activeAudioAsset,
-    activeAudioClip,
-    duckActive,
-    duckGain,
-  ]);
-
-  // Pause audio when no active audio clip
-  useEffect(() => {
-    if (!activeAudioClip || !activeAudioAsset) {
-      const audio = audioRef.current;
-      if (audio) audio.pause();
-    }
-  }, [activeAudioClip, activeAudioAsset]);
 
   // Seek video to match playhead when not playing (smooth scrub).
   useEffect(() => {
@@ -539,8 +532,7 @@ export function Preview() {
     rafId = requestAnimationFrame(step);
     return () => {
       cancelAnimationFrame(rafId);
-      const v = videoRef.current;
-      if (v) v.pause();
+      video.pause();
     };
   }, [isPlaying, videoTrackId]);
 
@@ -718,15 +710,17 @@ export function Preview() {
         </div>
       </div>
 
-      {activeAudioAsset ? (
-        <audio
-          key={activeAudioAsset.id}
-          ref={audioRef}
-          src={activeAudioAsset.url}
-          preload="auto"
-          style={{ display: 'none' }}
+      {activeAudioLayers.map(({ track, clip, asset }) => (
+        <PreviewAudioLayer
+          key={`${track.id}:${clip.id}`}
+          clip={clip}
+          asset={asset}
+          playhead={playhead}
+          isPlaying={isPlaying}
+          trackMuted={track.muted}
+          gain={track.id === bgmTrackId && duckActive ? duckGain : 1}
         />
-      ) : null}
+      ))}
 
       <div className={styles.stage}>
         <div className={styles.frame} data-aspect={aspectRatio}>
@@ -752,6 +746,7 @@ export function Preview() {
                   key={displayAsset?.id}
                   ref={videoRef}
                   src={displayAsset?.url}
+                  crossOrigin="anonymous"
                   className={styles.video}
                   style={videoStyle}
                   playsInline

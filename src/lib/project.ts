@@ -18,6 +18,10 @@ export interface ProjectAssetRef {
   size: number;
   kind: 'video' | 'audio';
   duration: number;
+  width?: number;
+  height?: number;
+  /** Absolute disk path (Electron only) — enables auto-relink on load. */
+  path?: string;
 }
 
 export interface ProjectFile {
@@ -76,9 +80,12 @@ export function serialiseProject(input: SerialiseInput): ProjectFile {
     assets: input.assets.map((a) => ({
       id: a.id,
       name: a.name,
-      size: a.file.size,
+      size: a.size,
       kind: a.kind,
       duration: a.duration,
+      ...(a.width !== undefined ? { width: a.width } : null),
+      ...(a.height !== undefined ? { height: a.height } : null),
+      ...(a.path ? { path: a.path } : null),
     })),
     createdAt: new Date().toISOString(),
   };
@@ -108,6 +115,13 @@ export function downloadProjectFile(project: ProjectFile, filename?: string): vo
 const finiteNumber = z.number().refine((n) => Number.isFinite(n), {
   message: '有限の数値が必要です',
 });
+const nonNegativeNumber = finiteNumber.refine((n) => n >= 0, {
+  message: '0以上の数値が必要です',
+});
+const positiveNumber = finiteNumber.refine((n) => n > 0, {
+  message: '0より大きい数値が必要です',
+});
+const shortString = z.string().max(512, '文字列が長すぎます');
 
 // IDs (asset/clip/track/range) are app-generated UUIDs or fixed track slugs.
 // Constrain them to a safe alphabet so a hand-edited file can't smuggle
@@ -116,15 +130,17 @@ const idString = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'IDの形式が不正
 
 const clipEffectSchema = z.object({
   type: z.enum(['fade-in', 'fade-out', 'motion-blur']),
-  duration: finiteNumber.optional(),
-  intensity: finiteNumber.optional(),
+  duration: nonNegativeNumber.optional(),
+  intensity: finiteNumber.refine((n) => n >= 0 && n <= 100, {
+    message: '0〜100の範囲が必要です',
+  }).optional(),
 });
 
 const overlaySchema = z.object({
   id: idString,
-  text: z.string(),
-  fontSize: finiteNumber,
-  color: z.string(),
+  text: z.string().max(10_000, 'テキストが長すぎます'),
+  fontSize: positiveNumber,
+  color: shortString,
   position: z.enum([
     'top-left', 'top-center', 'top-right',
     'center',
@@ -134,24 +150,24 @@ const overlaySchema = z.object({
   italic: z.boolean().optional(),
   outline: z.boolean().optional(),
   outlineColor: z.string().optional(),
-  fontFamily: z.string().optional(),
-  background: z.string().optional(),
+  fontFamily: shortString.optional(),
+  background: shortString.optional(),
   // Phase P3 decorative text + intro animation. All OPTIONAL so older projects
   // without these fields stay valid (backward compatible).
   decoration: z.enum(['none', 'glow', 'shadow', 'gradient']).optional(),
-  decorationColor: z.string().optional(),
-  strokeWidth: finiteNumber.optional(),
+  decorationColor: shortString.optional(),
+  strokeWidth: nonNegativeNumber.optional(),
   intro: z.enum(['none', 'fade', 'slide-up', 'slide-left', 'scale-in']).optional(),
-  introDuration: finiteNumber.optional(),
+  introDuration: nonNegativeNumber.optional(),
 });
 
 // Keyframe-animatable numeric property: a constant, or a list of keyframes.
 const keyframeSchema = z.object({
-  t: finiteNumber,
+  t: nonNegativeNumber,
   value: finiteNumber,
   easing: z.enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold']).optional(),
 });
-const animatableSchema = z.union([finiteNumber, z.array(keyframeSchema)]);
+const animatableSchema = z.union([finiteNumber, z.array(keyframeSchema).max(2_000)]);
 
 const clipTransformSchema = z.object({
   x: animatableSchema.optional(),
@@ -165,8 +181,8 @@ const clipTransformSchema = z.object({
 // older projects without a ramp stay valid (backward compatible). `from`/`to`
 // are relative velocity weights (> 0); easing reuses the keyframe easing set.
 const speedRampSchema = z.object({
-  from: finiteNumber,
-  to: finiteNumber,
+  from: positiveNumber.refine((n) => n <= 8, { message: '8以下が必要です' }),
+  to: positiveNumber.refine((n) => n <= 8, { message: '8以下が必要です' }),
   easing: z.enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold']).optional(),
 });
 
@@ -187,7 +203,7 @@ const colorGradeSchema = z.object({
 // transitions resolver clamps it to a safe range on use.
 const clipTransitionSchema = z.object({
   type: z.enum(['none', 'cut', 'fade', 'slide', 'zoom']),
-  duration: finiteNumber,
+  duration: nonNegativeNumber,
 });
 
 // Optional project-level BGM auto-ducking (Phase P5). Persisted but OPTIONAL so
@@ -204,26 +220,38 @@ const clipSchema = z.object({
   id: idString,
   trackId: idString,
   assetId: idString,
-  start: finiteNumber,
-  trimStart: finiteNumber,
-  trimEnd: finiteNumber,
-  speed: finiteNumber.optional(),
+  start: nonNegativeNumber,
+  trimStart: nonNegativeNumber,
+  trimEnd: positiveNumber,
+  speed: positiveNumber.refine((n) => n >= 0.0625 && n <= 4, {
+    message: '0.0625〜4の範囲が必要です',
+  }).optional(),
   speedRamp: speedRampSchema.optional(),
-  volume: finiteNumber.optional(),
+  volume: finiteNumber.refine((n) => n >= 0 && n <= 2, {
+    message: '0〜2の範囲が必要です',
+  }).optional(),
   muted: z.boolean().optional(),
   stretchToFill: z.boolean().optional(),
   transform: clipTransformSchema.optional(),
   colorGrade: colorGradeSchema.optional(),
   transitionIn: clipTransitionSchema.optional(),
   transitionOut: clipTransitionSchema.optional(),
-  effects: z.array(clipEffectSchema),
-  overlays: z.array(overlaySchema).optional(),
+  effects: z.array(clipEffectSchema).max(32),
+  overlays: z.array(overlaySchema).max(100).optional(),
+}).superRefine((clip, ctx) => {
+  if (clip.trimEnd <= clip.trimStart) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['trimEnd'],
+      message: 'trimEndはtrimStartより後である必要があります',
+    });
+  }
 });
 
 const trackSchema = z.object({
   id: idString,
   kind: z.enum(['video', 'overlay', 'audio']),
-  label: z.string(),
+  label: shortString,
   locked: z.boolean(),
   muted: z.boolean(),
   hidden: z.boolean(),
@@ -233,41 +261,130 @@ const markerSchema = z.object({
   id: idString,
   assetId: idString,
   time: finiteNumber,
-  label: z.string().optional(),
+  label: shortString.optional(),
 });
 
 const ioRangeSchema = z.object({
   id: idString,
   assetId: idString,
-  inTime: finiteNumber,
-  outTime: finiteNumber,
-  label: z.string().optional(),
+  inTime: nonNegativeNumber,
+  outTime: positiveNumber,
+  label: shortString.optional(),
+}).superRefine((range, ctx) => {
+  if (range.outTime <= range.inTime) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['outTime'],
+      message: 'outTimeはinTimeより後である必要があります',
+    });
+  }
 });
 
 const assetRefSchema = z.object({
   id: idString,
-  name: z.string(),
-  size: finiteNumber,
+  name: shortString,
+  size: z.number().int().safe().nonnegative(),
   kind: z.enum(['video', 'audio']),
-  duration: finiteNumber,
+  duration: nonNegativeNumber,
+  width: positiveNumber.optional(),
+  height: positiveNumber.optional(),
+  path: z.string().max(32_768, 'パスが長すぎます').optional(),
 });
 
 const projectFileSchema = z.object({
   version: z.literal(1),
   app: z.enum(['highlight-maker', 'fps-clip-editor']),
-  name: z.string(),
+  name: shortString,
   aspectRatio: z.enum(['16:9', '9:16']),
   fps: z.union([z.literal(30), z.literal(60)]),
   resolution: z.enum(['720p', '1080p']),
-  tracks: z.array(trackSchema),
-  clips: z.array(clipSchema),
-  markers: z.array(markerSchema),
-  ioRanges: z.array(ioRangeSchema),
-  preRollSec: finiteNumber,
-  postRollSec: finiteNumber,
-  assets: z.array(assetRefSchema),
-  createdAt: z.string(),
+  tracks: z.array(trackSchema).max(64),
+  clips: z.array(clipSchema).max(10_000),
+  markers: z.array(markerSchema).max(100_000),
+  ioRanges: z.array(ioRangeSchema).max(100_000),
+  preRollSec: nonNegativeNumber.refine((n) => n <= 60, { message: '60秒以下が必要です' }),
+  postRollSec: nonNegativeNumber.refine((n) => n <= 60, { message: '60秒以下が必要です' }),
+  assets: z.array(assetRefSchema).max(10_000),
+  createdAt: shortString,
   audioDucking: audioDuckingSchema.optional(),
+}).superRefine((project, ctx) => {
+  const reportDuplicates = (
+    values: string[],
+    path: 'tracks' | 'clips' | 'markers' | 'ioRanges' | 'assets',
+  ) => {
+    const seen = new Set<string>();
+    values.forEach((id, index) => {
+      if (seen.has(id)) {
+        ctx.addIssue({ code: 'custom', path: [path, index, 'id'], message: 'IDが重複しています' });
+      }
+      seen.add(id);
+    });
+  };
+  reportDuplicates(project.tracks.map((item) => item.id), 'tracks');
+  reportDuplicates(project.clips.map((item) => item.id), 'clips');
+  reportDuplicates(project.markers.map((item) => item.id), 'markers');
+  reportDuplicates(project.ioRanges.map((item) => item.id), 'ioRanges');
+  reportDuplicates(project.assets.map((item) => item.id), 'assets');
+
+  const tracksById = new Map(project.tracks.map((track) => [track.id, track]));
+  const assetsById = new Map(project.assets.map((asset) => [asset.id, asset]));
+  project.clips.forEach((clip, index) => {
+    const track = tracksById.get(clip.trackId);
+    const asset = assetsById.get(clip.assetId);
+    if (!track) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['clips', index, 'trackId'],
+        message: '参照先トラックが存在しません',
+      });
+    }
+    if (!asset) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['clips', index, 'assetId'],
+        message: '参照先素材が存在しません',
+      });
+    } else {
+      const compatible = asset.kind === 'audio'
+        ? track?.kind === 'audio'
+        : track?.kind === 'video' || track?.kind === 'overlay';
+      if (track && !compatible) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['clips', index, 'assetId'],
+          message: '素材とトラックの種類が一致しません',
+        });
+      }
+      if (clip.trimEnd > asset.duration + 1e-6) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['clips', index, 'trimEnd'],
+          message: '素材の長さを超えています',
+        });
+      }
+    }
+  });
+
+  project.markers.forEach((marker, index) => {
+    const asset = assetsById.get(marker.assetId);
+    if (!asset || marker.time < 0 || marker.time > asset.duration + 1e-6) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['markers', index, 'time'],
+        message: 'マーカーの素材または時刻が不正です',
+      });
+    }
+  });
+  project.ioRanges.forEach((range, index) => {
+    const asset = assetsById.get(range.assetId);
+    if (!asset || range.outTime > asset.duration + 1e-6) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['ioRanges', index, 'outTime'],
+        message: 'レンジの素材または時刻が不正です',
+      });
+    }
+  });
 });
 
 export function parseProjectFile(text: string): ProjectFile {
@@ -318,7 +435,7 @@ export function buildAssetIdMap(
   const missing: string[] = [];
   for (const pa of projectAssets) {
     const match = currentAssets.find(
-      (a) => a.name === pa.name && a.file.size === pa.size,
+      (a) => a.name === pa.name && a.size === pa.size,
     );
     if (match) {
       idMap[pa.id] = match.id;

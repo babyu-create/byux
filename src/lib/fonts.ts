@@ -1,5 +1,5 @@
 // Curated font catalog for text overlays.
-// All fonts are loaded from Google Fonts in index.html.
+// Optional Google fonts are loaded only when an overlay actually uses one.
 // `stack` is the full CSS font-family fallback chain used when rendering.
 
 export type FontCategory = 'jp' | 'serif' | 'sans' | 'mono' | 'gaming';
@@ -66,6 +66,37 @@ export function getFontStack(id: string | undefined): string {
     return FONT_BY_ID.get(DEFAULT_FONT_ID)!.stack;
   }
   return FONT_BY_ID.get(id)?.stack ?? id;
+}
+
+const requestedFonts = new Map<string, Promise<void>>();
+
+/**
+ * Load one optional overlay font on demand. Editing and export remain fully
+ * usable offline because every catalog entry has a system fallback.
+ */
+export function ensureFontLoaded(id: string | undefined): Promise<void> {
+  const family = id && FONT_BY_ID.has(id) ? id : DEFAULT_FONT_ID;
+  const existing = requestedFonts.get(family);
+  if (existing) return existing;
+  if (typeof document === 'undefined') return Promise.resolve();
+
+  const promise = new Promise<void>((resolve) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.crossOrigin = 'anonymous';
+    link.href =
+      `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family).replaceAll('%20', '+')}` +
+      '&display=swap';
+    const finish = () => resolve();
+    link.addEventListener('load', finish, { once: true });
+    link.addEventListener('error', finish, { once: true });
+    document.head.appendChild(link);
+    // Offline requests can remain pending for a long time; the system fallback
+    // should render immediately instead of delaying an export.
+    window.setTimeout(finish, 3000);
+  });
+  requestedFonts.set(family, promise);
+  return promise;
 }
 
 export const FONT_CATEGORY_LABELS: Record<FontCategory, string> = {

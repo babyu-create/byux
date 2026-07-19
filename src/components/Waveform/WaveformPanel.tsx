@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useProjectStore, useTimelineDuration } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import type { Clip, MediaAsset } from '../../lib/types';
+import { clipDuration } from '../../lib/timeline';
 import styles from './WaveformPanel.module.css';
 
 interface CanvasSize {
@@ -37,12 +38,12 @@ const WaveformPlayhead = memo(function WaveformPlayhead({
 const WaveformCanvas = memo(function WaveformCanvas({
   audioClips,
   assets,
-  audioDuration,
+  visibleDuration,
   size,
 }: {
   audioClips: Clip[];
   assets: MediaAsset[];
-  audioDuration: number;
+  visibleDuration: number;
   size: CanvasSize;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -58,7 +59,7 @@ const WaveformCanvas = memo(function WaveformCanvas({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, size.width, size.height);
 
-    const pps = size.width / audioDuration;
+    const pps = size.width / visibleDuration;
     const midY = size.height / 2;
     const halfHMax = size.height / 2 - 4;
 
@@ -71,9 +72,10 @@ const WaveformCanvas = memo(function WaveformCanvas({
     for (const clip of audioClips) {
       const asset = assetById.get(clip.assetId);
       if (!asset) continue;
-      const clipLenSec = clip.trimEnd - clip.trimStart;
+      const sourceLenSec = Math.max(0, clip.trimEnd - clip.trimStart);
+      const timelineLenSec = clipDuration(clip);
       const x0 = clip.start * pps;
-      const x1 = (clip.start + clipLenSec) * pps;
+      const x1 = (clip.start + timelineLenSec) * pps;
       const clipW = Math.max(1, x1 - x0);
 
       ctx.fillStyle = accentBg;
@@ -106,16 +108,16 @@ const WaveformCanvas = memo(function WaveformCanvas({
         ctx.fillRect(x0, midY - 0.5, clipW, 1);
       }
 
-      if (asset.beats && asset.beats.length > 0) {
+      if (asset.beats && asset.beats.length > 0 && sourceLenSec > 0) {
         ctx.fillStyle = beatColor;
         for (const b of asset.beats) {
           if (b < clip.trimStart - 1e-6 || b > clip.trimEnd + 1e-6) continue;
-          const px = x0 + ((b - clip.trimStart) / clipLenSec) * clipW;
+          const px = x0 + ((b - clip.trimStart) / sourceLenSec) * clipW;
           ctx.fillRect(px, 0, 1.2, size.height);
         }
       }
     }
-  }, [audioClips, assets, audioDuration, size]);
+  }, [audioClips, assets, size, visibleDuration]);
 
   return (
     <canvas
@@ -152,11 +154,12 @@ export function WaveformPanel() {
   const audioDuration = useMemo(() => {
     if (audioClips.length === 0) return 0;
     return Math.max(
-      ...audioClips.map((c) => c.start + Math.max(0, c.trimEnd - c.trimStart)),
+      ...audioClips.map((c) => c.start + clipDuration(c)),
     );
   }, [audioClips]);
 
   const hasAudio = audioClips.length > 0 && audioDuration > 0;
+  const visibleDuration = Math.max(audioDuration, totalDuration);
 
   // Track container size — canvas needs explicit pixel dimensions.
   useEffect(() => {
@@ -171,7 +174,7 @@ export function WaveformPanel() {
   }, []);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!hasAudio) return;
+    if (e.button !== 0 || !hasAudio) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     // Map click-x to timeline time using the canvas's visible duration —
@@ -182,7 +185,6 @@ export function WaveformPanel() {
     // The result: clicking the right edge of the waveform when video is
     // longer than audio always landed at audioDuration, never into the
     // video-only tail.
-    const visibleDuration = Math.max(audioDuration, totalDuration);
     const t = (x / rect.width) * visibleDuration;
     setPlayhead(Math.max(0, Math.min(visibleDuration, t)));
   };
@@ -210,10 +212,10 @@ export function WaveformPanel() {
           <WaveformCanvas
             audioClips={audioClips}
             assets={assets}
-            audioDuration={audioDuration}
+            visibleDuration={visibleDuration}
             size={size}
           />
-          <WaveformPlayhead visibleDuration={Math.max(audioDuration, totalDuration)} />
+          <WaveformPlayhead visibleDuration={visibleDuration} />
         </div>
       )}
     </div>

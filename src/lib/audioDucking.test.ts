@@ -270,7 +270,6 @@ describe('buildDuckVolumeExpr', () => {
     const ffif = (c: number, a: number, b: number) => (c ? a : b);
     const between = (x: number, lo: number, hi: number) => (x >= lo && x <= hi ? 1 : 0);
     const lt = (x: number, y: number) => (x < y ? 1 : 0);
-    // eslint-disable-next-line no-new-func
     const fn = Function('t', 'min', 'max', 'ffif', 'between', 'lt', `return (${js});`);
     return fn(t, Math.min, Math.max, ffif, between, lt) as number;
   };

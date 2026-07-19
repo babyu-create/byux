@@ -28,12 +28,12 @@ export function CollapsibleSection({
   id,
   title,
   children,
-  active = false,
+  active,
   badge,
   defaultOpen,
 }: CollapsibleSectionProps) {
   // Default: open if pinned-open OR currently active; otherwise collapsed.
-  const initial = defaultOpen ?? active;
+  const initial = defaultOpen ?? active ?? false;
   const [open, setOpen] = useState(() => getSectionOpenPref(id, initial));
 
   const toggle = () => {
@@ -44,6 +44,11 @@ export function CollapsibleSection({
     });
   };
 
+  // Only sections with an actual on/off or count concept get a badge — a
+  // section with neither `active` nor `badge` passed (kill markers, presets,
+  // asset-info, …) has nothing to report, so a meaningless "OFF" pill would
+  // just be noise.
+  const showBadge = badge !== undefined || active !== undefined;
   const badgeText = badge ?? (active ? 'ON' : 'OFF');
   const bodyId = `section-body-${id}`;
 
@@ -60,9 +65,11 @@ export function CollapsibleSection({
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
         <span className={styles.title}>{title}</span>
-        <span className={`${styles.badge} ${active ? styles.badgeOn : ''}`}>
-          {badgeText}
-        </span>
+        {showBadge ? (
+          <span className={`${styles.badge} ${active ? styles.badgeOn : ''}`}>
+            {badgeText}
+          </span>
+        ) : null}
       </button>
       {open ? (
         <div id={bodyId} className={styles.body}>

@@ -1,6 +1,7 @@
 import { create, useStore } from 'zustand';
 import { temporal } from 'zundo';
-import type { Clip, IORange, KillMarker, PendingIn, Track } from '../lib/types';
+import type { Clip, IORange, KillMarker, MediaAsset, PendingIn, Track } from '../lib/types';
+import { useMediaStore } from './mediaStore';
 import type { HudPreset } from '../lib/motionBlurCore';
 import type { AudioDucking } from '../lib/audioDucking';
 import { applyClipLook } from '../lib/presets';
@@ -15,8 +16,6 @@ import {
 
 const DEFAULT_TRACKS: Track[] = [
   { id: 'track-video', kind: 'video', label: '映像メイン', locked: false, muted: false, hidden: false },
-  { id: 'track-video-2', kind: 'video', label: '映像サブ', locked: false, muted: false, hidden: false },
-  { id: 'track-overlay', kind: 'overlay', label: 'オーバーレイ', locked: false, muted: false, hidden: false },
   { id: 'track-audio', kind: 'audio', label: 'BGM', locked: false, muted: false, hidden: false },
   { id: 'track-audio-2', kind: 'audio', label: 'SE', locked: false, muted: false, hidden: false },
 ];
@@ -184,6 +183,10 @@ interface ProjectStoreState {
   expectedAssets: import('../lib/project').ProjectAssetRef[];
   remapAssetIds: (idMap: Record<string, string>) => void;
   clearExpectedAssets: () => void;
+  /** Immutable document snapshot from the last successful save/load. */
+  savedDocument: DocState | null;
+  /** Serialized media-library identity from the last successful save/load. */
+  savedAssetsFingerprint: string;
 }
 
 const MIN_ZOOM = 0.25;
@@ -236,6 +239,21 @@ function docEqual(a: DocState, b: DocState): boolean {
   );
 }
 
+function assetsFingerprint(assets: MediaAsset[]): string {
+  return JSON.stringify(
+    assets.map((asset) => ({
+      id: asset.id,
+      name: asset.name,
+      size: asset.size,
+      kind: asset.kind,
+      duration: asset.duration,
+      width: asset.width,
+      height: asset.height,
+      path: asset.path,
+    })),
+  );
+}
+
 // Coalesce rapid edits (clip/slider drags fire ~60/s) into a single history
 // entry by debouncing when temporal records. 150ms groups per-frame drags
 // while staying well under human undo-reaction time.
@@ -274,6 +292,8 @@ export const useProjectStore = create<ProjectStoreState>()(
   selectedRangeId: null,
   transientMessage: null,
   expectedAssets: [],
+  savedDocument: null,
+  savedAssetsFingerprint: '[]',
 
   addClipFromAsset: (assetId, trackId, durationSec, atTime) => {
     if (durationSec <= 0) return null;
@@ -1163,3 +1183,41 @@ export const useCanUndo = (): boolean =>
 /** Reactive: is there anything to redo? */
 export const useCanRedo = (): boolean =>
   useStore(useProjectStore.temporal, (s) => s.futureStates.length > 0);
+
+// --- Unsaved-changes tracking ------------------------------------------------
+// Compare the actual immutable document fields, not zundo history depth.
+// History recording is debounced and can branch after undo, so its array
+// length is neither immediate nor a unique identity for the current document.
+
+/** Call after a successful save (or load) to mark the current state as clean. */
+export const markProjectSaved = (): void => {
+  useProjectStore.setState({
+    savedDocument: partializeDoc(useProjectStore.getState()),
+    savedAssetsFingerprint: assetsFingerprint(useMediaStore.getState().assets),
+  });
+};
+
+/** Reactive: are there unsaved edits since the last save/load? */
+export const useIsDirty = (): boolean => {
+  const documentDirty = useProjectStore((s) =>
+    s.savedDocument === null ? false : !docEqual(partializeDoc(s), s.savedDocument),
+  );
+  const savedAssetsFingerprint = useProjectStore((s) => s.savedAssetsFingerprint);
+  const currentAssetsFingerprint = useMediaStore((s) => assetsFingerprint(s.assets));
+  return documentDirty || currentAssetsFingerprint !== savedAssetsFingerprint;
+};
+
+/** Non-hook form used by the main-window integration and regression tests. */
+export const isProjectDirty = (): boolean => {
+  const state = useProjectStore.getState();
+  const documentDirty =
+    state.savedDocument !== null &&
+    !docEqual(partializeDoc(state), state.savedDocument);
+  return (
+    documentDirty ||
+    assetsFingerprint(useMediaStore.getState().assets) !== state.savedAssetsFingerprint
+  );
+};
+
+// The initial empty document is the first clean baseline.
+markProjectSaved();

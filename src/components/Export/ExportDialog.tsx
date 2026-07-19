@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, FolderOpen, Play } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import {
@@ -7,7 +7,9 @@ import {
   getActiveCoreVariant,
   getActiveCoreThreadCount,
   resetFFmpeg,
+  type ExportQualityPreset,
 } from '../../lib/exporter';
+import { clipDuration } from '../../lib/timeline';
 import styles from './ExportDialog.module.css';
 
 interface ExportDialogProps {
@@ -96,6 +98,58 @@ function humanizeError(raw: string): HumanizedError {
   };
 }
 
+function getInitialCoreLabel(): string {
+  const variant = getActiveCoreVariant();
+  const threadCount = getActiveCoreThreadCount();
+  return variant === 'mt' ? `MT (${threadCount} threads)` : '';
+}
+
+function estimateExportBytes(
+  durationSeconds: number,
+  resolution: '720p' | '1080p',
+  fps: 30 | 60,
+  quality: ExportQualityPreset,
+): number {
+  const baseVideoBitrate =
+    resolution === '1080p'
+      ? (fps === 60 ? 16_000_000 : 10_000_000)
+      : (fps === 60 ? 9_000_000 : 6_000_000);
+  const multiplier = quality === 'high' ? 1.45 : quality === 'compact' ? 0.62 : 1;
+  const audioBitrate = quality === 'compact' ? 128_000 : 256_000;
+  return Math.ceil(Math.max(1, durationSeconds) * (baseVideoBitrate * multiplier + audioBitrate) / 8);
+}
+
+async function writeBlobToNative(
+  token: string,
+  blob: Blob,
+  onProgress: (fraction: number) => void,
+): Promise<string> {
+  const api = window.fce?.export;
+  if (!api) throw new Error('保存機能を利用できません');
+  const reader = blob.stream().getReader();
+  let offset = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // IPC receives an owned ArrayBuffer so a pooled/SharedArrayBuffer-backed
+      // view can never escape the renderer sandbox.
+      const chunk = new Uint8Array(value);
+      const result = await api.writeChunk(token, offset, chunk, false);
+      if (!result.ok) throw new Error(result.error ?? '動画ファイルへの保存に失敗しました');
+      offset += chunk.byteLength;
+      onProgress(blob.size > 0 ? offset / blob.size : 1);
+    }
+    const result = await api.writeChunk(token, offset, new Uint8Array(0), true);
+    if (!result.ok || !result.complete || !result.path) {
+      throw new Error(result.error ?? '動画ファイルを完了できませんでした');
+    }
+    return result.path;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export function ExportDialog({ onClose }: ExportDialogProps) {
   const clips = useProjectStore((s) => s.clips);
   const tracks = useProjectStore((s) => s.tracks);
@@ -111,6 +165,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
 
   const [resolution, setResolution] = useState<'720p' | '1080p'>(projectResolution);
   const [fps, setFps] = useState<30 | 60>(projectFps);
+  const [quality, setQuality] = useState<ExportQualityPreset>('recommended');
   const [motionBlur, setMotionBlur] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState(0);
@@ -118,19 +173,23 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<HumanizedError | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
   const [fileSizeMb, setFileSizeMb] = useState<number | null>(null);
   const [etaLabel, setEtaLabel] = useState<string>('');
   const [customFilename, setCustomFilename] = useState('');
+  const [fallbackFilename] = useState(() => `fps-clip-${Date.now()}.mp4`);
   const startTimeRef = useRef<number>(0);
   const [elapsedSec, setElapsedSec] = useState(0);
 
   // Derive core variant label for the badge (updates after FFmpeg loads).
-  const [coreLabel, setCoreLabel] = useState<string>('');
+  const [coreLabel, setCoreLabel] = useState<string>(getInitialCoreLabel);
 
   useEffect(() => {
     if (phase !== 'rendering') return;
     const id = window.setInterval(() => {
-      setElapsedSec((Date.now() - startTimeRef.current) / 1000);
+      const now = Date.now();
+      if (startTimeRef.current === 0) startTimeRef.current = now;
+      setElapsedSec((now - startTimeRef.current) / 1000);
       // Refresh the core variant badge while rendering (it may have just loaded).
       const v = getActiveCoreVariant();
       const tc = getActiveCoreThreadCount();
@@ -139,50 +198,75 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
     return () => window.clearInterval(id);
   }, [phase]);
 
-  // Update core badge on dialog open (in case FFmpeg was already loaded).
-  useEffect(() => {
-    const v = getActiveCoreVariant();
-    const tc = getActiveCoreThreadCount();
-    if (v === 'mt') {
-      setCoreLabel(`MT (${tc} threads)`);
-    }
-    // If ST but not loaded yet, leave blank — it will update during render.
-  }, []);
-
   useEffect(() => {
     return () => {
       if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     };
   }, [downloadUrl]);
 
-  const totalClips = clips.filter((c) => {
-    const t = tracks.find((tr) => tr.id === c.trackId);
-    return t?.kind === 'video';
-  }).length;
+  const mainVideoTrack = tracks.find((track) => track.kind === 'video');
+  const totalClips =
+    mainVideoTrack && !mainVideoTrack.hidden
+      ? clips.filter((clip) => clip.trackId === mainVideoTrack.id).length
+      : 0;
+  const exportDuration =
+    mainVideoTrack && !mainVideoTrack.hidden
+      ? clips
+          .filter((clip) => clip.trackId === mainVideoTrack.id)
+          .reduce((sum, clip) => sum + clipDuration(clip), 0)
+      : 0;
+  const estimatedBytes = estimateExportBytes(exportDuration, resolution, fps, quality);
+  const estimatedSizeMb = estimatedBytes / (1024 * 1024);
+
+  // Build the output filename: prefer customFilename, fallback to project name,
+  // then a timestamp.
+  const safeProjectName = (projectName ?? '').replace(/[\\/:*?"<>|]/g, '_').trim();
+  const defaultName = safeProjectName
+    ? `${safeProjectName}.mp4`
+    : fallbackFilename;
+  const downloadFilename = customFilename.trim() || defaultName;
 
   const isExportingRef = useRef(false);
 
   const handleStart = async () => {
     if (isExportingRef.current) return;
     isExportingRef.current = true;
+    let nativeToken: string | null = null;
+    try {
+      const nativeExport = window.fce?.export;
+      if (nativeExport) {
+        const destination = await nativeExport.chooseOutput({
+          suggestedName: downloadFilename,
+          estimatedBytes,
+        });
+        if (destination.canceled) return;
+        if (!destination.ok || !destination.token) {
+          throw new Error(destination.error ?? '動画の保存先を選択できませんでした');
+        }
+        nativeToken = destination.token;
+        setSavedPath(destination.path ?? null);
+      }
+
     setPhase('rendering');
     setProgress(0);
     setStage('開始中');
     setLogs([]);
     setError(null);
     setEtaLabel('');
+    setSavedPath(null);
     if (downloadUrl) {
       URL.revokeObjectURL(downloadUrl);
       setDownloadUrl(null);
     }
-    startTimeRef.current = Date.now();
+    startTimeRef.current = 0;
+    setElapsedSec(0);
 
-    try {
       const blob = await exportProject(
         { clips, tracks, assets, markers },
         {
           resolution,
           fps,
+          quality,
           aspectRatio,
           motionBlur,
           // Carry the preview's HUD preset into the export so the blur matches
@@ -224,11 +308,24 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           },
         },
       );
-      const url = URL.createObjectURL(blob);
-      setDownloadUrl(url);
+      if (nativeToken) {
+        setStage('動画ファイルを保存中');
+        const path = await writeBlobToNative(nativeToken, blob, (fraction) => {
+          setProgress(0.95 + Math.min(1, fraction) * 0.05);
+        });
+        nativeToken = null;
+        setSavedPath(path);
+      } else {
+        const url = URL.createObjectURL(blob);
+        setDownloadUrl(url);
+      }
       setFileSizeMb(blob.size / (1024 * 1024));
+      setProgress(1);
       setPhase('done');
     } catch (e) {
+      if (nativeToken) {
+        await window.fce?.export?.abandon(nativeToken);
+      }
       const rawMsg = e instanceof Error ? e.message : '不明なエラー';
       setError(humanizeError(rawMsg));
       setPhase('error');
@@ -251,14 +348,6 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
       void handleStart();
     }, 0);
   };
-
-  // Build the download filename: prefer customFilename, fallback to project name,
-  // then a timestamp.
-  const safeProjectName = (projectName ?? '').replace(/[\\/:*?"<>|]/g, '_').trim();
-  const defaultName = safeProjectName
-    ? `${safeProjectName}.mp4`
-    : `fps-clip-${Date.now()}.mp4`;
-  const downloadFilename = customFilename.trim() || defaultName;
 
   return (
     <div className={styles.backdrop} role="dialog" aria-modal="true">
@@ -305,6 +394,35 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
 
           {phase === 'idle' || phase === 'error' ? (
             <>
+              <div className={styles.optionRow}>
+                <span className={styles.optionLabel}>画質</span>
+                <div className={styles.qualityGrid}>
+                  <button
+                    type="button"
+                    className={`${styles.qualityBtn} ${quality === 'recommended' ? styles.qualityActive : ''}`}
+                    onClick={() => setQuality('recommended')}
+                  >
+                    <strong>おすすめ</strong>
+                    <small>画質と速さのバランス</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.qualityBtn} ${quality === 'high' ? styles.qualityActive : ''}`}
+                    onClick={() => setQuality('high')}
+                  >
+                    <strong>高画質</strong>
+                    <small>時間と容量を多めに使用</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.qualityBtn} ${quality === 'compact' ? styles.qualityActive : ''}`}
+                    onClick={() => setQuality('compact')}
+                  >
+                    <strong>軽量</strong>
+                    <small>共有しやすい小さめ容量</small>
+                  </button>
+                </div>
+              </div>
               <div className={styles.optionRow}>
                 <span className={styles.optionLabel}>解像度</span>
                 <div className={styles.btnGroup}>
@@ -375,6 +493,10 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                   maxLength={120}
                 />
               </div>
+              <div className={styles.estimate}>
+                約 {estimatedSizeMb < 10 ? estimatedSizeMb.toFixed(1) : Math.round(estimatedSizeMb)} MB
+                <span>（{exportDuration.toFixed(1)}秒の目安）</span>
+              </div>
 
               {error ? (
                 <div className={styles.error} role="alert">
@@ -429,7 +551,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             </>
           ) : null}
 
-          {phase === 'done' && downloadUrl ? (
+          {phase === 'done' ? (
             <div className={styles.doneBlock}>
               <div className={styles.doneIcon}><CheckCircle2 size={40} strokeWidth={1.8} aria-hidden="true" /></div>
               <div className={styles.doneText}>書き出し完了</div>
@@ -437,23 +559,37 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                 {fileSizeMb !== null ? `${fileSizeMb.toFixed(1)} MB` : ''}
                 {elapsedSec > 0 ? ` / ${elapsedSec.toFixed(1)}s` : ''}
               </div>
-              <div className={styles.filenameRow}>
-                <input
-                  type="text"
-                  className={styles.filenameInput}
-                  value={customFilename}
-                  placeholder={defaultName}
-                  onChange={(e) => setCustomFilename(e.target.value)}
-                  maxLength={120}
-                />
-              </div>
-              <a
-                className={styles.downloadBtn}
-                href={downloadUrl}
-                download={downloadFilename}
-              >
-                ダウンロード
-              </a>
+              {savedPath ? (
+                <>
+                  <div className={styles.savedPath} title={savedPath}>{savedPath}</div>
+                  <div className={styles.doneActions}>
+                    <button
+                      type="button"
+                      className={styles.downloadBtn}
+                      onClick={() => void window.fce?.export?.openFile()}
+                    >
+                      <Play size={16} aria-hidden="true" />
+                      動画を開く
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.secondaryAction}
+                      onClick={() => void window.fce?.export?.showInFolder()}
+                    >
+                      <FolderOpen size={16} aria-hidden="true" />
+                      フォルダを開く
+                    </button>
+                  </div>
+                </>
+              ) : downloadUrl ? (
+                <a
+                  className={styles.downloadBtn}
+                  href={downloadUrl}
+                  download={downloadFilename}
+                >
+                  ダウンロード
+                </a>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -491,7 +627,9 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             <button type="button" className={styles.btnPrimary} onClick={onClose}>
               閉じる
             </button>
-          ) : null}
+          ) : (
+            <span className={styles.renderingHint}>書き出し中はこの画面を閉じないでください</span>
+          )}
         </div>
       </div>
     </div>

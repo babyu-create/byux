@@ -36,6 +36,7 @@ export function useScrub(options: ScrubOptions = {}) {
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     draggingRef.current = true;

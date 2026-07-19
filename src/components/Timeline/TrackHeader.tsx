@@ -32,11 +32,9 @@ export const TrackHeader = memo(function TrackHeader({ track }: TrackHeaderProps
     <div
       className={`${styles.root} ${track.locked ? styles.locked : ''} ${track.hidden ? styles.hidden : ''}`}
       data-kind={track.kind}
+      title={track.label}
     >
-      <div className={styles.label}>
-        <span className={styles.dot} aria-hidden="true" />
-        <span className={styles.text}>{track.label}</span>
-      </div>
+      <span className={styles.dot} aria-hidden="true" />
       <div className={styles.controls}>
         <button
           type="button"

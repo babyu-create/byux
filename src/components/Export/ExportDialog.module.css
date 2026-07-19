@@ -142,6 +142,47 @@
   overflow: hidden;
 }
 
+.qualityGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.qualityBtn {
+  min-width: 0;
+  padding: 8px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  text-align: left;
+}
+
+.qualityBtn strong,
+.qualityBtn small {
+  display: block;
+}
+
+.qualityBtn strong {
+  margin-bottom: 3px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.qualityBtn small {
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.qualityActive {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel));
+}
+
+.qualityActive strong {
+  color: var(--accent);
+}
+
 .optBtn {
   padding: 8px 18px;
   font-size: 12px;
@@ -178,6 +219,19 @@
 
 .filenameInput::placeholder {
   color: var(--text-muted);
+}
+
+.estimate {
+  margin: -3px 0 12px 102px;
+  font: 600 11px/1.4 var(--font-mono);
+  color: var(--text);
+}
+
+.estimate span {
+  margin-left: 5px;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-weight: 400;
 }
 
 /* Error */
@@ -389,7 +443,10 @@
 }
 
 .downloadBtn {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   padding: 12px 28px;
   background: var(--accent);
   color: var(--text-inverse);
@@ -398,11 +455,49 @@
   font-weight: 700;
   font-size: 14px;
   transition: all var(--t-fast);
+  border: 0;
 }
 
 .downloadBtn:hover {
   background: var(--accent-hover);
   transform: translateY(-1px);
+}
+
+.savedPath {
+  max-width: 440px;
+  margin: 0 auto 14px;
+  padding: 8px 10px;
+  overflow: hidden;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font: 11px/1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.doneActions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+
+.secondaryAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 16px;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.secondaryAction:hover {
+  background: var(--bg-elevated);
 }
 
 /* Footer */
@@ -449,4 +544,10 @@
 .btnPrimary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.renderingHint {
+  margin-right: auto;
+  color: var(--text-muted);
+  font-size: 11px;
 }

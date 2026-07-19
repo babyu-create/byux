@@ -17,10 +17,95 @@ interface UpdaterAPI {
   installAndRestart(): Promise<unknown>;
 }
 
+export interface RecentProject {
+  path: string;
+  name: string;
+  lastOpenedAt: string;
+  available: boolean;
+}
+
+interface ProjectFileResult {
+  ok: boolean;
+  canceled?: boolean;
+  path?: string;
+  text?: string;
+  error?: string;
+}
+
+interface ProjectAPI {
+  openDialog(): Promise<ProjectFileResult>;
+  save(payload: {
+    text: string;
+    suggestedName: string;
+    saveAs: boolean;
+  }): Promise<ProjectFileResult>;
+  confirmOpen(path: string): Promise<boolean>;
+  autosave(text: string): Promise<{ ok: boolean; error?: string }>;
+  checkRecovery(): Promise<
+    | { ok: true; recovered: false }
+    | { ok: true; recovered: true; text: string; path: string | null }
+    | { ok: false; error: string }
+  >;
+  listRecent(): Promise<RecentProject[]>;
+  openRecent(path: string): Promise<ProjectFileResult>;
+  removeRecent(path: string): Promise<boolean>;
+}
+
+interface ExportAPI {
+  chooseOutput(payload: {
+    suggestedName: string;
+    estimatedBytes: number;
+  }): Promise<{
+    ok: boolean;
+    canceled?: boolean;
+    token?: string;
+    path?: string;
+    freeBytes?: number;
+    error?: string;
+  }>;
+  writeChunk(
+    token: string,
+    offset: number,
+    chunk: Uint8Array<ArrayBuffer>,
+    final: boolean,
+  ): Promise<{
+    ok: boolean;
+    complete?: boolean;
+    path?: string;
+    bytesWritten?: number;
+    error?: string;
+  }>;
+  abandon(token: string): Promise<boolean>;
+  openFile(): Promise<boolean>;
+  showInFolder(): Promise<boolean>;
+}
+
 interface FCEGlobal {
   appName: string;
+  /** Version from package.json — see preload.cjs. Absent on the web build. */
+  appVersion?: string;
   isElectron: boolean;
   updater?: UpdaterAPI;
+  project?: ProjectAPI;
+  export?: ExportAPI;
+  /** Tell the main process whether there are unsaved edits (see `close` handler in electron/main.cjs). */
+  setDirty?: (dirty: boolean) => void;
+  /** Real disk path of a File the user dropped/picked (empty string if none). */
+  getPathForFile?: (file: File) => string;
+  /** Register a saved source path and receive an opaque streaming handle. */
+  registerMediaFile?: (ref: {
+    path: string;
+    name: string;
+    size: number;
+    kind: 'video' | 'audio';
+  }) => Promise<{ token: string; url: string; size: number } | null>;
+  /** Bounded source read used only by explicit heavyweight operations. */
+  readMediaFileChunk?: (
+    token: string,
+    offset: number,
+    length: number,
+  ) => Promise<Uint8Array<ArrayBuffer> | null>;
+  releaseMediaFile?: (token: string) => Promise<boolean>;
 }
 
 declare global {

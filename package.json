@@ -2,7 +2,7 @@
   "name": "highlight-maker",
   "productName": "Byux",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.17",
   "license": "MIT",
   "description": "FPSキル集編集に特化したシンプルな動画エディタ",
   "homepage": "https://github.com/babyu-create/byux",
@@ -70,9 +70,12 @@
     "globals": "^17.5.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
-    "vite": "^8.0.10",
+    "vite": "^8.0.16",
     "vitest": "^4.1.7",
     "wait-on": "^9.0.5"
+  },
+  "overrides": {
+    "js-yaml": "4.3.0"
   },
   "build": {
     "appId": "com.fceditor.app",
@@ -101,8 +104,7 @@
           ]
         }
       ],
-      "icon": "build/icon.png",
-      "signAndEditExecutable": false
+      "icon": "build/icon.png"
     },
     "nsis": {
       "oneClick": false,

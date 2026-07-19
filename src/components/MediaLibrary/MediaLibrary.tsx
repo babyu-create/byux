@@ -1,15 +1,21 @@
 import { useRef, useState, type DragEvent, type ChangeEvent } from 'react';
-import { Plus, Music } from 'lucide-react';
+import { Plus, Music, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { useMediaStore } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { formatDuration, formatFileSize } from '../../lib/media';
 import type { MediaAsset } from '../../lib/types';
 import styles from './MediaLibrary.module.css';
 
-export function MediaLibrary() {
+interface MediaLibraryProps {
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+}
+
+export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps) {
   const assets = useMediaStore((s) => s.assets);
   const selectedAssetId = useMediaStore((s) => s.selectedAssetId);
   const isImporting = useMediaStore((s) => s.isImporting);
+  const importStatus = useMediaStore((s) => s.importStatus);
   const importError = useMediaStore((s) => s.importError);
   const addFiles = useMediaStore((s) => s.addFiles);
   const selectAsset = useMediaStore((s) => s.selectAsset);
@@ -63,11 +69,39 @@ export function MediaLibrary() {
   const videoAssets = assets.filter((a) => a.kind === 'video');
   const audioAssets = assets.filter((a) => a.kind === 'audio');
 
+  if (collapsed) {
+    return (
+      <div className={styles.rootCollapsed}>
+        <button
+          type="button"
+          className={styles.collapseToggle}
+          onClick={onToggleCollapse}
+          aria-label="メディアライブラリを開く"
+          title="メディアライブラリを開く"
+        >
+          <PanelLeftOpen size={16} aria-hidden="true" />
+        </button>
+        {assets.length > 0 ? <span className={styles.countCollapsed}>{assets.length}</span> : null}
+      </div>
+    );
+  }
+
   return (
     <div className={styles.root}>
       <div className={styles.header}>
         <span className={styles.headerTitle}>メディアライブラリ</span>
-        <span className={styles.count}>{assets.length}</span>
+        <div className={styles.headerRight}>
+          <span className={styles.count}>{assets.length}</span>
+          <button
+            type="button"
+            className={styles.collapseToggle}
+            onClick={onToggleCollapse}
+            aria-label="メディアライブラリを閉じる"
+            title="メディアライブラリを閉じる"
+          >
+            <PanelLeftClose size={14} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <div
@@ -90,7 +124,7 @@ export function MediaLibrary() {
         </div>
         <div className={styles.dropZoneTextStrong}>
           {isImporting
-            ? '読み込み中…'
+            ? (importStatus ?? '読み込み中…')
             : isDragging
               ? 'ここにドロップ'
               : 'ファイルを追加'}
@@ -204,7 +238,13 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
     >
       <div className={styles.thumbnail} data-kind={asset.kind}>
         {asset.kind === 'video' ? (
-          <video src={asset.url} muted preload="metadata" className={styles.thumbVideo} />
+          <video
+            src={asset.url}
+            crossOrigin="anonymous"
+            muted
+            preload="metadata"
+            className={styles.thumbVideo}
+          />
         ) : (
           <div className={styles.thumbAudio}><Music size={22} strokeWidth={1.8} aria-hidden="true" /></div>
         )}
@@ -216,7 +256,8 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
         <div className={styles.itemSub}>
           <span>{formatDuration(asset.duration)}</span>
           <span>·</span>
-          <span>{formatFileSize(asset.file.size)}</span>
+          <span>{formatFileSize(asset.size)}</span>
+          {asset.previewProxy ? <span className={styles.proxyBadge}>互換プレビュー</span> : null}
         </div>
       </div>
       <div className={styles.itemActions}>

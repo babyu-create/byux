@@ -29,7 +29,9 @@ export const KillMarkerFlag = memo(function KillMarkerFlag({
       className={`${styles.root} ${isSelected ? styles.selected : ''}`}
       style={{ left: leftPx }}
       onClick={handleClick}
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => {
+        if (e.button === 0) e.stopPropagation();
+      }}
       title={`キル ${marker.label ? `(${marker.label})` : ''}`}
     >
       <div className={styles.flag} />

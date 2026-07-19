@@ -3,6 +3,7 @@ import { Loader2, RefreshCw, Music } from 'lucide-react';
 import { useMediaStore } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { detectBeats } from '../../lib/audio';
+import { mediaAssetToFile } from '../../lib/media';
 import type { MediaAsset } from '../../lib/types';
 import styles from './BeatDetectionSection.module.css';
 
@@ -19,7 +20,7 @@ export function BeatDetectionSection({ asset }: BeatDetectionSectionProps) {
   const runDetection = async () => {
     setIsAnalyzing(true);
     try {
-      const beats = await detectBeats(asset.file);
+      const beats = await detectBeats(await mediaAssetToFile(asset));
       setBeats(asset.id, beats);
       showMessage('success', `${beats.length}個のビート検出`);
     } catch (err) {

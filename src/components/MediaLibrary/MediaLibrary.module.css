@@ -24,6 +24,57 @@
   letter-spacing: 0.05em;
 }
 
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.collapseToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  transition: all var(--t-fast);
+}
+
+.collapseToggle:hover {
+  background: var(--bg-panel);
+  color: var(--text);
+  border-color: var(--border-soft);
+}
+
+.rootCollapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  padding-top: 10px;
+  gap: 8px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border-soft);
+}
+
+.countCollapsed {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--bg-panel-2);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .count {
   display: inline-flex;
   align-items: center;
@@ -299,6 +350,16 @@
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   color: var(--text-muted);
+}
+
+.proxyBadge {
+  padding: 0 4px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 3px;
+  font-family: var(--font-ui);
+  font-size: 9px;
+  white-space: nowrap;
 }
 
 .removeBtn {

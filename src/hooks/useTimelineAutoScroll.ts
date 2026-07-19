@@ -49,7 +49,10 @@ export function useTimelineAutoScroll() {
       rafRef.current = null;
       return;
     }
-    el.scrollLeft += directionRef.current * speedRef.current;
+    el.scrollBy({
+      left: directionRef.current * speedRef.current,
+      behavior: 'auto',
+    });
     // Let the drag handler reposition the clip to match the new scroll position
     // before the next paint. Without this, the cursor sits still while the
     // viewport scrolls, and the clip visually drifts away from the cursor.

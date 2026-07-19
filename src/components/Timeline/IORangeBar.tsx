@@ -32,7 +32,9 @@ export const IORangeBar = memo(function IORangeBar({
       className={`${styles.root} ${isSelected ? styles.selected : ''}`}
       style={{ left: leftPx, width: widthPx }}
       onClick={handleClick}
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => {
+        if (e.button === 0) e.stopPropagation();
+      }}
       title="A/D レンジ"
     >
       <div className={styles.bar} />

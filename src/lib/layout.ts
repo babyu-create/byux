@@ -16,7 +16,10 @@ export interface LayoutSizes {
 export const DEFAULT_LAYOUT: LayoutSizes = {
   leftWidth: 280,
   rightWidth: 280,
-  timelineHeight: 320,
+  // Tuned so the center preview panel is exactly 16:9 at the default window
+  // size (1600x1000) — a 16:9 project then fills the frame edge-to-edge with
+  // no letterbox gap, instead of leaving a visible strip top/bottom.
+  timelineHeight: 338,
   propertiesHeight: 420,
 };
 

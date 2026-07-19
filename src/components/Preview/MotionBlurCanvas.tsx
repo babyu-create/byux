@@ -78,8 +78,6 @@ function usePrefersReducedMotion(): boolean {
     }
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
     const onChange = (e: MediaQueryListEvent) => setReduced(e.matches);
-    // Sync once on mount (covers the SSR-false → CSR-true case).
-    setReduced(mq.matches);
     // Older Safari: addListener fallback.
     if (typeof mq.addEventListener === 'function') {
       mq.addEventListener('change', onChange);
@@ -104,16 +102,19 @@ export function MotionBlurCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // Refs so the RAF loop reads the latest values without re-running the effect.
   const strengthRef = useRef(strength);
-  strengthRef.current = strength;
   const playingRef = useRef(isPlaying);
-  playingRef.current = isPlaying;
   const hudMaskRef = useRef(hudMaskStrength);
-  hudMaskRef.current = Math.max(0, Math.min(1, hudMaskStrength));
   const hudPresetRef = useRef<HudPreset>(hudPreset);
-  hudPresetRef.current = hudPreset;
   const aspectRef = useRef<number | undefined>(aspect);
-  aspectRef.current = aspect;
   const prefersReducedMotion = usePrefersReducedMotion();
+
+  useEffect(() => {
+    strengthRef.current = strength;
+    playingRef.current = isPlaying;
+    hudMaskRef.current = Math.max(0, Math.min(1, hudMaskStrength));
+    hudPresetRef.current = hudPreset;
+    aspectRef.current = aspect;
+  }, [strength, isPlaying, hudMaskStrength, hudPreset, aspect]);
 
   // Force-disable the canvas when the user prefers reduced motion. We still
   // need to call hooks above this branch to keep React's hook order stable.
@@ -363,7 +364,6 @@ export function MotionBlurCanvas({
     // deliberately read through Refs inside the RAF loop so adjustments
     // don't tear down and rebuild the WebGL context. Including them here
     // would re-allocate textures and shaders on every slider tick.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveActive, videoRef]);
 
   if (!effectiveActive) return null;

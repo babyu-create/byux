@@ -12,7 +12,7 @@
 // height, 9-position grid, {n}/{total} token expansion).
 
 import type { OverlayText } from './types';
-import { getFontStack } from './fonts';
+import { ensureFontLoaded, getFontStack } from './fonts';
 import { overlayDecoration, overlayStrokeWidth } from './overlayText';
 
 const INSET = 0.05; // 5% — matches OverlayLayer top/bottom/left/right inset
@@ -71,6 +71,7 @@ export async function rasterizeOverlays(
   if (!ctx) return null;
 
   for (const o of overlays) {
+    await ensureFontLoaded(o.fontFamily);
     const text = applyTokens(o.text, tokens);
     const fontPx = Math.max(1, (o.fontSize / 100) * height);
     const weight = o.weight ?? 700;

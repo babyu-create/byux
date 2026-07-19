@@ -1,6 +1,7 @@
 import { useSelectedAsset } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { formatDuration, formatFileSize, formatTimecode } from '../../lib/media';
+import type { MediaAsset } from '../../lib/types';
 import { clipHasTransform } from '../../lib/clipTransform';
 import { clipHasColorGrade } from '../../lib/colorGrade';
 import { clipHasTransition } from '../../lib/transitions';
@@ -46,34 +47,6 @@ export function PropertiesPanel() {
         <div className={styles.empty}>メディアが未選択です</div>
       ) : (
         <div className={styles.content}>
-          <div className={styles.section}>
-            <div className={styles.sectionLabel}>ファイル</div>
-            <PropRow label="名前" value={asset.name} mono />
-            <PropRow label="種類" value={asset.kind === 'video' ? '動画' : '音声'} />
-            <PropRow label="サイズ" value={formatFileSize(asset.file.size)} mono />
-            <PropRow label="MIME" value={asset.file.type || '-'} mono />
-          </div>
-
-          <div className={styles.section}>
-            <div className={styles.sectionLabel}>メタデータ</div>
-            <PropRow label="長さ" value={formatDuration(asset.duration)} mono />
-            <PropRow
-              label="長さ (frames)"
-              value={formatTimecode(asset.duration)}
-              mono
-            />
-            {asset.kind === 'video' && asset.width && asset.height ? (
-              <>
-                <PropRow label="解像度" value={`${asset.width} × ${asset.height}`} mono />
-                <PropRow
-                  label="アスペクト"
-                  value={(asset.width / asset.height).toFixed(3)}
-                  mono
-                />
-              </>
-            ) : null}
-          </div>
-
           {selectedClip ? (
             <>
               {/* High-frequency FPS-montage control: open by default. */}
@@ -87,6 +60,22 @@ export function PropertiesPanel() {
                 badge={`${selectedClip.speed ?? 1}×`}
               >
                 <ClipSpeedSection clip={selectedClip} />
+              </CollapsibleSection>
+
+              {/* Also high-frequency: kept open and right after speed so it
+                  never needs scrolling past the video-only sections below. */}
+              <CollapsibleSection
+                id="volume"
+                title="音量"
+                defaultOpen
+                active={(selectedClip.volume ?? 1) !== 1 || (selectedClip.muted ?? false)}
+                badge={
+                  selectedClip.muted
+                    ? 'MUTE'
+                    : `${Math.round((selectedClip.volume ?? 1) * 100)}%`
+                }
+              >
+                <ClipVolumeSection clip={selectedClip} />
               </CollapsibleSection>
 
               {isVideoClip ? (
@@ -132,19 +121,6 @@ export function PropertiesPanel() {
                   <ClipTransitionSection clip={selectedClip} />
                 </CollapsibleSection>
               ) : null}
-
-              <CollapsibleSection
-                id="volume"
-                title="音量"
-                active={(selectedClip.volume ?? 1) !== 1 || (selectedClip.muted ?? false)}
-                badge={
-                  selectedClip.muted
-                    ? 'MUTE'
-                    : `${Math.round((selectedClip.volume ?? 1) * 100)}%`
-                }
-              >
-                <ClipVolumeSection clip={selectedClip} />
-              </CollapsibleSection>
 
               {isBgmClip ? (
                 <CollapsibleSection id="ducking" title="BGMダッキング">
@@ -203,9 +179,39 @@ export function PropertiesPanel() {
               <BeatDetectionSection asset={asset} />
             </CollapsibleSection>
           ) : null}
+
+          {/* Reference-only info, not needed for editing — collapsed and
+              pushed to the bottom so it never competes with the controls
+              above for space. */}
+          <CollapsibleSection id="file-info" title="ファイル情報">
+            <AssetInfoSection asset={asset} />
+          </CollapsibleSection>
         </div>
       )}
     </div>
+  );
+}
+
+function AssetInfoSection({ asset }: { asset: MediaAsset }) {
+  return (
+    <>
+      <PropRow label="名前" value={asset.name} mono />
+      <PropRow label="種類" value={asset.kind === 'video' ? '動画' : '音声'} />
+      <PropRow label="サイズ" value={formatFileSize(asset.size)} mono />
+      <PropRow label="MIME" value={asset.mimeType || '-'} mono />
+      <PropRow label="長さ" value={formatDuration(asset.duration)} mono />
+      <PropRow label="長さ (frames)" value={formatTimecode(asset.duration)} mono />
+      {asset.kind === 'video' && asset.width && asset.height ? (
+        <>
+          <PropRow label="解像度" value={`${asset.width} × ${asset.height}`} mono />
+          <PropRow
+            label="アスペクト"
+            value={(asset.width / asset.height).toFixed(3)}
+            mono
+          />
+        </>
+      ) : null}
+    </>
   );
 }
 

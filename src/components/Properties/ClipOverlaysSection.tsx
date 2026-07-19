@@ -6,7 +6,12 @@ import type {
   OverlayPosition,
   OverlayText,
 } from '../../lib/types';
-import { DEFAULT_FONT_ID, getFontGroups, getFontStack } from '../../lib/fonts';
+import {
+  DEFAULT_FONT_ID,
+  ensureFontLoaded,
+  getFontGroups,
+  getFontStack,
+} from '../../lib/fonts';
 import styles from './ClipOverlaysSection.module.css';
 
 interface ClipOverlaysSectionProps {
@@ -161,9 +166,10 @@ export function ClipOverlaysSection({ clip }: ClipOverlaysSectionProps) {
                   className={styles.fontSelect}
                   value={o.fontFamily ?? DEFAULT_FONT_ID}
                   style={{ fontFamily: getFontStack(o.fontFamily) }}
-                  onChange={(e) =>
-                    updateOverlay(clip.id, o.id, { fontFamily: e.target.value })
-                  }
+                  onChange={(e) => {
+                    void ensureFontLoaded(e.target.value);
+                    updateOverlay(clip.id, o.id, { fontFamily: e.target.value });
+                  }}
                   aria-label="フォント"
                 >
                   {FONT_GROUPS.map((group) => (

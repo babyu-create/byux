@@ -68,6 +68,49 @@ describe('parseProjectFile', () => {
     expect(() => parseProjectFile(JSON.stringify(broken))).toThrow(/形式が不正/);
   });
 
+  it('rejects negative and inverted clip times', () => {
+    const negative = validProject();
+    negative.clips[0].trimStart = -1;
+    expect(() => parseProjectFile(JSON.stringify(negative))).toThrow(/形式が不正/);
+
+    const inverted = validProject();
+    inverted.clips[0].trimStart = 4;
+    inverted.clips[0].trimEnd = 3;
+    expect(() => parseProjectFile(JSON.stringify(inverted))).toThrow(/形式が不正/);
+  });
+
+  it('rejects a clip trim that exceeds its source duration', () => {
+    const p = validProject();
+    p.clips[0].trimEnd = 6;
+    expect(() => parseProjectFile(JSON.stringify(p))).toThrow(/素材の長さ/);
+  });
+
+  it('rejects missing and incompatible clip references', () => {
+    const missingTrack = validProject();
+    missingTrack.clips[0].trackId = 'missing';
+    expect(() => parseProjectFile(JSON.stringify(missingTrack))).toThrow(/参照先トラック/);
+
+    const wrongTrackKind = validProject();
+    wrongTrackKind.tracks[0].kind = 'audio';
+    expect(() => parseProjectFile(JSON.stringify(wrongTrackKind))).toThrow(/種類が一致/);
+  });
+
+  it('rejects duplicate IDs before they can alias editor state', () => {
+    const p = validProject();
+    p.clips.push({ ...p.clips[0] });
+    expect(() => parseProjectFile(JSON.stringify(p))).toThrow(/重複/);
+  });
+
+  it('rejects markers and ranges outside their source duration', () => {
+    const badMarker = validProject();
+    badMarker.markers = [{ id: 'm1', assetId: 'a1', time: -0.1 }];
+    expect(() => parseProjectFile(JSON.stringify(badMarker))).toThrow(/マーカー/);
+
+    const badRange = validProject();
+    badRange.ioRanges = [{ id: 'r1', assetId: 'a1', inTime: 1, outTime: 6 }];
+    expect(() => parseProjectFile(JSON.stringify(badRange))).toThrow(/レンジ/);
+  });
+
   it('accepts an optional clip colorGrade and round-trips it', () => {
     const p = validProject();
     p.clips[0].colorGrade = {
@@ -166,7 +209,14 @@ describe('buildAssetIdMap', () => {
     { id: 'p2', name: 'b.mp3', size: 200, kind: 'audio', duration: 9 },
   ];
   const makeAsset = (id: string, name: string, size: number): MediaAsset => ({
-    id, name, kind: 'video', url: '', file: { name, size } as File, duration: 0,
+    id,
+    name,
+    kind: 'video',
+    url: '',
+    file: { name, size } as File,
+    size,
+    mimeType: 'video/mp4',
+    duration: 0,
   });
 
   it('maps by name + size and reports unmatched assets', () => {

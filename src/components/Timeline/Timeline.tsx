@@ -118,11 +118,11 @@ export function Timeline() {
           return;
         case 'frame.prev':
           e.preventDefault();
-          state.setPlayhead(Math.max(0, state.playhead - 1 / 60));
+          state.setPlayhead(Math.max(0, state.playhead - 1 / state.fps));
           return;
         case 'frame.next':
           e.preventDefault();
-          state.setPlayhead(state.playhead + 1 / 60);
+          state.setPlayhead(state.playhead + 1 / state.fps);
           return;
         case 'jump.back':
           e.preventDefault();

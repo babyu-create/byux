@@ -15,8 +15,9 @@
 // motion-blur effect).
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import { toBlobURL } from '@ffmpeg/util';
 import type { Clip, KillMarker, MediaAsset, Track } from './types';
+import { readMediaAssetBytes } from './media';
 import {
   buildDuckPoints,
   buildDuckVolumeExpr,
@@ -48,10 +49,32 @@ import {
   type ClipOverlayIntro,
 } from './overlayText';
 
+export type ExportQualityPreset = 'recommended' | 'high' | 'compact';
+
+interface VideoEncodingSettings {
+  preset: 'veryfast' | 'superfast';
+  crf: number;
+  bitrateMultiplier: number;
+}
+
+function getVideoEncodingSettings(
+  quality: ExportQualityPreset | undefined,
+): VideoEncodingSettings {
+  if (quality === 'high') {
+    return { preset: 'veryfast', crf: 16, bitrateMultiplier: 1.45 };
+  }
+  if (quality === 'compact') {
+    return { preset: 'superfast', crf: 27, bitrateMultiplier: 0.62 };
+  }
+  return { preset: 'superfast', crf: 20, bitrateMultiplier: 1 };
+}
+
 export interface ExportOptions {
   resolution: '720p' | '1080p';
   fps: 30 | 60;
   aspectRatio: '16:9' | '9:16';
+  /** Human-facing quality/speed preset. Defaults to the balanced preset. */
+  quality?: ExportQualityPreset;
   /**
    * Include motion-blur in export. Default off. When enabled the export
    * applies the SAME WebGL directional motion-blur the preview uses (per-frame
@@ -116,13 +139,17 @@ let loadPromise: Promise<FFmpegHandle> | null = null;
 // Local MT core (copied from node_modules by vite.config.ts copyMtCore plugin).
 // Using local files means CDN is never hit — no unpkg.com latency, no proxy
 // blocks, no 10-second timeout races.
-const LOCAL_MT_CORE_JS = '/lib/mt/ffmpeg-core.js';
-const LOCAL_MT_CORE_WASM = '/lib/mt/ffmpeg-core.wasm';
-const LOCAL_MT_CORE_WORKER = '/lib/mt/ffmpeg-core.worker.js';
+// Root-absolute paths break under Electron's file:// production load (they'd
+// resolve against the filesystem root, not the app's dist folder) — prefix
+// with BASE_URL ('./' per vite.config.ts) the same way the app icon was
+// fixed earlier, so this works under both http:// (dev) and file:// (packaged).
+const LOCAL_MT_CORE_JS = `${import.meta.env.BASE_URL}lib/mt/ffmpeg-core.js`;
+const LOCAL_MT_CORE_WASM = `${import.meta.env.BASE_URL}lib/mt/ffmpeg-core.wasm`;
+const LOCAL_MT_CORE_WORKER = `${import.meta.env.BASE_URL}lib/mt/ffmpeg-core.worker.js`;
 
 // Local single-threaded fallbacks (pre-existing in public/lib/).
-const LOCAL_ST_CORE_JS = '/lib/ffmpeg-core.js';
-const LOCAL_ST_CORE_WASM = '/lib/ffmpeg-core.wasm';
+const LOCAL_ST_CORE_JS = `${import.meta.env.BASE_URL}lib/ffmpeg-core.js`;
+const LOCAL_ST_CORE_WASM = `${import.meta.env.BASE_URL}lib/ffmpeg-core.wasm`;
 
 /** Public read-only — UI can show "MT (4 threads)" vs "ST (single)". */
 export function getActiveCoreVariant(): 'mt' | 'st' {
@@ -251,6 +278,7 @@ async function getFFmpeg(onProgress?: ExportOptions['onProgress']): Promise<FFmp
       onProgress?.({ stage: 'ST (local) 失敗', percent: -1, log: msg });
       throw new Error(
         `FFmpeg 初期化失敗 — ローカルファイル (/lib/ffmpeg-core.*) が見つかりません。\n詳細: ${localErr instanceof Error ? localErr.message : String(localErr)}`,
+        { cause: localErr },
       );
     }
     const handle: FFmpegHandle = { ffmpeg, variant: 'st', threadCount: 1 };
@@ -301,6 +329,67 @@ function safeExt(fileName: string, fallback: string): string {
   const raw = fileName.split('.').pop() ?? fallback;
   const cleaned = raw.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
   return cleaned || fallback;
+}
+
+const MAX_AUTOMATIC_PROXY_BYTES = 768 * 1024 * 1024;
+
+/**
+ * Convert a video Chromium cannot preview (common with AVI/MKV codecs) to a
+ * lightweight H.264/AAC proxy. The caller keeps the original File for final
+ * export; this result is only used by <video> during editing.
+ */
+export async function createPreviewProxy(
+  file: File,
+  onProgress?: (stage: string) => void,
+): Promise<File> {
+  if (file.size > MAX_AUTOMATIC_PROXY_BYTES) {
+    throw new Error(
+      `${file.name} はプレビュー非対応の形式で、互換変換には大きすぎます ` +
+      `(${Math.round(file.size / (1024 * 1024))} MB)。H.264/AAC のMP4へ変換してから追加してください。`,
+    );
+  }
+
+  onProgress?.('互換コーデックを準備中…');
+  const { ffmpeg } = await getFFmpeg((info) => onProgress?.(info.stage));
+  const token = crypto.randomUUID().replaceAll('-', '');
+  const inputName = `proxy_in_${token}.${safeExt(file.name, 'bin')}`;
+  const outputName = `proxy_out_${token}.mp4`;
+  try {
+    onProgress?.(`${file.name} をプレビュー用に変換中…`);
+    await ffmpeg.writeFile(inputName, new Uint8Array(await file.arrayBuffer()));
+    const status = await ffmpeg.exec([
+      '-threads', '1',
+      '-i', inputName,
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      '-vf', "scale='min(1280,iw)':-2",
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-crf', '27',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-ac', '2',
+      '-movflags', '+faststart',
+      '-y',
+      outputName,
+    ]);
+    if (status !== 0) throw new Error(`FFmpeg終了コード: ${status}`);
+    const data = await ffmpeg.readFile(outputName);
+    const bytes = data instanceof Uint8Array
+      ? new Uint8Array(data)
+      : new TextEncoder().encode(String(data));
+    return new File([bytes], `${file.name}.preview.mp4`, { type: 'video/mp4' });
+  } catch (error) {
+    throw new Error(
+      `${file.name} の互換変換に失敗しました。H.264/AAC のMP4へ変換してから追加してください。` +
+      ` (${error instanceof Error ? error.message : String(error)})`,
+      { cause: error },
+    );
+  } finally {
+    try { await ffmpeg.deleteFile(inputName); } catch { /* ignore */ }
+    try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +477,7 @@ function canStreamCopy(
   // An empty/unknown MIME is NOT assumed H.264 — a .webm (VP9/AV1) dropped from
   // the OS can report an empty type, and stream-copying it into an .mp4 wrapper
   // would emit a broken file. Unknown → fall through to a safe re-encode.
-  const mime = asset.file.type.toLowerCase();
+  const mime = asset.mimeType.toLowerCase();
   const likelyH264 = mime === 'video/mp4' || mime === 'video/quicktime';
   if (!likelyH264) return false;
 
@@ -407,6 +496,8 @@ interface ClipFilterSpec {
   height: number;
   targetFps: number;
   videoTrackMuted: boolean;
+  /** False when the container has no audio stream; a stereo silence track is generated. */
+  hasAudio: boolean;
   /** Horizontal reframe -1..1 for vertical (portrait) crop-to-fill. */
   reframe: number;
   vOutLabel: string;
@@ -476,15 +567,51 @@ function buildClipFilters(spec: ClipFilterSpec): string {
     vFilters.push(`fade=t=out:st=${fadeStart.toFixed(3)}:d=${d.toFixed(3)}`);
   }
 
-  const aFilters: string[] = [];
-  aFilters.push(`atrim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`);
-  aFilters.push('asetpts=PTS-STARTPTS');
-  aFilters.push(...buildAtempoChain(speed));
-  aFilters.push(`volume=${clipVolume.toFixed(3)}`);
-
   const vChain = `[${inputIndex}:v]${vFilters.join(',')}${vOutLabel}`;
-  const aChain = `[${inputIndex}:a]${aFilters.join(',')}${aOutLabel}`;
+  let aChain: string;
+  if (spec.hasAudio) {
+    const aFilters: string[] = [];
+    aFilters.push(`atrim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`);
+    aFilters.push('asetpts=PTS-STARTPTS');
+    aFilters.push(...buildAtempoChain(speed));
+    aFilters.push(`volume=${clipVolume.toFixed(3)}`);
+    aChain = `[${inputIndex}:a]${aFilters.join(',')}${aOutLabel}`;
+  } else {
+    // concat=v=1:a=1 requires one audio pad per clip. Supplying finite silence
+    // keeps screen recordings without a microphone/audio stream exportable and
+    // also gives the later BGM mixer a stable base audio stream.
+    aChain =
+      `anullsrc=r=44100:cl=stereo,atrim=0:${timelineDur.toFixed(4)},` +
+      `asetpts=PTS-STARTPTS,volume=${clipVolume.toFixed(3)}${aOutLabel}`;
+  }
   return `${vChain};${aChain}`;
+}
+
+/**
+ * Read only FFmpeg's container headers to determine whether an input has an
+ * audio stream. Chromium metadata APIs do not expose this reliably, especially
+ * for AVI/MKV, while the export core must know before building filter labels.
+ */
+async function probeInputHasAudio(ffmpeg: FFmpeg, inputName: string): Promise<boolean> {
+  const messages: string[] = [];
+  const handler = ({ message }: { message: string }) => messages.push(message);
+  ffmpeg.on('log', handler);
+  try {
+    await ffmpeg.exec([
+      '-hide_banner',
+      '-i', inputName,
+      '-map', '0:a:0?',
+      '-t', '0.001',
+      '-f', 'null',
+      '-',
+    ]);
+  } catch {
+    // FFmpeg may report a non-zero status when an optional map finds no stream.
+    // The input header printed before that status is still authoritative.
+  } finally {
+    ffmpeg.off('log', handler);
+  }
+  return messages.some((message) => message.includes('Stream #') && message.includes('Audio:'));
 }
 
 // ---------------------------------------------------------------------------
@@ -554,6 +681,7 @@ interface MotionBlurParams {
   segments?: TransformSegment[];
   hudPreset: HudPreset;
   hudMaskStrength: number;
+  encoding: VideoEncodingSettings;
   onProgress?: ExportOptions['onProgress'];
 }
 
@@ -570,8 +698,13 @@ const AVC_CODEC_CANDIDATES = [
 ];
 
 /** Choose a target H.264 bitrate from the output geometry (bits/pixel·frame). */
-function pickBitrate(width: number, height: number, fps: number): number {
-  const raw = width * height * fps * 0.1;
+function pickBitrate(
+  width: number,
+  height: number,
+  fps: number,
+  multiplier = 1,
+): number {
+  const raw = width * height * fps * 0.1 * multiplier;
   return Math.round(Math.max(4_000_000, Math.min(24_000_000, raw)));
 }
 
@@ -674,7 +807,7 @@ async function applyWebglMotionBlur(
   // back to tblend. videoOnce attaches its listener synchronously here.
   const loadedPromise = videoOnce(video, 'loadeddata');
 
-  const bitrate = pickBitrate(width, height, targetFps);
+  const bitrate = pickBitrate(width, height, targetFps, params.encoding.bitrateMultiplier);
   const codec = await pickAvcCodec({ width, height, bitrate, framerate: targetFps });
   mbLog(`[mb] codec=${codec} bitrate=${bitrate} ${width}x${height}@${targetFps}`);
   if (!codec) {
@@ -811,7 +944,7 @@ async function applyWebglMotionBlur(
 async function applyTblendMotionBlur(
   ffmpeg: FFmpeg,
   videoInput: string,
-  params: Pick<MotionBlurParams, 'intensity' | 'onProgress'>,
+  params: Pick<MotionBlurParams, 'intensity' | 'encoding' | 'onProgress'>,
 ): Promise<string> {
   params.onProgress?.({ stage: 'モーションブラー適用中 (tblend)', percent: -1 });
   const passCount = tblendPassCount(params.intensity);
@@ -822,8 +955,8 @@ async function applyTblendMotionBlur(
     '-i', videoInput,
     '-vf', tblendVf,
     '-c:v', 'libx264',
-    '-preset', 'superfast',
-    '-crf', '18',
+    '-preset', params.encoding.preset,
+    '-crf', String(params.encoding.crf),
     '-pix_fmt', 'yuv420p',
     '-c:a', 'copy',
     '-movflags', '+faststart',
@@ -1097,6 +1230,7 @@ interface FusedEffectsParams {
   motionBlurStrengthOverride?: number;
   hudPreset: HudPreset;
   hudMaskStrength: number;
+  encoding: VideoEncodingSettings;
   onProgress?: ExportOptions['onProgress'];
 }
 
@@ -1148,7 +1282,7 @@ async function applyFusedEffectsPass(
   video.src = url;
   const loadedPromise = videoOnce(video, 'loadeddata');
 
-  const bitrate = pickBitrate(width, height, targetFps);
+  const bitrate = pickBitrate(width, height, targetFps, params.encoding.bitrateMultiplier);
   const codec = await pickAvcCodec({ width, height, bitrate, framerate: targetFps });
   if (!codec) {
     loadedPromise.catch(() => {});
@@ -1352,6 +1486,7 @@ async function applyOverlayPass(
   specs: OverlaySpec[],
   totalDuration: number,
   targetFps: number,
+  encoding: VideoEncodingSettings,
 ): Promise<string> {
   const out = 'video_overlaid.mp4';
   // Each overlay PNG is looped but BOUNDED with -t so it's a FINITE input.
@@ -1393,8 +1528,8 @@ async function applyOverlayPass(
     '-map', '[ovout]',
     '-map', '0:a?',
     '-c:v', 'libx264',
-    '-preset', 'superfast',
-    '-crf', '18',
+    '-preset', encoding.preset,
+    '-crf', String(encoding.crf),
     '-pix_fmt', 'yuv420p',
     '-c:a', 'copy',
     '-movflags', '+faststart',
@@ -1461,7 +1596,7 @@ export async function exportProject(
   const bgmTrackId = tracks.find((t) => t.kind === 'audio')?.id ?? null;
 
   const videoClips = clips
-    .filter((c) => videoTrack && c.trackId === videoTrack.id)
+    .filter((c) => videoTrack && !videoTrack.hidden && c.trackId === videoTrack.id)
     .sort((a, b) => a.start - b.start);
   // Mix ALL audio tracks (BGM + SE + …), not just the first — previously the
   // SE track's clips were silently dropped from the export.
@@ -1473,20 +1608,21 @@ export async function exportProject(
     throw new Error('映像クリップがありません');
   }
 
-  // Secondary video tracks (e.g. 映像サブ / PiP) are NOT yet composited into
-  // the export (true multi-video-track compositing is planned). Warn instead
-  // of silently dropping so the user knows those clips won't appear.
+  // Legacy projects may contain secondary video/overlay lanes from builds
+  // that exposed them before compositing existed. Keep them loadable, but
+  // report every unsupported visual clip instead of dropping overlay clips
+  // silently.
   const droppedVideoClips = clips.filter(
-    (c) =>
-      tracks.find((t) => t.id === c.trackId)?.kind === 'video' &&
-      videoTrack &&
-      c.trackId !== videoTrack.id,
+    (c) => {
+      const kind = tracks.find((t) => t.id === c.trackId)?.kind;
+      return kind === 'overlay' || (kind === 'video' && videoTrack && c.trackId !== videoTrack.id);
+    },
   );
   if (droppedVideoClips.length > 0) {
     const msg = `[exporter] WARNING: ${droppedVideoClips.length} clip(s) on a secondary video track are not yet composited into the export.`;
     console.warn(msg);
     options.onProgress?.({
-      stage: `映像サブトラックの${droppedVideoClips.length}クリップは書き出し未対応（メイン映像トラックに移動してください）`,
+      stage: `サブ映像/オーバーレイの${droppedVideoClips.length}クリップは書き出し未対応（メイン映像トラックに移動してください）`,
       percent: -1,
       log: msg,
     });
@@ -1494,6 +1630,7 @@ export async function exportProject(
 
   const { width, height } = getResolution(options.resolution, options.aspectRatio);
   const targetFps = options.fps;
+  const encoding = getVideoEncodingSettings(options.quality);
   const enableMotionBlur = options.motionBlur === true;
   const videoTrackMuted = videoTrack?.muted ?? false;
 
@@ -1511,16 +1648,9 @@ export async function exportProject(
   // -------------------------------------------------------------------------
   // Stream-copy fast path check
   // -------------------------------------------------------------------------
-  const useStreamCopy = canStreamCopy(
+  let useStreamCopy = canStreamCopy(
     videoClips, assets, width, height, videoTrackMuted, enableMotionBlur,
   );
-  if (useStreamCopy) {
-    options.onProgress?.({
-      stage: '高速モード: ストリームコピー (再エンコードなし)',
-      percent: -1,
-      log: '[exporter] fast path: -c copy (no libx264 re-encode)',
-    });
-  }
 
   // Progress tracking from FFmpeg log stream.
   const progressState = {
@@ -1575,6 +1705,7 @@ export async function exportProject(
 
   const writtenAssets = new Set<string>();
   const writtenAudioFilenames = new Map<string, string>();
+  const assetHasAudio = new Map<string, boolean>();
 
   // Build deduplicated input list for video clips.
   const assetInputMap = new Map<string, { index: number; inputName: string }>();
@@ -1583,7 +1714,7 @@ export async function exportProject(
   for (const clip of videoClips) {
     const asset = assets.find((a) => a.id === clip.assetId);
     if (!asset || assetInputMap.has(asset.id)) continue;
-    const ext = safeExt(asset.file.name, 'mp4');
+    const ext = safeExt(asset.name, 'mp4');
     const inputName = `vinput_${asset.id}.${ext}`;
     const inputIndex = ffmpegInputArgs.length / 2;
     assetInputMap.set(asset.id, { index: inputIndex, inputName });
@@ -1603,8 +1734,25 @@ export async function exportProject(
       if (writtenAssets.has(assetId)) continue;
       const asset = assets.find((a) => a.id === assetId);
       if (!asset) continue;
-      await ffmpeg.writeFile(inputName, await fetchFile(asset.file));
+      await ffmpeg.writeFile(inputName, await readMediaAssetBytes(asset));
       writtenAssets.add(assetId);
+    }
+
+    options.onProgress?.({ stage: '音声ストリームを確認中', percent: -1 });
+    for (const [assetId, { inputName }] of assetInputMap) {
+      assetHasAudio.set(assetId, await probeInputHasAudio(ffmpeg, inputName));
+    }
+    if (useStreamCopy && assetHasAudio.get(videoClips[0].assetId) === false) {
+      // The fast path would preserve "no audio", then the optional BGM mix
+      // expects 0:a. Normalize through the full path so silence is generated.
+      useStreamCopy = false;
+    }
+    if (useStreamCopy) {
+      options.onProgress?.({
+        stage: '高速モード: ストリームコピー (再エンコードなし)',
+        percent: -1,
+        log: '[exporter] fast path: -c copy (no libx264 re-encode)',
+      });
     }
 
     progressState.phase = 'encode';
@@ -1677,6 +1825,7 @@ export async function exportProject(
             height,
             targetFps,
             videoTrackMuted,
+            hasAudio: assetHasAudio.get(asset.id) !== false,
             reframe: options.verticalReframe ?? 0,
             vOutLabel: vLabel,
             aOutLabel: aLabel,
@@ -1711,8 +1860,8 @@ export async function exportProject(
         '-map', '[vout]',
         '-map', '[aout]',
         '-c:v', 'libx264',
-        '-preset', 'superfast',
-        '-crf', '18',
+        '-preset', encoding.preset,
+        '-crf', String(encoding.crf),
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
         '-b:a', '256k',
@@ -1790,6 +1939,7 @@ export async function exportProject(
               motionBlurStrengthOverride: options.motionBlurStrength,
               hudPreset,
               hudMaskStrength,
+              encoding,
               onProgress: options.onProgress,
             });
           } catch (err) {
@@ -1817,6 +1967,7 @@ export async function exportProject(
                 segments: includedTimeline,
                 hudPreset,
                 hudMaskStrength,
+                encoding,
                 onProgress: options.onProgress,
               });
             }
@@ -1842,6 +1993,7 @@ export async function exportProject(
               segments: includedTimeline,
               hudPreset,
               hudMaskStrength,
+              encoding,
               onProgress: options.onProgress,
             });
           }
@@ -1890,7 +2042,14 @@ export async function exportProject(
       if (overlaySpecs.length > 0) {
         options.onProgress?.({ stage: 'テキスト合成中', percent: -1 });
         try {
-          videoOutput = await applyOverlayPass(ffmpeg, videoOutput, overlaySpecs, totalVideoSeconds, targetFps);
+          videoOutput = await applyOverlayPass(
+            ffmpeg,
+            videoOutput,
+            overlaySpecs,
+            totalVideoSeconds,
+            targetFps,
+            encoding,
+          );
         } catch (err) {
           // Never let text compositing fail the whole export — degrade to no
           // text (the prior behaviour) instead of throwing.
@@ -1953,10 +2112,10 @@ export async function exportProject(
         const asset = assets.find((a) => a.id === clip.assetId);
         if (!asset) continue;
 
-        const ext = safeExt(asset.file.name, 'mp3');
+        const ext = safeExt(asset.name, 'mp3');
         const inputName = `ainput_${asset.id}.${ext}`;
         if (!writtenAudioFilenames.has(asset.id)) {
-          await ffmpeg.writeFile(inputName, await fetchFile(asset.file));
+          await ffmpeg.writeFile(inputName, await readMediaAssetBytes(asset));
           writtenAudioFilenames.set(asset.id, inputName);
         }
         audioInputArgs.push('-i', inputName);

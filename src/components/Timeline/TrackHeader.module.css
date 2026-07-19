@@ -1,8 +1,9 @@
 .root {
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   flex: 1;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-soft);
@@ -25,15 +26,6 @@
   opacity: 0.5;
 }
 
-.label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  font-size: 11px;
-  color: var(--text);
-}
-
 .dot {
   width: 6px;
   height: 6px;
@@ -49,12 +41,6 @@
 }
 .root[data-kind='audio'] .dot {
   background: var(--clip-audio);
-}
-
-.text {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .controls {

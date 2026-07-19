@@ -56,7 +56,13 @@ export interface MediaAsset {
   name: string;
   kind: 'video' | 'audio';
   url: string;
-  file: File;
+  /** Native File while the current session imported it directly. Re-linked
+   * assets stream from Electron by sourceToken and intentionally omit this. */
+  file?: File;
+  /** Stable source size; unlike file.size this also exists after auto-relink. */
+  size: number;
+  /** Stable MIME type; unlike file.type this also exists after auto-relink. */
+  mimeType: string;
   duration: number;
   width?: number;
   height?: number;
@@ -64,6 +70,13 @@ export interface MediaAsset {
   beats?: number[];
   /** Cached waveform peaks (max amplitude per bin) for rendering. */
   waveform?: { peaks: Float32Array; peaksPerSecond: number };
+  /** Absolute disk path (Electron only) — lets a reloaded project re-read the
+   *  source file automatically instead of asking the user to re-add it. */
+  path?: string;
+  /** Opaque main-process registration used for chunked reads and streaming. */
+  sourceToken?: string;
+  /** Preview uses a lightweight H.264 proxy while export keeps the original file. */
+  previewProxy?: boolean;
 }
 
 export type ClipEffectType = 'fade-in' | 'fade-out' | 'motion-blur';

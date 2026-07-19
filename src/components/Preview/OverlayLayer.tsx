@@ -1,5 +1,6 @@
+import { useEffect } from 'react';
 import type { OverlayText } from '../../lib/types';
-import { getFontStack } from '../../lib/fonts';
+import { ensureFontLoaded, getFontStack } from '../../lib/fonts';
 import {
   buildTextShadow,
   introPoseToCss,
@@ -49,6 +50,12 @@ function positionStyle(pos: OverlayText['position']): React.CSSProperties {
 }
 
 export function OverlayLayer({ overlays, contextValues, localTime }: OverlayLayerProps) {
+  useEffect(() => {
+    for (const family of new Set(overlays.map((overlay) => overlay.fontFamily))) {
+      void ensureFontLoaded(family);
+    }
+  }, [overlays]);
+
   if (overlays.length === 0) return null;
   // Settled pose by default (no intro / static preview) → a large local time.
   const t = localTime ?? 1e9;
