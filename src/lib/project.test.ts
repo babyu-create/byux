@@ -36,6 +36,13 @@ describe('parseProjectFile', () => {
     expect(parsed.clips[0].trimEnd).toBe(5);
   });
 
+  it('accepts high-frame-rate 1440p and 4K projects', () => {
+    const highFps = { ...validProject(), fps: 120 as const, resolution: '1440p' as const };
+    expect(parseProjectFile(JSON.stringify(highFps)).fps).toBe(120);
+    const fourK = { ...validProject(), resolution: '2160p' as const };
+    expect(parseProjectFile(JSON.stringify(fourK)).resolution).toBe('2160p');
+  });
+
   it('accepts the legacy app identifier', () => {
     const p = { ...validProject(), app: 'fps-clip-editor' as const };
     expect(() => parseProjectFile(JSON.stringify(p))).not.toThrow();

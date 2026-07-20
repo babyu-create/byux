@@ -31,6 +31,9 @@ const STATIC_GROUPS: { title: string; items: StaticEntry[] }[] = [
       { keys: ['Alt', '← / →'], label: '選択クリップを0.1秒ずつ移動' },
       { keys: ['Shift', 'Alt', '← / →'], label: '選択クリップを1秒ずつ移動' },
       { keys: ['右クリック'], label: '音量・速度・分割などのメニューを表示' },
+      { keys: ['トラック'], label: '映像・オーバーレイ・音声トラックを追加' },
+      { keys: ['トラック名をダブルクリック'], label: 'トラック名を変更' },
+      { keys: ['…'], label: 'トラックの並べ替え・削除' },
     ],
   },
   {

@@ -14,7 +14,14 @@
 
 import { FFmpeg, FFFSType } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
-import type { Clip, KillMarker, MediaAsset, Track } from './types';
+import type {
+  Clip,
+  KillMarker,
+  MediaAsset,
+  ProjectFps,
+  ProjectResolution,
+  Track,
+} from './types';
 import {
   buildDuckPoints,
   buildDuckVolumeExpr,
@@ -67,8 +74,8 @@ function getVideoEncodingSettings(
 }
 
 export interface ExportOptions {
-  resolution: '720p' | '1080p';
-  fps: 30 | 60;
+  resolution: ProjectResolution;
+  fps: ProjectFps;
   aspectRatio: '16:9' | '9:16';
   /** Human-facing quality/speed preset. Defaults to the balanced preset. */
   quality?: ExportQualityPreset;
@@ -337,13 +344,21 @@ async function execChecked(
 }
 
 export function getResolution(
-  resolution: '720p' | '1080p',
+  resolution: ProjectResolution,
   aspect: '16:9' | '9:16',
 ): { width: number; height: number } {
+  const landscape =
+    resolution === '2160p'
+      ? { width: 3840, height: 2160 }
+      : resolution === '1440p'
+        ? { width: 2560, height: 1440 }
+        : resolution === '1080p'
+          ? { width: 1920, height: 1080 }
+          : { width: 1280, height: 720 };
   if (aspect === '16:9') {
-    return resolution === '1080p' ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
+    return landscape;
   }
-  return resolution === '1080p' ? { width: 1080, height: 1920 } : { width: 720, height: 1280 };
+  return { width: landscape.height, height: landscape.width };
 }
 
 /** Build an atempo filter chain that supports any speed by chaining 0.5x or 2.0x stages. */

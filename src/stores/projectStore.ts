@@ -1,10 +1,24 @@
 import { create, useStore } from 'zustand';
 import { temporal } from 'zundo';
-import type { Clip, IORange, KillMarker, MediaAsset, PendingIn, Track } from '../lib/types';
+import type {
+  Clip,
+  IORange,
+  KillMarker,
+  MediaAsset,
+  PendingIn,
+  ProjectFps,
+  ProjectResolution,
+  Track,
+  TrackKind,
+} from '../lib/types';
 import { useMediaStore } from './mediaStore';
 import type { HudPreset } from '../lib/motionBlurCore';
 import type { AudioDucking } from '../lib/audioDucking';
 import { applyClipLook } from '../lib/presets';
+import {
+  applyKillBeatSyncSuggestions,
+  buildKillBeatSyncSuggestions,
+} from '../lib/killBeatSync';
 import {
   clamp,
   clipDuration,
@@ -25,8 +39,8 @@ const DEFAULT_TRACKS: Track[] = [
 interface ProjectStoreState {
   name: string;
   aspectRatio: '16:9' | '9:16';
-  fps: 30 | 60;
-  resolution: '720p' | '1080p';
+  fps: ProjectFps;
+  resolution: ProjectResolution;
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];
@@ -104,6 +118,11 @@ interface ProjectStoreState {
   toggleTrackLocked: (trackId: string) => void;
   toggleTrackMuted: (trackId: string) => void;
   toggleTrackHidden: (trackId: string) => void;
+  addTrack: (kind: TrackKind) => string | null;
+  renameTrack: (trackId: string, label: string) => boolean;
+  moveTrack: (trackId: string, direction: -1 | 1) => boolean;
+  duplicateTrack: (trackId: string) => string | null;
+  removeTrack: (trackId: string) => boolean;
   setSnapIndicator: (indicator: { time: number; type: string } | null) => void;
   addKillMarker: (assetId: string, time: number, label?: string) => string;
   removeKillMarker: (markerId: string) => void;
@@ -116,6 +135,7 @@ interface ProjectStoreState {
     assetId: string,
     options: { preRoll: number; postRoll: number; deleteSourceClips: boolean },
   ) => number;
+  syncKillsToBeats: (maxShiftSec?: number) => number;
   jumpToAdjacentMarker: (direction: 'prev' | 'next') => void;
 
   setIoIn: (assetId: string, time: number) => void;
@@ -199,6 +219,8 @@ interface ProjectStoreState {
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 8;
 const MIN_CLIP_DURATION = 0.1;
+const MAX_TRACKS = 100;
+const MAX_TRACK_LABEL_LENGTH = 48;
 
 // --- Undo / redo (zundo temporal) ------------------------------------------
 // Only the editable "document" is undoable; ephemeral UI state (playhead,
@@ -623,6 +645,114 @@ export const useProjectStore = create<ProjectStoreState>()(
         t.id === trackId ? { ...t, hidden: !t.hidden } : t,
       ),
     })),
+  addTrack: (kind) => {
+    const state = get();
+    if (!['video', 'overlay', 'audio'].includes(kind) || state.tracks.length >= MAX_TRACKS) {
+      return null;
+    }
+    const count = state.tracks.filter((track) => track.kind === kind).length + 1;
+    const baseLabel =
+      kind === 'video' ? '映像' : kind === 'overlay' ? 'オーバーレイ' : '音声';
+    const id = crypto.randomUUID();
+    const track: Track = {
+      id,
+      kind,
+      label: `${baseLabel} ${count}`,
+      locked: false,
+      muted: false,
+      hidden: false,
+    };
+    const lastVisualIndex = state.tracks.reduce(
+      (last, candidate, index) =>
+        candidate.kind === 'video' || candidate.kind === 'overlay' ? index : last,
+      -1,
+    );
+    const insertAt = kind === 'audio' ? state.tracks.length : lastVisualIndex + 1;
+    set({
+      tracks: [
+        ...state.tracks.slice(0, insertAt),
+        track,
+        ...state.tracks.slice(insertAt),
+      ],
+    });
+    return id;
+  },
+  renameTrack: (trackId, label) => {
+    const nextLabel = label.trim().slice(0, MAX_TRACK_LABEL_LENGTH);
+    if (!nextLabel || !get().tracks.some((track) => track.id === trackId)) return false;
+    set((state) => ({
+      tracks: state.tracks.map((track) =>
+        track.id === trackId ? { ...track, label: nextLabel } : track,
+      ),
+    }));
+    return true;
+  },
+  moveTrack: (trackId, direction) => {
+    const state = get();
+    const index = state.tracks.findIndex((track) => track.id === trackId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= state.tracks.length) return false;
+    const tracks = [...state.tracks];
+    [tracks[index], tracks[target]] = [tracks[target], tracks[index]];
+    set({ tracks });
+    return true;
+  },
+  duplicateTrack: (trackId) => {
+    const state = get();
+    if (state.tracks.length >= MAX_TRACKS) return null;
+    const index = state.tracks.findIndex((track) => track.id === trackId);
+    if (index < 0) return null;
+    const sourceTrack = state.tracks[index];
+    const id = crypto.randomUUID();
+    const track: Track = {
+      ...sourceTrack,
+      id,
+      label: `${sourceTrack.label} コピー`.slice(0, MAX_TRACK_LABEL_LENGTH),
+      locked: false,
+    };
+    const duplicatedClips = state.clips
+      .filter((clip) => clip.trackId === trackId)
+      .map((clip) => ({
+        ...clip,
+        id: crypto.randomUUID(),
+        trackId: id,
+        effects: clip.effects.map((effect) => ({ ...effect })),
+        overlays: clip.overlays?.map((overlay) => ({
+          ...overlay,
+          id: crypto.randomUUID(),
+        })),
+      }));
+    set({
+      tracks: [
+        ...state.tracks.slice(0, index + 1),
+        track,
+        ...state.tracks.slice(index + 1),
+      ],
+      clips: [...state.clips, ...duplicatedClips],
+      selectedClipIds: duplicatedClips.map((clip) => clip.id),
+    });
+    return id;
+  },
+  removeTrack: (trackId) => {
+    const state = get();
+    const track = state.tracks.find((candidate) => candidate.id === trackId);
+    if (!track) return false;
+    if (
+      track.kind === 'video' &&
+      state.tracks.filter((candidate) => candidate.kind === 'video').length <= 1
+    ) {
+      return false;
+    }
+    const removedClipIds = new Set(
+      state.clips.filter((clip) => clip.trackId === trackId).map((clip) => clip.id),
+    );
+    set({
+      tracks: state.tracks.filter((candidate) => candidate.id !== trackId),
+      clips: state.clips.filter((clip) => clip.trackId !== trackId),
+      selectedClipIds: state.selectedClipIds.filter((id) => !removedClipIds.has(id)),
+    });
+    return true;
+  },
   setSnapIndicator: (indicator) => set({ snapIndicator: indicator }),
 
   addKillMarker: (assetId, time, label) => {
@@ -743,6 +873,21 @@ export const useProjectStore = create<ProjectStoreState>()(
       selectedClipIds: newClips.map((c) => c.id),
     });
     return newClips.length;
+  },
+
+  syncKillsToBeats: (maxShiftSec = 0.45) => {
+    const state = get();
+    const suggestions = buildKillBeatSyncSuggestions({
+      clips: state.clips,
+      tracks: state.tracks,
+      markers: state.markers,
+      assets: useMediaStore.getState().assets,
+      fps: state.fps,
+      maxShiftSec,
+    });
+    if (suggestions.length === 0) return 0;
+    set({ clips: applyKillBeatSyncSuggestions(state.clips, suggestions) });
+    return suggestions.length;
   },
 
   setIoIn: (assetId, time) => {

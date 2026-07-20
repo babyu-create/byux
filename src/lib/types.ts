@@ -6,6 +6,8 @@ import type { ClipTransition } from './transitions';
 import type { AudioDucking } from './audioDucking';
 
 export type TrackKind = 'video' | 'overlay' | 'audio';
+export type ProjectFps = 30 | 60 | 120;
+export type ProjectResolution = '720p' | '1080p' | '1440p' | '2160p';
 
 /**
  * Animatable clip transform (Phase 0 keyframe engine). Each field is either a
@@ -227,8 +229,8 @@ export interface PendingIn {
 export interface ProjectState {
   name: string;
   aspectRatio: '16:9' | '9:16';
-  fps: 30 | 60;
-  resolution: '720p' | '1080p';
+  fps: ProjectFps;
+  resolution: ProjectResolution;
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];

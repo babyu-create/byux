@@ -58,10 +58,13 @@ describe('getResolution', () => {
   it('maps 16:9 presets', () => {
     expect(getResolution('1080p', '16:9')).toEqual({ width: 1920, height: 1080 });
     expect(getResolution('720p', '16:9')).toEqual({ width: 1280, height: 720 });
+    expect(getResolution('1440p', '16:9')).toEqual({ width: 2560, height: 1440 });
+    expect(getResolution('2160p', '16:9')).toEqual({ width: 3840, height: 2160 });
   });
   it('maps 9:16 presets (portrait)', () => {
     expect(getResolution('1080p', '9:16')).toEqual({ width: 1080, height: 1920 });
     expect(getResolution('720p', '9:16')).toEqual({ width: 720, height: 1280 });
+    expect(getResolution('2160p', '9:16')).toEqual({ width: 2160, height: 3840 });
   });
 });
 

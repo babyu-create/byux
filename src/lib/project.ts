@@ -8,6 +8,8 @@ import type {
   IORange,
   KillMarker,
   MediaAsset,
+  ProjectFps,
+  ProjectResolution,
   Track,
 } from './types';
 import type { AudioDucking } from './audioDucking';
@@ -31,8 +33,8 @@ export interface ProjectFile {
   app: 'highlight-maker' | 'fps-clip-editor';
   name: string;
   aspectRatio: '16:9' | '9:16';
-  fps: 30 | 60;
-  resolution: '720p' | '1080p';
+  fps: ProjectFps;
+  resolution: ProjectResolution;
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];
@@ -52,8 +54,8 @@ export interface ProjectFile {
 export interface SerialiseInput {
   name: string;
   aspectRatio: '16:9' | '9:16';
-  fps: 30 | 60;
-  resolution: '720p' | '1080p';
+  fps: ProjectFps;
+  resolution: ProjectResolution;
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];
@@ -305,9 +307,9 @@ const projectFileSchema = z.object({
   app: z.enum(['highlight-maker', 'fps-clip-editor']),
   name: shortString,
   aspectRatio: z.enum(['16:9', '9:16']),
-  fps: z.union([z.literal(30), z.literal(60)]),
-  resolution: z.enum(['720p', '1080p']),
-  tracks: z.array(trackSchema).max(64),
+  fps: z.union([z.literal(30), z.literal(60), z.literal(120)]),
+  resolution: z.enum(['720p', '1080p', '1440p', '2160p']),
+  tracks: z.array(trackSchema).max(100),
   clips: z.array(clipSchema).max(10_000),
   markers: z.array(markerSchema).max(100_000),
   ioRanges: z.array(ioRangeSchema).max(100_000),

@@ -67,20 +67,23 @@ function safeId(value, label) {
 }
 
 function getResolution(resolution, aspectRatio) {
-  if (resolution !== '720p' && resolution !== '1080p') {
+  const sizes = {
+    '720p': { width: 1280, height: 720 },
+    '1080p': { width: 1920, height: 1080 },
+    '1440p': { width: 2560, height: 1440 },
+    '2160p': { width: 3840, height: 2160 },
+  };
+  const landscape = sizes[resolution];
+  if (!landscape) {
     throw new NativeExportPlanError('INVALID_OPTIONS', '解像度が不正です');
   }
   if (aspectRatio !== '16:9' && aspectRatio !== '9:16') {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'アスペクト比が不正です');
   }
   if (aspectRatio === '16:9') {
-    return resolution === '1080p'
-      ? { width: 1920, height: 1080 }
-      : { width: 1280, height: 720 };
+    return landscape;
   }
-  return resolution === '1080p'
-    ? { width: 1080, height: 1920 }
-    : { width: 720, height: 1280 };
+  return { width: landscape.height, height: landscape.width };
 }
 
 function encodingSettings(quality) {
@@ -1016,7 +1019,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
   const options = request.options ?? {};
   const { width, height } = getResolution(options.resolution, options.aspectRatio);
   const fps = options.fps;
-  if (fps !== 30 && fps !== 60) {
+  if (fps !== 30 && fps !== 60 && fps !== 120) {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'フレームレートが不正です');
   }
   const encoding = encodingSettings(options.quality);

@@ -82,6 +82,38 @@ describe('native atempo precision', () => {
 });
 
 describe('nativeExportPlan', () => {
+  it('accepts 1440p, 4K and 120 fps output presets', () => {
+    const source = new Map([
+      ['asset', { path: 'source.mp4', hasAudio: false }],
+    ]);
+    const highFps = request();
+    highFps.options = { ...highFps.options, resolution: '1440p', fps: 120 };
+    const highFpsPlan = buildNativeExportPlan(
+      highFps,
+      source,
+      new Map(),
+      'output.part',
+    );
+    expect(highFpsPlan.width).toBe(2560);
+    expect(highFpsPlan.height).toBe(1440);
+    expect(highFpsPlan.fps).toBe(120);
+
+    const fourK = request();
+    fourK.options = {
+      ...fourK.options,
+      resolution: '2160p',
+      aspectRatio: '9:16',
+    };
+    const fourKPlan = buildNativeExportPlan(
+      fourK,
+      source,
+      new Map(),
+      'output.part',
+    );
+    expect(fourKPlan.width).toBe(2160);
+    expect(fourKPlan.height).toBe(3840);
+  });
+
   it('keeps authored gaps and builds a disk-backed single-pass graph', () => {
     const source = new Map([
       ['asset', { path: 'C:\\media\\source.mp4', hasAudio: false }],

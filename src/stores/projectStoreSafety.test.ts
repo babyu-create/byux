@@ -194,4 +194,68 @@ describe('project store safety invariants', () => {
     vi.advanceTimersByTime(200);
     expect(useProjectStore.temporal.getState().pastStates).toHaveLength(0);
   });
+
+  it('adds, renames and reorders tracks without changing existing clips', () => {
+    const id = useProjectStore.getState().addTrack('overlay');
+    expect(id).toBeTruthy();
+    expect(useProjectStore.getState().tracks.map((track) => track.kind)).toEqual([
+      'video',
+      'overlay',
+      'audio',
+    ]);
+    expect(useProjectStore.getState().renameTrack(id!, '  キル演出  ')).toBe(true);
+    expect(useProjectStore.getState().tracks.find((track) => track.id === id)?.label).toBe(
+      'キル演出',
+    );
+    expect(useProjectStore.getState().moveTrack(id!, -1)).toBe(true);
+    expect(useProjectStore.getState().tracks[0].id).toBe(id);
+  });
+
+  it('removes clips with a deleted track but preserves the final video track', () => {
+    useProjectStore.setState({
+      clips: [{
+        id: 'audio-clip',
+        trackId: 'audio',
+        assetId: ASSET.id,
+        start: 0,
+        trimStart: 0,
+        trimEnd: 1,
+        effects: [],
+      }],
+      selectedClipIds: ['audio-clip'],
+    });
+    expect(useProjectStore.getState().removeTrack('video')).toBe(false);
+    expect(useProjectStore.getState().removeTrack('audio')).toBe(true);
+    expect(useProjectStore.getState().clips).toHaveLength(0);
+    expect(useProjectStore.getState().selectedClipIds).toHaveLength(0);
+  });
+
+  it('duplicates a track with fresh track, clip and overlay identities', () => {
+    useProjectStore.setState({
+      clips: [{
+        id: 'source-clip',
+        trackId: 'video',
+        assetId: ASSET.id,
+        start: 0,
+        trimStart: 0,
+        trimEnd: 1,
+        effects: [{ type: 'fade-in', duration: 0.2 }],
+        overlays: [{
+          id: 'source-overlay',
+          text: 'ACE',
+          fontSize: 8,
+          color: '#fff',
+          position: 'center',
+        }],
+      }],
+    });
+    const duplicatedTrackId = useProjectStore.getState().duplicateTrack('video');
+    expect(duplicatedTrackId).toBeTruthy();
+    const duplicated = useProjectStore
+      .getState()
+      .clips.find((clip) => clip.trackId === duplicatedTrackId);
+    expect(duplicated?.id).not.toBe('source-clip');
+    expect(duplicated?.overlays?.[0].id).not.toBe('source-overlay');
+    expect(useProjectStore.getState().selectedClipIds).toEqual([duplicated?.id]);
+  });
 });

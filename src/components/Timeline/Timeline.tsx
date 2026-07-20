@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useProjectStore, useTimelineDuration } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { clipDuration, sourceTimeAtTimelineTime, timeToPx } from '../../lib/timeline';
@@ -63,7 +71,23 @@ export function Timeline() {
   const trackIds = useMemo(() => tracks.map((t) => t.id), [tracks]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const headerScrollRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
+  const [horizontalScrollbarHeight, setHorizontalScrollbarHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const update = () => {
+      setHorizontalScrollbarHeight(
+        Math.max(0, scroll.offsetHeight - scroll.clientHeight),
+      );
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(scroll);
+    return () => observer.disconnect();
+  }, []);
 
   // Stable callbacks so the keydown effect doesn't re-register on every render
   const stableRemoveSelected = useCallback(
@@ -270,18 +294,39 @@ export function Timeline() {
     },
     [clearSelection],
   );
+  const syncFromTimeline = useCallback(() => {
+    if (headerScrollRef.current && scrollRef.current) {
+      headerScrollRef.current.scrollTop = scrollRef.current.scrollTop;
+    }
+  }, []);
+  const syncFromHeaders = useCallback(() => {
+    if (headerScrollRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = headerScrollRef.current.scrollTop;
+    }
+  }, []);
 
   return (
     <TimelineScrollProvider value={{ scrollRef }}>
     <div className={styles.root}>
       <TimelineToolbar />
       <div className={styles.body}>
-        <div className={styles.trackHeaders}>
+        <div
+          className={styles.trackHeaders}
+          ref={headerScrollRef}
+          onScroll={syncFromHeaders}
+          style={{ paddingBottom: horizontalScrollbarHeight }}
+        >
           <TrackHeaderList trackIds={trackIds} />
         </div>
 
-        <div className={styles.scroll} ref={scrollRef}>
-          <div className={styles.scrollInner} style={{ width: totalWidth }}>
+        <div className={styles.scroll} ref={scrollRef} onScroll={syncFromTimeline}>
+          <div
+            className={styles.scrollInner}
+            style={{
+              width: totalWidth,
+              height: `max(100%, ${28 + tracks.length * 56}px)`,
+            }}
+          >
             <Ruler totalSec={totalSec} zoom={zoom} />
             <div
               className={styles.trackArea}
