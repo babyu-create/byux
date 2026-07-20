@@ -33,6 +33,12 @@ const {
   verifyFfmpegBinary,
 } = require('./nativeFfmpeg.cjs');
 const { renameWithRetry, syncFileForCommit } = require('./nativeFs.cjs');
+const {
+  VIDEO_EXTENSIONS,
+  AUDIO_EXTENSIONS,
+  mediaExtensionMatchesKind,
+  mediaKindForPath,
+} = require('./mediaFormats.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -1703,8 +1709,6 @@ ipcMain.handle('export:show-in-folder', (event) => {
 // an opaque token + streaming custom-protocol URL. Full bytes are read in
 // bounded chunks only when an explicit operation (export/beat detection) needs
 // them.
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi']);
-const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac']);
 const registeredMedia = new Map();
 const authorizedMediaRefs = new Map();
 const MAX_MEDIA_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -1772,18 +1776,6 @@ ipcMain.on('media:authorize-file-sync', (event, ref) => {
   }
 });
 
-function mediaExtensionMatchesKind(filePath, kind) {
-  const ext = path.extname(filePath).toLowerCase();
-  return kind === 'video' ? VIDEO_EXTENSIONS.has(ext) : AUDIO_EXTENSIONS.has(ext);
-}
-
-function mediaKindForPath(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  if (VIDEO_EXTENSIONS.has(ext)) return 'video';
-  if (AUDIO_EXTENSIONS.has(ext)) return 'audio';
-  return null;
-}
-
 function registerResolvedMedia(realPath, stat, kind, name) {
   const token = crypto.randomUUID();
   registeredMedia.set(token, {
@@ -1805,7 +1797,9 @@ function registerResolvedMedia(realPath, stat, kind, name) {
 }
 
 ipcMain.handle('media:select-files', async (event, options) => {
-  if (!isTrustedIpcEvent(event)) return [];
+  if (!isTrustedIpcEvent(event)) {
+    return { sources: [], errors: ['安全でない画面からの操作を拒否しました'], canceled: false };
+  }
   const requestedKind =
     options?.kind === 'video' || options?.kind === 'audio'
       ? options.kind
@@ -1828,20 +1822,41 @@ ipcMain.handle('media:select-files', async (event, options) => {
             : '動画・音声',
         extensions,
       },
+      { name: 'すべてのファイル', extensions: ['*'] },
     ],
   });
-  if (result.canceled) return [];
+  if (result.canceled) return { sources: [], errors: [], canceled: true };
 
   const sources = [];
+  const errors = [];
   for (const selectedPath of result.filePaths) {
+    const displayName = path.basename(selectedPath).slice(0, 1_024) || '選択したファイル';
     try {
-      if (isDangerousWindowsDevicePath(selectedPath)) continue;
+      if (isDangerousWindowsDevicePath(selectedPath)) {
+        errors.push(`${displayName}: 安全でないパスのため追加できません`);
+        continue;
+      }
       const realPath = await fs.realpath(selectedPath);
-      if (isDangerousWindowsDevicePath(realPath)) continue;
+      if (isDangerousWindowsDevicePath(realPath)) {
+        errors.push(`${displayName}: 安全でないパスのため追加できません`);
+        continue;
+      }
       const kind = mediaKindForPath(realPath);
-      if (!kind || (requestedKind && kind !== requestedKind)) continue;
+      if (!kind) {
+        errors.push(`${displayName}: この拡張子はまだ対応していません`);
+        continue;
+      }
+      if (requestedKind && kind !== requestedKind) {
+        errors.push(
+          `${displayName}: ${requestedKind === 'video' ? '動画' : '音声'}ファイルを選択してください`,
+        );
+        continue;
+      }
       const stat = await fs.stat(realPath);
-      if (!stat.isFile()) continue;
+      if (!stat.isFile()) {
+        errors.push(`${displayName}: 通常のファイルではありません`);
+        continue;
+      }
       const name = path.basename(realPath);
       const registered = registerResolvedMedia(realPath, stat, kind, name);
       sources.push({
@@ -1851,10 +1866,10 @@ ipcMain.handle('media:select-files', async (event, options) => {
         kind,
       });
     } catch {
-      // A selection may disappear or become unreadable before registration.
+      errors.push(`${displayName}: ファイルを読み取れません`);
     }
   }
-  return sources;
+  return { sources, errors, canceled: false };
 });
 
 ipcMain.handle('media:register-file', async (event, ref) => {
@@ -2007,20 +2022,20 @@ async function cleanupOrphanedProxies() {
   await pruneProxyCache();
 }
 
-async function registerProxyFile(proxyPath) {
+async function registerProxyFile(proxyPath, kind) {
   const [realPath, stat] = await Promise.all([
     fs.realpath(proxyPath),
     fs.lstat(proxyPath),
   ]);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 12) {
-    throw new Error('プレビュー用動画が破損しています');
+    throw new Error('プレビュー素材が破損しています');
   }
   const handle = await fs.open(realPath, 'r');
   try {
     const header = Buffer.alloc(12);
     const { bytesRead } = await handle.read(header, 0, header.length, 0);
     if (bytesRead < 12 || header.toString('ascii', 4, 8) !== 'ftyp') {
-      throw new Error('プレビュー用動画が有効なMP4ではありません');
+      throw new Error('プレビュー素材が有効なMP4ではありません');
     }
   } finally {
     await handle.close();
@@ -2029,7 +2044,7 @@ async function registerProxyFile(proxyPath) {
   registeredMedia.set(token, {
     path: realPath,
     size: stat.size,
-    kind: 'video',
+    kind,
     name: path.basename(realPath),
     dev: stat.dev,
     ino: stat.ino,
@@ -2092,7 +2107,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     return { ok: false, error: 'untrusted sender' };
   }
   const source = registeredMedia.get(sourceToken);
-  if (!source || source.kind !== 'video') {
+  if (!source || (source.kind !== 'video' && source.kind !== 'audio')) {
     return { ok: false, error: '元素材を確認できません' };
   }
   let job = null;
@@ -2113,16 +2128,19 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     ) {
       throw new Error('元素材が読み込み後に変更されました');
     }
+    const proxyProfile = source.kind === 'video'
+      ? 'proxy-v1-1280-crf27'
+      : 'audio-proxy-v1-aac160-stereo';
     const fingerprint = crypto
       .createHash('sha256')
-      .update(`${realPath}\0${stat.size}\0${stat.mtimeMs}\0proxy-v1-1280-crf27`)
+      .update(`${realPath}\0${stat.size}\0${stat.mtimeMs}\0${proxyProfile}`)
       .digest('hex');
     const root = proxyCacheRoot();
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
     const proxyPath = path.join(root, `${fingerprint}.mp4`);
     try {
       await fs.utimes(proxyPath, new Date(), new Date()).catch(() => {});
-      const registered = await registerProxyFile(proxyPath);
+      const registered = await registerProxyFile(proxyPath, source.kind);
       await pruneProxyCache();
       return { ok: true, ...registered, cached: true };
     } catch {
@@ -2145,6 +2163,40 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     };
     pendingProxyJobs.set(token, job);
     const binaryPath = ffmpegBinaryPath();
+    const transcodeArgs = source.kind === 'video'
+      ? [
+          '-map',
+          '0:v:0',
+          '-map',
+          '0:a:0?',
+          '-vf',
+          "scale='min(1280,iw)':-2",
+          '-c:v',
+          'libx264',
+          '-preset',
+          'ultrafast',
+          '-crf',
+          '27',
+          '-pix_fmt',
+          'yuv420p',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '128k',
+          '-ac',
+          '2',
+        ]
+      : [
+          '-map',
+          '0:a:0',
+          '-vn',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '160k',
+          '-ac',
+          '2',
+        ];
     const child = spawn(
       binaryPath,
       [
@@ -2157,26 +2209,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
         'file,pipe',
         '-i',
         source.path,
-        '-map',
-        '0:v:0',
-        '-map',
-        '0:a:0?',
-        '-vf',
-        "scale='min(1280,iw)':-2",
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-crf',
-        '27',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
-        '-ac',
-        '2',
+        ...transcodeArgs,
         '-movflags',
         '+faststart',
         '-n',
@@ -2207,7 +2240,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     await renameWithRetry(temporaryPath, proxyPath, {
       shouldAbort: () => job.cancelled,
     });
-    const registered = await registerProxyFile(proxyPath);
+    const registered = await registerProxyFile(proxyPath, source.kind);
     pendingProxyJobs.delete(token);
     if (!job.sourceLeaseReleased) {
       job.sourceLeaseReleased = true;

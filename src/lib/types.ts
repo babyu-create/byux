@@ -94,6 +94,12 @@ export interface NativeMediaSource {
   url: string;
 }
 
+export interface NativeMediaSelectionResult {
+  sources: NativeMediaSource[];
+  errors: string[];
+  canceled: boolean;
+}
+
 export type NativeMediaRegistrationResult =
   | { ok: true; source: NativeMediaSource }
   | {

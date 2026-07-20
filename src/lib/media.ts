@@ -6,11 +6,90 @@ export interface MediaProbeResult {
   height?: number;
 }
 
-const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'mkv', 'webm', 'avi']);
-const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac']);
+export const SUPPORTED_VIDEO_EXTENSIONS = [
+  'mp4',
+  'm4v',
+  'mov',
+  'qt',
+  'mkv',
+  'webm',
+  'avi',
+  'wmv',
+  'asf',
+  'flv',
+  'f4v',
+  'ts',
+  'mts',
+  'm2ts',
+  'm2t',
+  'mpg',
+  'mpeg',
+  'mpe',
+  'vob',
+  'ogv',
+  '3gp',
+  '3g2',
+  'mxf',
+] as const;
+
+export const SUPPORTED_AUDIO_EXTENSIONS = [
+  'mp3',
+  'wav',
+  'wave',
+  'ogg',
+  'oga',
+  'opus',
+  'm4a',
+  'aac',
+  'flac',
+  'wma',
+  'aiff',
+  'aif',
+  'ac3',
+  'eac3',
+  'amr',
+] as const;
+
+const VIDEO_EXTENSIONS = new Set<string>(SUPPORTED_VIDEO_EXTENSIONS);
+const AUDIO_EXTENSIONS = new Set<string>(SUPPORTED_AUDIO_EXTENSIONS);
+const MEDIA_METADATA_TIMEOUT_MS = 20_000;
+const PROXY_FIRST_VIDEO_EXTENSIONS = new Set([
+  'mkv',
+  'avi',
+  'wmv',
+  'asf',
+  'flv',
+  'f4v',
+  'ts',
+  'mts',
+  'm2ts',
+  'm2t',
+  'mpg',
+  'mpeg',
+  'mpe',
+  'vob',
+  'ogv',
+  'mxf',
+]);
+const PROXY_FIRST_AUDIO_EXTENSIONS = new Set([
+  'wma',
+  'aiff',
+  'aif',
+  'ac3',
+  'eac3',
+  'amr',
+]);
 
 function fileExtension(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() ?? '';
+}
+
+export function needsVideoPreviewProxy(filename: string): boolean {
+  return PROXY_FIRST_VIDEO_EXTENSIONS.has(fileExtension(filename));
+}
+
+export function needsAudioPreviewProxy(filename: string): boolean {
+  return PROXY_FIRST_AUDIO_EXTENSIONS.has(fileExtension(filename));
 }
 
 export function isVideoFile(file: File): boolean {
@@ -27,16 +106,43 @@ export function isAudioFile(file: File): boolean {
 // guess would make a valid media file look "unsupported".
 const EXTENSION_MIME: Record<string, string> = {
   mp4: 'video/mp4',
+  m4v: 'video/x-m4v',
   mov: 'video/quicktime',
+  qt: 'video/quicktime',
   mkv: 'video/x-matroska',
   webm: 'video/webm',
   avi: 'video/x-msvideo',
+  wmv: 'video/x-ms-wmv',
+  asf: 'video/x-ms-asf',
+  flv: 'video/x-flv',
+  f4v: 'video/mp4',
+  ts: 'video/mp2t',
+  mts: 'video/mp2t',
+  m2ts: 'video/mp2t',
+  m2t: 'video/mp2t',
+  mpg: 'video/mpeg',
+  mpeg: 'video/mpeg',
+  mpe: 'video/mpeg',
+  vob: 'video/mpeg',
+  ogv: 'video/ogg',
+  '3gp': 'video/3gpp',
+  '3g2': 'video/3gpp2',
+  mxf: 'application/mxf',
   mp3: 'audio/mpeg',
   wav: 'audio/wav',
+  wave: 'audio/wav',
   ogg: 'audio/ogg',
+  oga: 'audio/ogg',
+  opus: 'audio/ogg; codecs=opus',
   m4a: 'audio/mp4',
   aac: 'audio/aac',
   flac: 'audio/flac',
+  wma: 'audio/x-ms-wma',
+  aiff: 'audio/aiff',
+  aif: 'audio/aiff',
+  ac3: 'audio/ac3',
+  eac3: 'audio/eac3',
+  amr: 'audio/amr',
 };
 
 export function guessMimeType(filename: string, kind: 'video' | 'audio'): string {
@@ -52,6 +158,7 @@ export function probeVideoMetadata(file: File): Promise<MediaProbeResult> {
     video.muted = true;
 
     const cleanup = () => {
+      clearTimeout(timeoutId);
       video.removeAttribute('src');
       URL.revokeObjectURL(url);
     };
@@ -71,6 +178,10 @@ export function probeVideoMetadata(file: File): Promise<MediaProbeResult> {
       reject(new Error(`Failed to read video metadata: ${file.name}`));
     };
 
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out reading video metadata: ${file.name}`));
+    }, MEDIA_METADATA_TIMEOUT_MS);
     video.src = url;
   });
 }
@@ -82,6 +193,7 @@ export function probeAudioMetadata(file: File): Promise<MediaProbeResult> {
     audio.preload = 'metadata';
 
     const cleanup = () => {
+      clearTimeout(timeoutId);
       audio.removeAttribute('src');
       URL.revokeObjectURL(url);
     };
@@ -99,6 +211,10 @@ export function probeAudioMetadata(file: File): Promise<MediaProbeResult> {
       reject(new Error(`Failed to read audio metadata: ${file.name}`));
     };
 
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out reading audio metadata: ${file.name}`));
+    }, MEDIA_METADATA_TIMEOUT_MS);
     audio.src = url;
   });
 }
@@ -210,6 +326,7 @@ export function probeVideoUrlMetadata(url: string): Promise<MediaProbeResult> {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
     const cleanup = () => {
+      clearTimeout(timeoutId);
       // Clearing the handlers first is important: calling load() after
       // removing src can itself emit `error`, which otherwise re-enters
       // cleanup and may loop on some Chromium versions.
@@ -242,6 +359,10 @@ export function probeVideoUrlMetadata(url: string): Promise<MediaProbeResult> {
       cleanup();
       reject(new Error('プレビュー用動画を読み込めませんでした'));
     };
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error('プレビュー用動画の読み込みがタイムアウトしました'));
+    }, MEDIA_METADATA_TIMEOUT_MS);
     video.src = url;
   });
 }
@@ -252,6 +373,7 @@ export function probeAudioUrlMetadata(url: string): Promise<MediaProbeResult> {
   return new Promise((resolve, reject) => {
     const audio = document.createElement('audio');
     const cleanup = () => {
+      clearTimeout(timeoutId);
       audio.onloadedmetadata = null;
       audio.onerror = null;
       audio.removeAttribute('src');
@@ -261,12 +383,20 @@ export function probeAudioUrlMetadata(url: string): Promise<MediaProbeResult> {
     audio.onloadedmetadata = () => {
       const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
       cleanup();
+      if (duration <= 0) {
+        reject(new Error('プレビュー用音声の情報を読み取れませんでした'));
+        return;
+      }
       resolve({ duration });
     };
     audio.onerror = () => {
       cleanup();
-      reject(new Error('Failed to read streamed audio metadata'));
+      reject(new Error('プレビュー用音声を読み込めませんでした'));
     };
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error('プレビュー用音声の読み込みがタイムアウトしました'));
+    }, MEDIA_METADATA_TIMEOUT_MS);
     audio.src = url;
   });
 }

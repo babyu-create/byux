@@ -3,7 +3,7 @@ import { Sparkles, Download, CheckCircle2, AlertTriangle } from 'lucide-react';
 import type { NativeExportRequest } from '../../lib/nativeExporter';
 import type {
   NativeMediaRegistrationResult,
-  NativeMediaSource,
+  NativeMediaSelectionResult,
 } from '../../lib/types';
 import styles from './UpdateBanner.module.css';
 
@@ -186,7 +186,7 @@ interface FCEGlobal {
   selectMediaFiles?: (options?: {
     kind?: 'video' | 'audio';
     multiple?: boolean;
-  }) => Promise<NativeMediaSource[]>;
+  }) => Promise<NativeMediaSelectionResult>;
   /** Register a saved source path and receive an opaque streaming handle. */
   registerMediaFile?: (ref: {
     path: string;
@@ -194,7 +194,7 @@ interface FCEGlobal {
     size: number;
     kind: 'video' | 'audio';
   }) => Promise<{ token: string; url: string; size: number } | null>;
-  /** Create/reuse a disk-backed H.264 preview without loading the source into renderer memory. */
+  /** Create/reuse a disk-backed H.264/AAC preview without loading the source into renderer memory. */
   createPreviewProxy?: (sourceToken: string) => Promise<{
     ok: boolean;
     token?: string;

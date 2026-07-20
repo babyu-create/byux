@@ -13,6 +13,12 @@ interface MediaLibraryProps {
   onToggleCollapse: () => void;
 }
 
+function selectionErrorMessage(errors: string[]): string {
+  if (errors.length === 0) return '選択したファイルを追加できませんでした';
+  const visible = errors.slice(0, 3).join(' / ');
+  return errors.length > 3 ? `${visible} / ほか${errors.length - 3}件` : visible;
+}
+
 export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps) {
   const assets = useMediaStore((s) => s.assets);
   const selectedAssetId = useMediaStore((s) => s.selectedAssetId);
@@ -32,6 +38,7 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
   const relinkInputRef = useRef<HTMLInputElement>(null);
   const [relinkTarget, setRelinkTarget] = useState<ProjectAssetRef | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isPickingMedia, setIsPickingMedia] = useState(false);
   // Track nested dragenter events so dragleave on a child doesn't flip the
   // overlay off while still hovering the parent drop zone.
   const dragDepthRef = useRef(0);
@@ -53,14 +60,25 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
           4000,
         );
       } else {
-        showMessage('error', 'ファイルを追加できませんでした。形式を確認してください', 4000);
+        showMessage(
+          'error',
+          useMediaStore.getState().importError ??
+            'ファイルを追加できませんでした。対応形式または読み取り権限を確認してください',
+          6000,
+        );
       }
     });
   };
 
   const handleClick = () => {
-    if (isImporting) {
-      showMessage('info', '現在の読み込みが終わるまでお待ちください', 2500);
+    if (isImporting || isPickingMedia) {
+      showMessage(
+        'info',
+        isPickingMedia
+          ? 'ファイル選択画面を操作してください'
+          : '現在の読み込みが終わるまでお待ちください',
+        2500,
+      );
       return;
     }
     const selectMediaFiles = window.fce?.selectMediaFiles;
@@ -68,12 +86,23 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
       fileInputRef.current?.click();
       return;
     }
+    setIsPickingMedia(true);
     void selectMediaFiles({ multiple: true })
-      .then(async (sources) => {
-        if (sources.length === 0) return;
+      .then(async ({ sources, errors, canceled }) => {
+        if (canceled) return;
+        if (sources.length === 0) {
+          showMessage('error', selectionErrorMessage(errors), 6000);
+          return;
+        }
         const created = await addNativeSources(sources);
         if (created.length === sources.length) {
-          showMessage('success', `${created.length}個のファイルを追加しました`, 1800);
+          showMessage(
+            errors.length > 0 ? 'info' : 'success',
+            errors.length > 0
+              ? `${created.length}個を追加しました / ${selectionErrorMessage(errors)}`
+              : `${created.length}個のファイルを追加しました`,
+            errors.length > 0 ? 6000 : 1800,
+          );
         } else if (created.length > 0) {
           showMessage(
             'info',
@@ -81,11 +110,18 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
             4000,
           );
         } else {
-          showMessage('error', 'ファイルを追加できませんでした。形式を確認してください', 4000);
+          showMessage(
+            'error',
+            useMediaStore.getState().importError ?? selectionErrorMessage(errors),
+            6000,
+          );
         }
       })
       .catch(() => {
         showMessage('error', 'ファイル選択を開けませんでした', 4000);
+      })
+      .finally(() => {
+        setIsPickingMedia(false);
       });
   };
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -133,15 +169,26 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
   };
 
   const chooseRelinkFile = (ref: ProjectAssetRef) => {
-    if (isImporting) {
-      showMessage('info', '現在の読み込みが終わるまでお待ちください', 2500);
+    if (isImporting || isPickingMedia) {
+      showMessage(
+        'info',
+        isPickingMedia
+          ? 'ファイル選択画面を操作してください'
+          : '現在の読み込みが終わるまでお待ちください',
+        2500,
+      );
       return;
     }
     const selectMediaFiles = window.fce?.selectMediaFiles;
     if (selectMediaFiles) {
+      setIsPickingMedia(true);
       void selectMediaFiles({ kind: ref.kind, multiple: false })
-        .then(async (sources) => {
-          if (sources.length === 0) return;
+        .then(async ({ sources, errors, canceled }) => {
+          if (canceled) return;
+          if (sources.length === 0) {
+            showMessage('error', selectionErrorMessage(errors), 6000);
+            return;
+          }
           const created = await addNativeSources(sources);
           const asset = created[0];
           if (!asset) {
@@ -152,6 +199,9 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
         })
         .catch(() => {
           showMessage('error', 'ファイル選択を開けませんでした', 4000);
+        })
+        .finally(() => {
+          setIsPickingMedia(false);
         });
       return;
     }

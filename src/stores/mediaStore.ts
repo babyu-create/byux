@@ -5,8 +5,11 @@ import {
   guessMimeType,
   isAudioFile,
   isVideoFile,
+  needsAudioPreviewProxy,
+  needsVideoPreviewProxy,
   probeAudioUrlMetadata,
   probeVideoUrlMetadata,
+  type MediaProbeResult,
 } from '../lib/media';
 import { computeWaveform } from '../lib/audio';
 import type { ProjectAssetRef } from '../lib/project';
@@ -61,12 +64,12 @@ async function assetFromNativeSource(
   try {
     let previewUrl = source.url;
     let previewProxy = false;
-    if (
-      source.kind === 'video' &&
-      /\.(?:avi|mkv)$/i.test(source.name) &&
-      window.fce?.createPreviewProxy
-    ) {
-      const proxy = await window.fce.createPreviewProxy(source.token);
+    const createCompatiblePreview = async () => {
+      const createPreviewProxy = window.fce?.createPreviewProxy;
+      if (!createPreviewProxy) {
+        throw new Error(`${source.name} の互換プレビュー機能を利用できません`);
+      }
+      const proxy = await createPreviewProxy(source.token);
       if (!proxy.ok || !proxy.token || !proxy.url || !proxy.size) {
         throw new Error(
           proxy.error ?? `${source.name} の互換プレビューを作成できません`,
@@ -75,11 +78,32 @@ async function assetFromNativeSource(
       previewToken = proxy.token;
       previewUrl = proxy.url;
       previewProxy = true;
+    };
+    if (
+      (source.kind === 'video' && needsVideoPreviewProxy(source.name)) ||
+      (source.kind === 'audio' && needsAudioPreviewProxy(source.name))
+    ) {
+      await createCompatiblePreview();
     }
-    const metadata =
-      source.kind === 'video'
-        ? await probeVideoUrlMetadata(previewUrl)
-        : await probeAudioUrlMetadata(previewUrl);
+    let metadata: MediaProbeResult;
+    try {
+      metadata =
+        source.kind === 'video'
+          ? await probeVideoUrlMetadata(previewUrl)
+          : await probeAudioUrlMetadata(previewUrl);
+    } catch (probeError) {
+      // A container extension does not guarantee Chromium can decode the
+      // streams inside it (HEVC/AV1/PCM/WMA are common examples). Keep the
+      // original token for export and create a compatible editing proxy.
+      if (previewProxy || !window.fce?.createPreviewProxy) {
+        throw probeError;
+      }
+      await createCompatiblePreview();
+      metadata =
+        source.kind === 'video'
+          ? await probeVideoUrlMetadata(previewUrl)
+          : await probeAudioUrlMetadata(previewUrl);
+    }
     return {
       id: crypto.randomUUID(),
       name: source.name,
@@ -213,10 +237,11 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
         try {
           if (
             window.fce?.isElectron &&
-            /\.(?:avi|mkv)$/i.test(file.name) &&
+            ((kind === 'video' && needsVideoPreviewProxy(file.name)) ||
+              (kind === 'audio' && needsAudioPreviewProxy(file.name))) &&
             window.fce.createPreviewProxy
           ) {
-            throw new Error('長尺対応の互換プレビューを作成します');
+            throw new Error('互換プレビューを作成します');
           }
           asset = await fileToMediaAsset(file);
           if (asset && registeredSource) {
@@ -227,7 +252,7 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
             };
           }
         } catch (probeError) {
-          if (!isVideoFile(file)) throw probeError;
+          if (!kind) throw probeError;
           const { createPreviewProxy } = await import('../lib/exporter');
           const createNativeProxy = window.fce?.createPreviewProxy;
           if (!registeredSource) {
@@ -238,21 +263,21 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
                 path: originalPath,
                 name: file.name,
                 size: file.size,
-                kind: 'video',
+                kind,
               });
               if (original?.token) {
                 registeredSource = {
                   ...original,
                   path: originalPath,
                   name: file.name,
-                  kind: 'video',
+                  kind,
                 };
               }
             }
           }
           if (registeredSource && createNativeProxy) {
             if (importGeneration === mediaImportGeneration) {
-              set({ importStatus: `${file.name} を長尺対応のプレビューへ変換中…` });
+              set({ importStatus: `${file.name} を互換プレビューへ変換中…` });
             }
             let proxyToken: string | undefined;
             try {
@@ -264,15 +289,18 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
                 );
               }
               proxyToken = proxy.token;
-              const meta = await probeVideoUrlMetadata(proxy.url);
+              const meta =
+                kind === 'video'
+                  ? await probeVideoUrlMetadata(proxy.url)
+                  : await probeAudioUrlMetadata(proxy.url);
               asset = {
                 id: crypto.randomUUID(),
                 name: file.name,
-                kind: 'video',
+                kind,
                 url: proxy.url,
                 file,
                 size: file.size,
-                mimeType: file.type || guessMimeType(file.name, 'video'),
+                mimeType: file.type || guessMimeType(file.name, kind),
                 duration: meta.duration,
                 width: meta.width,
                 height: meta.height,
@@ -288,6 +316,7 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
               throw error;
             }
           } else {
+            if (kind !== 'video') throw probeError;
             const proxy = await createPreviewProxy(file, (importStatus) =>
               importGeneration === mediaImportGeneration
                 ? set({ importStatus })
@@ -430,66 +459,23 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
 
   addRecoveredAsset: async (ref, source) => {
     const importGeneration = mediaImportGeneration;
-    let previewToken: string | undefined;
-    try {
-      let preview = {
-        url: source.url,
-        duration: ref.duration,
-        width: ref.width,
-        height: ref.height,
-        previewProxy: false,
-      };
-      if (
-        ref.kind === 'video' &&
-        /\.(?:avi|mkv)$/i.test(ref.name) &&
-        window.fce?.createPreviewProxy
-      ) {
-        const proxy = await window.fce.createPreviewProxy(source.token);
-        if (!proxy.ok || !proxy.token || !proxy.url || !proxy.size) {
-          throw new Error(
-            proxy.error ?? `${ref.name} の互換プレビューを復元できません`,
-          );
-        }
-        previewToken = proxy.token;
-        const meta = await probeVideoUrlMetadata(proxy.url);
-        preview = {
-          url: proxy.url,
-          duration: meta.duration,
-          width: meta.width,
-          height: meta.height,
-          previewProxy: true,
-        };
-      }
-      const asset: MediaAsset = {
-        id: crypto.randomUUID(),
-        name: ref.name,
-        kind: ref.kind,
-        url: preview.url,
-        size: source.size,
-        mimeType: guessMimeType(ref.name, ref.kind),
-        duration: preview.duration,
-        width: preview.width,
-        height: preview.height,
-        path: ref.path,
-        sourceToken: source.token,
-        previewSourceToken: previewToken,
-        previewProxy: preview.previewProxy,
-      };
-      if (importGeneration !== mediaImportGeneration) {
-        throw new Error('素材の復元が中止されました');
-      }
-      set((state) => ({
-        assets: [...state.assets, asset],
-        selectedAssetId: state.selectedAssetId ?? asset.id,
-      }));
-      return asset;
-    } catch (error) {
-      if (previewToken) {
-        await window.fce?.releaseMediaFile?.(previewToken).catch(() => {});
-      }
-      await window.fce?.releaseMediaFile?.(source.token).catch(() => {});
-      throw error;
+    const asset = await assetFromNativeSource({
+      path: ref.path ?? '',
+      name: ref.name,
+      size: source.size,
+      kind: ref.kind,
+      token: source.token,
+      url: source.url,
+    });
+    if (importGeneration !== mediaImportGeneration) {
+      await releaseAssetMediaTokensNow(asset);
+      throw new Error('素材の復元が中止されました');
     }
+    set((state) => ({
+      assets: [...state.assets, asset],
+      selectedAssetId: state.selectedAssetId ?? asset.id,
+    }));
+    return asset;
   },
 
   removeAsset: (id) => {

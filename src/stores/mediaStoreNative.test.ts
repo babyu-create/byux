@@ -89,6 +89,143 @@ describe('mediaStore native source registration', () => {
     expect(useMediaStore.getState().importError).toContain('probe failed')
   })
 
+  it('creates a native compatibility proxy before probing an MPEG-TS source', async () => {
+    const source = {
+      ...SOURCE,
+      path: 'C:\\Videos\\match.m2ts',
+      name: 'match.m2ts',
+      token: 'm2ts-source-token',
+      url: 'fce-media://asset/m2ts-source-token',
+    }
+    const createPreviewProxy = vi.fn().mockResolvedValue({
+      ok: true,
+      token: 'proxy-token',
+      url: 'fce-media://asset/proxy-token',
+      size: 4_000_000,
+      cached: false,
+    })
+    installFceApi({ createPreviewProxy })
+    mediaMocks.probeVideoUrlMetadata.mockResolvedValue({
+      duration: 90,
+      width: 1280,
+      height: 720,
+    })
+
+    const created = await useMediaStore.getState().addNativeSources([source])
+
+    expect(createPreviewProxy).toHaveBeenCalledWith(source.token)
+    expect(mediaMocks.probeVideoUrlMetadata).toHaveBeenCalledOnce()
+    expect(mediaMocks.probeVideoUrlMetadata).toHaveBeenCalledWith(
+      'fce-media://asset/proxy-token',
+    )
+    expect(created[0]).toMatchObject({
+      sourceToken: source.token,
+      previewSourceToken: 'proxy-token',
+      previewProxy: true,
+      url: 'fce-media://asset/proxy-token',
+    })
+  })
+
+  it('falls back to a proxy when an MP4 contains a Chromium-incompatible codec', async () => {
+    const createPreviewProxy = vi.fn().mockResolvedValue({
+      ok: true,
+      token: 'codec-proxy-token',
+      url: 'fce-media://asset/codec-proxy-token',
+      size: 5_000_000,
+      cached: false,
+    })
+    installFceApi({ createPreviewProxy })
+    mediaMocks.probeVideoUrlMetadata
+      .mockRejectedValueOnce(new Error('unsupported codec'))
+      .mockResolvedValueOnce({ duration: 140, width: 1280, height: 720 })
+
+    const created = await useMediaStore.getState().addNativeSources([SOURCE])
+
+    expect(createPreviewProxy).toHaveBeenCalledWith(SOURCE.token)
+    expect(mediaMocks.probeVideoUrlMetadata).toHaveBeenNthCalledWith(1, SOURCE.url)
+    expect(mediaMocks.probeVideoUrlMetadata).toHaveBeenNthCalledWith(
+      2,
+      'fce-media://asset/codec-proxy-token',
+    )
+    expect(created[0]).toMatchObject({
+      sourceToken: SOURCE.token,
+      previewSourceToken: 'codec-proxy-token',
+      previewProxy: true,
+    })
+  })
+
+  it('creates an AAC compatibility proxy for WMA audio', async () => {
+    const source: NativeMediaSource = {
+      path: 'C:\\Audio\\soundtrack.wma',
+      name: 'soundtrack.wma',
+      size: 20_000_000,
+      kind: 'audio',
+      token: 'wma-source-token',
+      url: 'fce-media://asset/wma-source-token',
+    }
+    const createPreviewProxy = vi.fn().mockResolvedValue({
+      ok: true,
+      token: 'audio-proxy-token',
+      url: 'fce-media://asset/audio-proxy-token',
+      size: 2_000_000,
+      cached: false,
+    })
+    installFceApi({ createPreviewProxy })
+    mediaMocks.probeAudioUrlMetadata.mockResolvedValue({ duration: 180 })
+
+    const created = await useMediaStore.getState().addNativeSources([source])
+
+    expect(createPreviewProxy).toHaveBeenCalledWith(source.token)
+    expect(mediaMocks.probeAudioUrlMetadata).toHaveBeenCalledWith(
+      'fce-media://asset/audio-proxy-token',
+    )
+    expect(created[0]).toMatchObject({
+      kind: 'audio',
+      sourceToken: source.token,
+      previewSourceToken: 'audio-proxy-token',
+      previewProxy: true,
+    })
+  })
+
+  it('uses the same compatibility path for a disk-backed WMA drag', async () => {
+    const file = new File(['wma'], 'dragged-soundtrack.wma', {
+      type: 'audio/x-ms-wma',
+    })
+    const source: NativeMediaSource = {
+      path: 'C:\\Audio\\dragged-soundtrack.wma',
+      name: file.name,
+      size: file.size,
+      kind: 'audio',
+      token: 'dragged-wma-token',
+      url: 'fce-media://asset/dragged-wma-token',
+    }
+    const registerMediaFileFromFile = vi.fn().mockResolvedValue({
+      ok: true,
+      source,
+    })
+    const createPreviewProxy = vi.fn().mockResolvedValue({
+      ok: true,
+      token: 'dragged-audio-proxy-token',
+      url: 'fce-media://asset/dragged-audio-proxy-token',
+      size: 100,
+      cached: false,
+    })
+    installFceApi({ registerMediaFileFromFile, createPreviewProxy })
+    mediaMocks.probeAudioUrlMetadata.mockResolvedValue({ duration: 30 })
+
+    const created = await useMediaStore.getState().addFiles([file])
+
+    expect(registerMediaFileFromFile).toHaveBeenCalledWith(file, 'audio')
+    expect(createPreviewProxy).toHaveBeenCalledWith(source.token)
+    expect(created[0]).toMatchObject({
+      kind: 'audio',
+      file,
+      sourceToken: source.token,
+      previewSourceToken: 'dragged-audio-proxy-token',
+      previewProxy: true,
+    })
+  })
+
   it('discards an in-flight source when the project is cleared', async () => {
     let resolveMetadata:
       | ((value: { duration: number; width: number; height: number }) => void)
