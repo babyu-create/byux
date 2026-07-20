@@ -5,6 +5,7 @@ import { clearHistory, useProjectStore } from '../../stores/projectStore';
 import { formatDuration, formatFileSize } from '../../lib/media';
 import type { MediaAsset } from '../../lib/types';
 import type { ProjectAssetRef } from '../../lib/project';
+import { ConfirmDialog } from '../Common/ConfirmDialog';
 import styles from './MediaLibrary.module.css';
 
 interface MediaLibraryProps {
@@ -250,7 +251,7 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
         {assets.length === 0 ? (
           <div className={styles.empty}>
             <p>まだメディアがありません</p>
-            <p className={styles.emptyDim}>VALORANTの録画 (.mp4) を追加してみましょう</p>
+            <p className={styles.emptyDim}>動画または音声ファイルを追加してみましょう</p>
           </div>
         ) : (
           <>
@@ -318,26 +319,24 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
   const ioRanges = useProjectStore((s) => s.ioRanges);
   const removeAssetReferences = useProjectStore((s) => s.removeAssetReferences);
   const tracks = useProjectStore((s) => s.tracks);
+  const [pendingDelete, setPendingDelete] = useState<{
+    clipCount: number;
+    markerCount: number;
+    rangeCount: number;
+  } | null>(null);
 
   const handleRemove = (e: React.MouseEvent) => {
     e.stopPropagation();
     const clipCount = clips.filter((clip) => clip.assetId === asset.id).length;
     const markerCount = markers.filter((marker) => marker.assetId === asset.id).length;
     const rangeCount = ioRanges.filter((range) => range.assetId === asset.id).length;
-    const referenceCount = clipCount + markerCount + rangeCount;
-    const hadUndoHistory = useProjectStore.temporal.getState().pastStates.length > 0;
-    const referenceDetail =
-      referenceCount > 0
-        ? `\n関連するクリップ${clipCount}件、マーカー${markerCount}件、範囲${rangeCount}件も削除します。`
-        : '';
-    if (
-      !window.confirm(
-        `「${asset.name}」を素材一覧から削除しますか？${referenceDetail}\n` +
-        'この操作は取り消せません。参照切れを防ぐため、元に戻す・やり直す履歴もクリアされます。',
-      )
-    ) {
-      return;
-    }
+    setPendingDelete({ clipCount, markerCount, rangeCount });
+  };
+
+  const confirmRemove = () => {
+    if (!pendingDelete) return;
+    const hadUndoHistory =
+      useProjectStore.temporal.getState().pastStates.length > 0;
     removeAssetReferences(asset.id);
     onRemove(asset.id);
     // Media resources live outside zundo. Clearing the document history keeps
@@ -347,27 +346,64 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
       .getState()
       .showMessage(
         'info',
-        hadUndoHistory || referenceCount > 0
+        hadUndoHistory ||
+          pendingDelete.clipCount +
+            pendingDelete.markerCount +
+            pendingDelete.rangeCount >
+            0
           ? '素材と関連項目を削除しました（編集履歴をクリア）'
           : '素材を削除しました',
         3500,
       );
+    setPendingDelete(null);
   };
 
   const handleAdd = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const targetKind = asset.kind === 'audio' ? 'audio' : 'video';
-    const track = tracks.find((t) => t.kind === targetKind);
-    if (!track) return;
-    addClipFromAsset(asset.id, track.id, asset.duration);
+    const compatibleTracks = tracks.filter((track) =>
+      asset.kind === 'audio'
+        ? track.kind === 'audio'
+        : track.kind === 'video' || track.kind === 'overlay',
+    );
+    const track =
+      compatibleTracks.find((candidate) => !candidate.locked) ??
+      compatibleTracks[0];
+    if (!track) {
+      useProjectStore
+        .getState()
+        .showMessage('error', '追加先のトラックが見つかりません');
+      return;
+    }
+    if (track.locked) {
+      useProjectStore
+        .getState()
+        .showMessage(
+          'info',
+          `「${track.label}」のロックを解除してから追加してください`,
+          3000,
+        );
+      return;
+    }
+    const clipId = addClipFromAsset(asset.id, track.id, asset.duration);
+    if (clipId) onSelect(asset.id);
+    useProjectStore
+      .getState()
+      .showMessage(
+        clipId ? 'success' : 'error',
+        clipId
+          ? `「${asset.name}」を${track.label}の末尾へ追加しました（Ctrl+Zで元に戻せます）`
+          : 'タイムラインへ追加できませんでした',
+        3200,
+      );
   };
 
   return (
-    <div
-      className={`${styles.item} ${isSelected ? styles.itemSelected : ''}`}
-      role="group"
-      aria-label={`${asset.name} の操作`}
-    >
+    <>
+      <div
+        className={`${styles.item} ${isSelected ? styles.itemSelected : ''}`}
+        role="group"
+        aria-label={`${asset.name} の操作`}
+      >
       <button
         type="button"
         className={styles.itemSelect}
@@ -392,7 +428,7 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
           type="button"
           className={styles.addBtn}
           onClick={handleAdd}
-          aria-label="タイムラインに追加"
+          aria-label={`${asset.name}をタイムラインに追加`}
           title="タイムラインに追加"
         >
           <Plus size={16} strokeWidth={2.4} aria-hidden="true" />
@@ -401,13 +437,33 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
           type="button"
           className={styles.removeBtn}
           onClick={handleRemove}
-          aria-label="削除"
+          aria-label={`${asset.name}を素材一覧から削除`}
           title="削除"
         >
           ×
         </button>
       </div>
-    </div>
+      </div>
+      {pendingDelete ? (
+        <ConfirmDialog
+          title="素材を削除"
+          message={
+            `「${asset.name}」を素材一覧から削除します。` +
+            (pendingDelete.clipCount +
+              pendingDelete.markerCount +
+              pendingDelete.rangeCount >
+            0
+              ? ` 関連するクリップ${pendingDelete.clipCount}件、マーカー${pendingDelete.markerCount}件、範囲${pendingDelete.rangeCount}件も削除します。`
+              : '') +
+            ' この操作は取り消せず、参照切れを防ぐため編集履歴もクリアされます。'
+          }
+          confirmLabel="素材を削除"
+          variant="destructive"
+          onConfirm={confirmRemove}
+          onCancel={() => setPendingDelete(null)}
+        />
+      ) : null}
+    </>
   );
 }
 

@@ -11,6 +11,7 @@ interface AccessibleDialogProps {
   backdropClassName: string;
   dialogClassName: string;
   titleId: string;
+  descriptionId?: string;
   onClose: () => void;
   /** Disable Escape/backdrop dismissal for non-interruptible work such as export. */
   dismissible?: boolean;
@@ -33,6 +34,7 @@ export function AccessibleDialog({
   backdropClassName,
   dialogClassName,
   titleId,
+  descriptionId,
   onClose,
   dismissible = true,
 }: AccessibleDialogProps) {
@@ -126,6 +128,7 @@ export function AccessibleDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={descriptionId}
         tabIndex={-1}
       >
         {children}

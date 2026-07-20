@@ -3,12 +3,8 @@ import {
   type ExportInput,
   type ExportOptions,
 } from './exporter';
-import { clipHasTransform } from './clipTransform';
-import { clipHasColorGrade } from './colorGrade';
 import { rasterizeOverlays } from './overlayRaster';
-import { hasSpeedRamp } from './speedRamp';
 import { clipDuration } from './timeline';
-import { clipHasTransition } from './transitions';
 import type { Clip, KillMarker, MediaAsset, Track } from './types';
 
 export type NativeExportOptions = Omit<ExportOptions, 'signal' | 'onProgress'>;
@@ -20,7 +16,8 @@ export interface NativeExportAsset {
   size: number;
   width?: number;
   height?: number;
-  sourceToken: string;
+  /** Present only when this asset is consumed by a visible/playable lane. */
+  sourceToken?: string;
 }
 
 export interface NativeExportOverlay {
@@ -44,75 +41,90 @@ export interface NativeExportCompatibility {
   duration: number;
 }
 
-const REASON_SPEED_RAMP =
-  '速度ランプを含むクリップはネイティブ書き出しに未対応です';
-const REASON_TRANSFORM =
-  'トランスフォームを含むクリップはネイティブ書き出しに未対応です';
-const REASON_COLOR_GRADE =
-  'カラー調整を含むクリップはネイティブ書き出しに未対応です';
-const REASON_TRANSITION =
-  'トランジションを含むクリップはネイティブ書き出しに未対応です';
-const REASON_MOTION_BLUR =
-  'モーションブラーはネイティブ書き出しに未対応です';
-const REASON_UNSUPPORTED_LANES =
-  'サブ映像/オーバーレイトラックは書き出し未対応です';
 const MAX_NATIVE_ASSETS = 2_000;
 const MAX_NATIVE_OVERLAYS = 512;
 const MAX_NATIVE_OVERLAY_BYTES = 8 * 1024 * 1024;
 const MAX_NATIVE_OVERLAY_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_NATIVE_OVERLAY_DECODED_BYTES = 512 * 1024 * 1024;
+const MAX_NATIVE_KEYFRAMES_PER_PROPERTY = 64;
+interface ExportedVisualClip {
+  clip: Clip;
+  indexInTrack: number;
+  totalInTrack: number;
+}
 
-function exportedVideoClips(input: ExportInput): Clip[] {
-  const videoTrack = input.tracks.find((track) => track.kind === 'video');
-  if (!videoTrack || videoTrack.hidden) return [];
-  return input.clips
-    .filter((clip) => clip.trackId === videoTrack.id)
-    .sort((a, b) => a.start - b.start);
+/**
+ * Native export composites every visible video/overlay lane. Keep overlay
+ * rasterization in track order and use track-local {n}/{total} values, which
+ * is also how the preview numbers clips on its active visual lane.
+ */
+function exportedVisualClips(input: ExportInput): ExportedVisualClip[] {
+  const result: ExportedVisualClip[] = [];
+  for (const track of input.tracks) {
+    if (track.hidden || (track.kind !== 'video' && track.kind !== 'overlay')) {
+      continue;
+    }
+    const clips = input.clips
+      .filter((clip) => clip.trackId === track.id)
+      .sort((a, b) => a.start - b.start);
+    clips.forEach((clip, indexInTrack) => {
+      result.push({ clip, indexInTrack, totalInTrack: clips.length });
+    });
+  }
+  return result;
+}
+
+function requiredNativeSourceAssetIds(input: ExportInput): Set<string> {
+  const trackById = new Map(input.tracks.map((track) => [track.id, track]));
+  const required = new Set<string>();
+  for (const clip of input.clips) {
+    const track = trackById.get(clip.trackId);
+    if (!track || track.hidden) continue;
+    if (
+      track.kind === 'video' ||
+      track.kind === 'overlay' ||
+      (track.kind === 'audio' && !track.muted && !clip.muted)
+    ) {
+      required.add(clip.assetId);
+    }
+  }
+  return required;
 }
 
 export function getNativeExportCompatibility(
   input: ExportInput,
   options: ExportOptions,
 ): NativeExportCompatibility {
-  const videoClips = exportedVideoClips(input);
-  const reasons: string[] = [];
-
-  // Main-process validation examines the complete semantic request, not only
-  // the primary video lane. Mirror that here so a malformed/legacy hidden clip
-  // cannot pass renderer preflight and then fail after the save dialog opens.
-  if (input.clips.some((clip) => hasSpeedRamp(clip.speedRamp))) {
-    reasons.push(REASON_SPEED_RAMP);
-  }
-  if (input.clips.some((clip) => clipHasTransform(clip.transform))) {
-    reasons.push(REASON_TRANSFORM);
-  }
-  if (input.clips.some((clip) => clipHasColorGrade(clip.colorGrade))) {
-    reasons.push(REASON_COLOR_GRADE);
-  }
-  if (
-    input.clips.some((clip) =>
-      clipHasTransition(clip.transitionIn, clip.transitionOut),
-    )
-  ) {
-    reasons.push(REASON_TRANSITION);
-  }
-  if (options.motionBlur === true) {
-    reasons.push(REASON_MOTION_BLUR);
-  }
-  const mainVideoTrack = input.tracks.find((track) => track.kind === 'video');
-  const hasUnsupportedLane = input.clips.some((clip) => {
-    const track = input.tracks.find((candidate) => candidate.id === clip.trackId);
-    return Boolean(
-      track &&
+  void options;
+  const visualClips = exportedVisualClips(input);
+  const mainVideoTrack = input.tracks.find(
+    (track) =>
+      track.kind === 'video' &&
       !track.hidden &&
-      (track.kind === 'overlay' ||
-        (track.kind === 'video' && track.id !== mainVideoTrack?.id)),
-    );
-  });
-  if (hasUnsupportedLane) reasons.push(REASON_UNSUPPORTED_LANES);
+      input.clips.some((clip) => clip.trackId === track.id),
+  );
+  const hasBaseVideoClip = Boolean(
+    mainVideoTrack &&
+      input.clips.some((clip) => clip.trackId === mainVideoTrack.id),
+  );
+  const hasOversizedKeyframeProperty = input.clips.some((clip) =>
+    Object.values(clip.transform ?? {}).some(
+      (value) =>
+        Array.isArray(value) &&
+        value.length > MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
+    ),
+  );
+  const reasons = [
+    ...(hasBaseVideoClip ? [] : ['表示中のメイン映像クリップがありません']),
+    ...(hasOversizedKeyframeProperty
+      ? [
+          `1項目あたり${MAX_NATIVE_KEYFRAMES_PER_PROPERTY}個を超えるキーフレーム`,
+        ]
+      : []),
+  ];
 
-  const duration = videoClips.reduce(
-    (end, clip) => Math.max(end, clip.start + clipDuration(clip)),
+  const duration = visualClips.reduce(
+    (end, { clip }) => Math.max(end, clip.start + clipDuration(clip)),
     0,
   );
   return {
@@ -216,6 +228,7 @@ export async function prepareNativeExportRequest(
   progress?.({ stage: 'ネイティブ書き出しを準備中', percent: -1 });
 
   const referencedAssetIds = new Set(input.clips.map((clip) => clip.assetId));
+  const requiredSourceAssetIds = requiredNativeSourceAssetIds(input);
   if (referencedAssetIds.size > MAX_NATIVE_ASSETS) {
     throw new Error(
       `ネイティブ書き出しで扱える素材数 ${MAX_NATIVE_ASSETS} を超えています`,
@@ -246,8 +259,9 @@ export async function prepareNativeExportRequest(
       if (!referencedAssetIds.has(asset.id)) continue;
       throwIfAborted(options.signal);
 
-      let sourceToken = asset.sourceToken;
-      if (!sourceToken) {
+      const requiresSource = requiredSourceAssetIds.has(asset.id);
+      let sourceToken = requiresSource ? asset.sourceToken : undefined;
+      if (requiresSource && !sourceToken) {
         const registerMediaFile = window.fce?.registerMediaFile;
         const releaseMediaFile = window.fce?.releaseMediaFile;
         if (!asset.path || !registerMediaFile || !releaseMediaFile) {
@@ -279,13 +293,13 @@ export async function prepareNativeExportRequest(
         size: asset.size,
         width: sourceDimensions.width,
         height: sourceDimensions.height,
-        sourceToken,
+        ...(sourceToken ? { sourceToken } : {}),
       });
     }
 
-    const videoClips = exportedVideoClips(input);
-    const overlayClipCount = videoClips.filter(
-      (clip) => clip.overlays && clip.overlays.length > 0,
+    const visualClips = exportedVisualClips(input);
+    const overlayClipCount = visualClips.filter(
+      ({ clip }) => clip.overlays && clip.overlays.length > 0,
     ).length;
     if (overlayClipCount > MAX_NATIVE_OVERLAYS) {
       throw new Error(
@@ -304,9 +318,8 @@ export async function prepareNativeExportRequest(
     }
     const overlays: NativeExportOverlay[] = [];
     let overlayBytes = 0;
-    for (let index = 0; index < videoClips.length; index++) {
+    for (const { clip, indexInTrack, totalInTrack } of visualClips) {
       throwIfAborted(options.signal);
-      const clip = videoClips[index];
       if (!clip.overlays || clip.overlays.length === 0) continue;
       progress?.({ stage: 'テキストを準備中', percent: -1 });
       const png = await rasterizeOverlays(
@@ -314,14 +327,14 @@ export async function prepareNativeExportRequest(
         width,
         height,
         {
-          n: String(index + 1),
-          total: String(videoClips.length),
+          n: String(indexInTrack + 1),
+          total: String(totalInTrack),
         },
       );
       throwIfAborted(options.signal);
       if (!png) {
         throw new Error(
-          `テキストを画像化できませんでした: クリップ ${index + 1}`,
+          `テキストを画像化できませんでした: クリップ ${clip.id}`,
         );
       }
       overlayBytes += png.byteLength;

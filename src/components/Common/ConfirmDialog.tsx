@@ -25,17 +25,19 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const [rememberSkip, setRememberSkip] = useState(false);
   const titleId = useId();
+  const descriptionId = useId();
 
   return (
     <AccessibleDialog
       backdropClassName={styles.backdrop}
       dialogClassName={styles.modal}
       titleId={titleId}
+      descriptionId={descriptionId}
       onClose={onCancel}
     >
         <div id={titleId} className={styles.header}>{title}</div>
         <div className={styles.body}>
-          <p>{message}</p>
+          <p id={descriptionId}>{message}</p>
         </div>
         {rememberLabel ? (
           <label className={styles.rememberRow}>

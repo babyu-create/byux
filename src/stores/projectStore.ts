@@ -352,8 +352,19 @@ export const useProjectStore = create<ProjectStoreState>()(
 
   addClipFromAsset: (assetId, trackId, durationSec, atTime) => {
     if (durationSec <= 0) return null;
-    const id = crypto.randomUUID();
     const state = get();
+    const track = state.tracks.find((candidate) => candidate.id === trackId);
+    if (!track || track.locked) return null;
+    const asset = useMediaStore
+      .getState()
+      .assets.find((candidate) => candidate.id === assetId);
+    if (!asset) return null;
+    const compatible =
+      asset.kind === 'audio'
+        ? track.kind === 'audio'
+        : track.kind === 'video' || track.kind === 'overlay';
+    if (!compatible) return null;
+    const id = crypto.randomUUID();
     const sameTrackClips = state.clips.filter((c) => c.trackId === trackId);
     const preferred =
       atTime !== undefined
@@ -680,8 +691,13 @@ export const useProjectStore = create<ProjectStoreState>()(
       .sort((a, b) => a.time - b.time);
     if (markers.length === 0) return 0;
 
-    const videoTrack = state.tracks.find((t) => t.kind === 'video');
-    if (!videoTrack || videoTrack.locked) return 0;
+    const videoTrack = state.tracks.find(
+      (track) =>
+        track.kind === 'video' &&
+        !track.hidden &&
+        !track.locked,
+    );
+    if (!videoTrack) return 0;
     const videoTrackId = videoTrack.id;
 
     // Optionally drop existing clips of this asset on the video track.
@@ -851,8 +867,13 @@ export const useProjectStore = create<ProjectStoreState>()(
       .filter((r) => r.assetId === assetId)
       .sort((a, b) => a.inTime - b.inTime);
     if (ranges.length === 0) return 0;
-    const videoTrack = state.tracks.find((t) => t.kind === 'video');
-    if (!videoTrack || videoTrack.locked) return 0;
+    const videoTrack = state.tracks.find(
+      (track) =>
+        track.kind === 'video' &&
+        !track.hidden &&
+        !track.locked,
+    );
+    if (!videoTrack) return 0;
     const videoTrackId = videoTrack.id;
 
     let baseClips = state.clips;

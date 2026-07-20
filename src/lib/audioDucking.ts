@@ -218,10 +218,15 @@ export function buildDuckPoints(
   segments: readonly DuckSegment[],
 ): number[] {
   const points: number[] = [];
+  const markersByAsset = new Map<string, DuckSourceMarker[]>();
+  for (const marker of markers) {
+    if (!Number.isFinite(marker.time)) continue;
+    const existing = markersByAsset.get(marker.assetId);
+    if (existing) existing.push(marker);
+    else markersByAsset.set(marker.assetId, [marker]);
+  }
   for (const seg of segments) {
-    for (const m of markers) {
-      if (m.assetId !== seg.assetId) continue;
-      if (!Number.isFinite(m.time)) continue;
+    for (const m of markersByAsset.get(seg.assetId) ?? []) {
       if (m.time < seg.trimStart - 1e-6 || m.time > seg.trimEnd + 1e-6) continue;
       const outT = timelineTimeAtSourceTime(
         { ...seg, start: seg.start },

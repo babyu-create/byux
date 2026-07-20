@@ -14,6 +14,23 @@ const MAX_OVERLAYS = 512;
 const MAX_OVERLAY_ITEMS = 5_000;
 const MAX_MARKERS = 10_000;
 const MAX_TIMELINE_SECONDS = 7 * 24 * 60 * 60;
+// FFmpeg's expression parser is recursive. Although the project schema can
+// retain larger authored arrays, emitting thousands of nested if() calls makes
+// stock FFmpeg fail with "too many args" before the graph-size cap is reached.
+// 64 has been smoke-tested against the bundled binary and is the native-export
+// boundary; larger animations get an actionable error instead of a corrupt job.
+const MAX_KEYFRAMES_PER_PROPERTY = 64;
+const MAX_TOTAL_NATIVE_KEYFRAMES = 4_096;
+const MAX_ACTIVE_NATIVE_CLIPS = 2_000;
+const MAX_FILTER_CHARS = 2_000_000;
+const MIN_RAMP_AUDIO_SEGMENTS = 16;
+const MAX_RAMP_AUDIO_SEGMENTS = 4_096;
+const MAX_TOTAL_RAMP_AUDIO_SEGMENTS = 8_192;
+// Keep the piecewise atempo curve within half a 60 fps frame of the continuous
+// video time-remap. Segment boundaries are exact; this controls the maximum
+// source-position and same-event timeline deviation inside each segment.
+const MAX_RAMP_AUDIO_ERROR_SECONDS = 1 / 120;
+const MAX_DUCK_POINTS = 10_000;
 const EPS = 1e-4;
 
 class NativeExportPlanError extends Error {
@@ -113,7 +130,7 @@ function buildTimeline(clips) {
 }
 
 function buildAtempoChain(speed) {
-  if (Math.abs(speed - 1) < 1e-3) return [];
+  if (Math.abs(speed - 1) < 1e-9) return [];
   const result = [];
   let remaining = speed;
   while (remaining < 0.5) {
@@ -124,10 +141,454 @@ function buildAtempoChain(speed) {
     result.push('atempo=2.0');
     remaining /= 2;
   }
-  if (Math.abs(remaining - 1) > 1e-3) {
-    result.push(`atempo=${remaining.toFixed(4)}`);
+  if (Math.abs(remaining - 1) > 1e-9) {
+    const preciseTempo =
+      remaining.toFixed(9).replace(/\.?0+$/, '') || '1';
+    result.push(`atempo=${preciseTempo}`);
   }
   return result;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function number(value) {
+  return Number(value).toFixed(6).replace(/\.?0+$/, '') || '0';
+}
+
+function easingExpression(kind, p) {
+  if (kind === 'easeIn') return `((${p})*(${p}))`;
+  if (kind === 'easeOut') return `(2*(${p})-(${p})*(${p}))`;
+  if (kind === 'easeInOut') {
+    return `if(lt(${p}\\,0.5)\\,2*(${p})*(${p})\\,1-2*(1-(${p}))*(1-(${p})))`;
+  }
+  if (kind === 'hold') return '0';
+  return `(${p})`;
+}
+
+function animatableExpression(value, fallback, label, timeVariable = 'T') {
+  if (value === undefined) return number(fallback);
+  if (typeof value === 'number') return number(finite(value, label, -100_000, 100_000));
+  if (!Array.isArray(value) || value.length > MAX_KEYFRAMES_PER_PROPERTY) {
+    throw new NativeExportPlanError('PROJECT_TOO_COMPLEX', `${label}のキーフレームが多すぎます`);
+  }
+  if (value.length === 0) return number(fallback);
+  const keyframes = value.map((keyframe) => ({
+    t: finite(keyframe?.t, `${label}の時刻`, 0, MAX_TIMELINE_SECONDS),
+    value: finite(keyframe?.value, `${label}の値`, -100_000, 100_000),
+    easing: ['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold'].includes(keyframe?.easing)
+      ? keyframe.easing
+      : 'linear',
+  })).sort((a, b) => a.t - b.t);
+  let expression = number(keyframes.at(-1).value);
+  for (let index = keyframes.length - 2; index >= 0; index -= 1) {
+    const from = keyframes[index];
+    const to = keyframes[index + 1];
+    const span = to.t - from.t;
+    const segment = span <= EPS
+      ? number(to.value)
+      : `(${number(from.value)}+(${number(to.value)}-${number(from.value)})*` +
+        `${easingExpression(from.easing, `((${timeVariable})-${number(from.t)})/${number(span)}`)})`;
+    expression = `if(lt(${timeVariable}\\,${number(to.t)})\\,${segment}\\,${expression})`;
+  }
+  return `if(lte(${timeVariable}\\,${number(keyframes[0].t)})\\,${number(keyframes[0].value)}\\,${expression})`;
+}
+
+function transitionExpressions(clip, duration, timeVariable = 'T') {
+  let opacity = '1';
+  let scale = '1';
+  let x = '0';
+  const active = (transition) =>
+    transition && ['fade', 'slide', 'zoom'].includes(transition.type);
+  const window = (transition) =>
+    Math.max(0.05, Math.min(
+      Number.isFinite(transition?.duration) ? transition.duration : 0.4,
+      Math.max(0.05, duration / 2),
+    ));
+  if (active(clip.transitionIn)) {
+    const d = number(window(clip.transitionIn));
+    const eased = `(2*((${timeVariable})/${d})-((${timeVariable})/${d})*((${timeVariable})/${d}))`;
+    const amount = `if(lt(${timeVariable}\\,${d})\\,${eased}\\,1)`;
+    opacity = `(${opacity})*(${amount})`;
+    if (clip.transitionIn.type === 'slide') {
+      x = `(${x})+if(lt(${timeVariable}\\,${d})\\,12*(1-(${eased}))\\,0)`;
+    }
+    if (clip.transitionIn.type === 'zoom') {
+      scale = `(${scale})*if(lt(${timeVariable}\\,${d})\\,1.18-0.18*(${eased})\\,1)`;
+    }
+  }
+  if (active(clip.transitionOut)) {
+    const d = number(window(clip.transitionOut));
+    const start = number(duration - Number(d));
+    const p = `((${number(duration)}-(${timeVariable}))/${d})`;
+    const eased = `(2*${p}-${p}*${p})`;
+    const amount = `if(gte(${timeVariable}\\,${start})\\,${eased}\\,1)`;
+    opacity = `(${opacity})*(${amount})`;
+    if (clip.transitionOut.type === 'slide') {
+      x = `(${x})+if(gte(${timeVariable}\\,${start})\\,-12*(1-(${eased}))\\,0)`;
+    }
+    if (clip.transitionOut.type === 'zoom') {
+      scale = `(${scale})*if(gte(${timeVariable}\\,${start})\\,1.18-0.18*(${eased})\\,1)`;
+    }
+  }
+  return { opacity, scale, x };
+}
+
+const RAMP_EASINGS = new Set(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold']);
+
+function validateSpeedRamp(raw) {
+  if (raw === undefined) return null;
+  if (!raw || typeof raw !== 'object') {
+    throw new NativeExportPlanError('INVALID_PROJECT', '速度ランプが不正です');
+  }
+  const from = finite(raw.from, '速度ランプ開始', 0.0001, 8);
+  const to = finite(raw.to, '速度ランプ終了', 0.0001, 8);
+  const easing = raw.easing ?? 'easeIn';
+  if (!RAMP_EASINGS.has(easing)) {
+    throw new NativeExportPlanError('INVALID_PROJECT', '速度ランプの補間方法が不正です');
+  }
+  if (Math.abs(from - to) <= 1e-6) return null;
+  // applyEasing('hold') is zero throughout the segment. Normalizing the raw
+  // constant `from` velocity therefore produces factor 1, i.e. the authored
+  // base clip.speed with no remap. Treat it as the identity ramp.
+  if (easing === 'hold') return null;
+  return { from, to, easing };
+}
+
+function rampIntegralAt(ramp, progress) {
+  const p = clamp(progress, 0, 1);
+  let easingIntegral;
+  if (ramp.easing === 'linear') easingIntegral = (p * p) / 2;
+  else if (ramp.easing === 'easeOut') easingIntegral = p * p - (p * p * p) / 3;
+  else if (ramp.easing === 'easeInOut') {
+    easingIntegral = p < 0.5
+      ? (2 * p * p * p) / 3
+      : -p + 2 * p * p - (2 * p * p * p) / 3 + 1 / 6;
+  } else easingIntegral = (p * p * p) / 3;
+  return ramp.from * p + (ramp.to - ramp.from) * easingIntegral;
+}
+
+function rampSourceFractionAtProgress(ramp, progress) {
+  return clamp(rampIntegralAt(ramp, progress) / rampIntegralAt(ramp, 1), 0, 1);
+}
+
+function rampProgressAtSourceFraction(ramp, sourceFraction) {
+  const target = clamp(sourceFraction, 0, 1);
+  let low = 0;
+  let high = 1;
+  for (let index = 0; index < 40; index += 1) {
+    const middle = (low + high) / 2;
+    if (rampSourceFractionAtProgress(ramp, middle) < target) low = middle;
+    else high = middle;
+  }
+  return (low + high) / 2;
+}
+
+function rampAudioSegmentCount(ramp, sourceSpan, duration) {
+  let segmentCount = MIN_RAMP_AUDIO_SEGMENTS;
+  const maxErrorFor = (count) => {
+    let maxError = 0;
+    for (let index = 0; index < count; index += 1) {
+      const p0 = index / count;
+      const p1 = (index + 1) / count;
+      const f0 = rampSourceFractionAtProgress(ramp, p0);
+      const f1 = rampSourceFractionAtProgress(ramp, p1);
+      // Check multiple points because easeInOut's largest curvature is not
+      // guaranteed to land exactly at a segment midpoint.
+      for (const fraction of [0.25, 0.5, 0.75]) {
+        const progress = p0 + (p1 - p0) * fraction;
+        const exact = rampSourceFractionAtProgress(ramp, progress);
+        const linear = f0 + (f1 - f0) * fraction;
+        const sourceError = Math.abs(exact - linear) * sourceSpan;
+        const approximateProgress =
+          f1 - f0 > Number.EPSILON
+            ? p0 + ((exact - f0) / (f1 - f0)) * (p1 - p0)
+            : progress;
+        const timelineError =
+          Math.abs(approximateProgress - progress) * duration;
+        maxError = Math.max(maxError, sourceError, timelineError);
+      }
+    }
+    return maxError;
+  };
+  let maxError = maxErrorFor(segmentCount);
+  while (
+    segmentCount < MAX_RAMP_AUDIO_SEGMENTS &&
+    maxError > MAX_RAMP_AUDIO_ERROR_SECONDS
+  ) {
+    segmentCount *= 2;
+    maxError = maxErrorFor(segmentCount);
+  }
+  if (maxError > MAX_RAMP_AUDIO_ERROR_SECONDS) {
+    throw new NativeExportPlanError(
+      'PROJECT_TOO_COMPLEX',
+      '速度ランプが長すぎるか変化が急すぎます。クリップを分割してください。',
+    );
+  }
+  return segmentCount;
+}
+
+function rampIntegralExpression(ramp, p) {
+  const delta = ramp.to - ramp.from;
+  if (ramp.easing === 'linear') {
+    return `${number(ramp.from)}*${p}+${number(delta / 2)}*${p}*${p}`;
+  }
+  if (ramp.easing === 'easeOut') {
+    return `${number(ramp.from)}*${p}+${number(delta)}*(${p}*${p}-${p}*${p}*${p}/3)`;
+  }
+  if (ramp.easing === 'easeInOut') {
+    const easedIntegral =
+      `if(lt(${p}\\,0.5)\\,2*${p}*${p}*${p}/3\\,` +
+      `-${p}+2*${p}*${p}-2*${p}*${p}*${p}/3+1/6)`;
+    return `${number(ramp.from)}*${p}+${number(delta)}*(${easedIntegral})`;
+  }
+  return `${number(ramp.from)}*${p}+${number(delta / 3)}*${p}*${p}*${p}`;
+}
+
+function speedRampSetpts(clip, duration) {
+  const ramp = validateSpeedRamp(clip.speedRamp);
+  if (!ramp) return null;
+  const p = 'ld(0)';
+  const integral = rampIntegralExpression(ramp, p);
+  const full = rampIntegralAt(ramp, 1);
+  const sourceSpan = clip.trimEnd - clip.trimStart;
+  const target = `(PTS*TB/${number(sourceSpan)})`;
+  return `setpts=(${number(duration)}/TB)*root(((${integral})/${number(full)})-${target}\\,1)`;
+}
+
+const COLOR_PRESETS = {
+  none: { brightness: 1, contrast: 1, saturation: 1, sepia: 0, hue: 0 },
+  cinema: { brightness: 0.97, contrast: 1.12, saturation: 0.85, sepia: 0.08, hue: -8 },
+  vivid: { brightness: 1.03, contrast: 1.18, saturation: 1.35, sepia: 0, hue: 0 },
+  cool: { brightness: 1, contrast: 1.05, saturation: 1.05, sepia: 0, hue: -18 },
+  warm: { brightness: 1.02, contrast: 1.05, saturation: 1.08, sepia: 0.25, hue: 8 },
+  mono: { brightness: 1, contrast: 1.1, saturation: 0, sepia: 0, hue: 0 },
+};
+
+function buildColorFilters(grade) {
+  if (!grade || typeof grade !== 'object') return [];
+  const base = COLOR_PRESETS[grade.preset ?? 'none'] ?? COLOR_PRESETS.none;
+  const exposure = clamp(Number.isFinite(grade.exposure) ? grade.exposure : 0, -100, 100);
+  const contrastNudge = clamp(Number.isFinite(grade.contrast) ? grade.contrast : 0, -100, 100);
+  const saturationNudge = clamp(Number.isFinite(grade.saturation) ? grade.saturation : 0, -100, 100);
+  const temperature = clamp(Number.isFinite(grade.temperature) ? grade.temperature : 0, -100, 100);
+  const brightness = clamp(base.brightness * (1 + exposure / 200), 0.2, 2.5);
+  const contrast = clamp(base.contrast * (1 + contrastNudge / 200), 0.2, 2.5);
+  const saturation = clamp(base.saturation * (1 + saturationNudge / 200), 0, 3);
+  const sepia = temperature > 0
+    ? clamp(base.sepia + temperature / 250, 0, 1)
+    : base.sepia;
+  const hue = base.hue + (temperature > 0 ? temperature / 10 : temperature / 4);
+  const result = [];
+  // Canvas/CSS applies brightness as a channel multiplier and contrast around
+  // 0.5, in that order. FFmpeg eq.brightness is additive, so using b-1 there
+  // shifts black and visibly diverges. RGB LUTs preserve black/midtone/white
+  // with the same equations (within 8-bit rounding).
+  if (Math.abs(brightness - 1) > EPS) {
+    result.push(
+      `lutrgb=r='clip(val*${number(brightness)}\\,0\\,255)':` +
+      `g='clip(val*${number(brightness)}\\,0\\,255)':` +
+      `b='clip(val*${number(brightness)}\\,0\\,255)'`,
+    );
+  }
+  if (Math.abs(contrast - 1) > EPS) {
+    result.push(
+      `lutrgb=r='clip((val-127.5)*${number(contrast)}+127.5\\,0\\,255)':` +
+      `g='clip((val-127.5)*${number(contrast)}+127.5\\,0\\,255)':` +
+      `b='clip((val-127.5)*${number(contrast)}+127.5\\,0\\,255)'`,
+    );
+  }
+  const saturationPasses =
+    saturation > 2 ? [Math.sqrt(saturation), Math.sqrt(saturation)] : [saturation];
+  for (const pass of saturationPasses) {
+    if (Math.abs(pass - 1) <= EPS) continue;
+    result.push(
+      'colorchannelmixer=' +
+      `rr=${number(0.213 + 0.787 * pass)}:` +
+      `rg=${number(0.715 - 0.715 * pass)}:` +
+      `rb=${number(0.072 - 0.072 * pass)}:` +
+      `gr=${number(0.213 - 0.213 * pass)}:` +
+      `gg=${number(0.715 + 0.285 * pass)}:` +
+      `gb=${number(0.072 - 0.072 * pass)}:` +
+      `br=${number(0.213 - 0.213 * pass)}:` +
+      `bg=${number(0.715 - 0.715 * pass)}:` +
+      `bb=${number(0.072 + 0.928 * pass)}`,
+    );
+  }
+  if (sepia > EPS) {
+    const s = sepia;
+    result.push(
+      'colorchannelmixer=' +
+      `rr=${number(1 - 0.607 * s)}:rg=${number(0.769 * s)}:rb=${number(0.189 * s)}:` +
+      `gr=${number(0.349 * s)}:gg=${number(1 - 0.314 * s)}:gb=${number(0.168 * s)}:` +
+      `br=${number(0.272 * s)}:bg=${number(0.534 * s)}:bb=${number(1 - 0.869 * s)}`,
+    );
+  }
+  if (Math.abs(hue) > EPS) {
+    const radians = (hue * Math.PI) / 180;
+    const cosine = Math.cos(radians);
+    const sine = Math.sin(radians);
+    result.push(
+      'colorchannelmixer=' +
+      `rr=${number(0.213 + 0.787 * cosine - 0.213 * sine)}:` +
+      `rg=${number(0.715 - 0.715 * cosine - 0.715 * sine)}:` +
+      `rb=${number(0.072 - 0.072 * cosine + 0.928 * sine)}:` +
+      `gr=${number(0.213 - 0.213 * cosine + 0.143 * sine)}:` +
+      `gg=${number(0.715 + 0.285 * cosine + 0.14 * sine)}:` +
+      `gb=${number(0.072 - 0.072 * cosine - 0.283 * sine)}:` +
+      `br=${number(0.213 - 0.213 * cosine - 0.787 * sine)}:` +
+      `bg=${number(0.715 - 0.715 * cosine + 0.715 * sine)}:` +
+      `bb=${number(0.072 + 0.928 * cosine + 0.072 * sine)}`,
+    );
+  }
+  return result;
+}
+
+function animatableHasChange(value, identity) {
+  if (value === undefined) return false;
+  if (typeof value === 'number') return Math.abs(value - identity) > EPS;
+  return Array.isArray(value) && value.some(
+    (keyframe) => Number.isFinite(keyframe?.value) && Math.abs(keyframe.value - identity) > EPS,
+  );
+}
+
+function motionBlurSpec(clip, options) {
+  if (options?.motionBlur !== true) return null;
+  const effect = Array.isArray(clip.effects)
+    ? clip.effects.find((candidate) => candidate?.type === 'motion-blur')
+    : null;
+  if (!effect) return null;
+  const intensity = clamp(
+    Number.isFinite(effect.intensity) ? effect.intensity : 50,
+    0,
+    100,
+  );
+  const authoredStrength =
+    Math.pow(intensity / 100, 0.6) *
+    1.25 *
+    clamp(clip.speed ?? 1, 0.5, 2);
+  const strength = Number.isFinite(options.motionBlurStrength)
+    ? clamp(options.motionBlurStrength, 0, 2.5)
+    : authoredStrength;
+  if (strength <= EPS || intensity <= EPS) return null;
+  const amount = clamp(strength / 1.25, 0, 1);
+  // Keep one fixed four-frame window and fade older taps in continuously.
+  // Changing the frame count at thresholds makes the visible blur jump while
+  // dragging the strength slider.
+  const frames = 4;
+  const weights = [
+    1,
+    amount,
+    clamp((amount - 1 / 3) * 1.5, 0, 1),
+    clamp((amount - 2 / 3) * 3, 0, 1),
+  ];
+  const preset = ['valorant', 'cs2', 'apex', 'none'].includes(options.motionBlurHudPreset)
+    ? options.motionBlurHudPreset
+    : 'valorant';
+  const hudStrength = preset === 'none'
+    ? 0
+    : clamp(
+      Number.isFinite(options.motionBlurHudMaskStrength)
+        ? options.motionBlurHudMaskStrength
+        : 1,
+      0,
+      1,
+    );
+  return { frames, weights, preset, hudStrength };
+}
+
+function hudRegionExpression(preset) {
+  if (preset === 'cs2') {
+    return (
+      'lte(Y\\,H*0.09)+' +
+      'lte(X\\,W*0.18)*lte(Y\\,H*0.26)+' +
+      'lte(X\\,W*0.28)*gte(Y\\,H*0.88)+' +
+      'gte(X\\,W*0.78)*gte(Y\\,H*0.88)'
+    );
+  }
+  if (preset === 'apex') {
+    return (
+      'gte(Y\\,H*0.62)+' +
+      'lte(X\\,W*0.20)*lte(Y\\,H*0.28)'
+    );
+  }
+  return (
+    'gte(Y\\,H*0.58)+' +
+    'lte(Y\\,H*0.10)+' +
+    'lte(X\\,W*0.22)*lte(Y\\,H*0.32)'
+  );
+}
+
+function buildAudioFilterParts(spec) {
+  const {
+    inputIndex,
+    clip,
+    hasAudio,
+    volume,
+    outputLabel,
+    prefix,
+  } = spec;
+  const duration = clipDuration(clip);
+  if (!hasAudio || volume <= EPS) {
+    return [
+      `anullsrc=r=44100:cl=stereo,atrim=0:${number(duration)},` +
+      `asetpts=PTS-STARTPTS,volume=${number(volume)}${outputLabel}`,
+    ];
+  }
+  const ramp = validateSpeedRamp(clip.speedRamp);
+  if (!ramp) {
+    const filters = [
+      `atrim=${number(clip.trimStart)}:${number(clip.trimEnd)}`,
+      'asetpts=PTS-STARTPTS',
+      ...buildAtempoChain(clip.speed ?? 1),
+      `volume=${number(volume)}`,
+    ];
+    return [`[${inputIndex}:a]${filters.join(',')}${outputLabel}`];
+  }
+
+  const sourceSpan = clip.trimEnd - clip.trimStart;
+  const rampAudioSegments = rampAudioSegmentCount(
+    ramp,
+    sourceSpan,
+    duration,
+  );
+  const splitLabels = Array.from(
+    { length: rampAudioSegments },
+    (_, index) => `[${prefix}as${index}]`,
+  );
+  const renderedLabels = Array.from(
+    { length: rampAudioSegments },
+    (_, index) => `[${prefix}ar${index}]`,
+  );
+  const parts = [`[${inputIndex}:a]asplit=${rampAudioSegments}${splitLabels.join('')}`];
+  const timelineSegment = duration / rampAudioSegments;
+  for (let index = 0; index < rampAudioSegments; index += 1) {
+    const p0 = index / rampAudioSegments;
+    const p1 = (index + 1) / rampAudioSegments;
+    const sourceStart =
+      clip.trimStart + rampSourceFractionAtProgress(ramp, p0) * sourceSpan;
+    const sourceEnd =
+      clip.trimStart + rampSourceFractionAtProgress(ramp, p1) * sourceSpan;
+    const segmentSpeed = (sourceEnd - sourceStart) / timelineSegment;
+    const filters = [
+      `atrim=${number(sourceStart)}:${number(sourceEnd)}`,
+      'asetpts=PTS-STARTPTS',
+      // atempo buffers more samples than very slow/short ramp slices contain.
+      // Pad its input, then trim every rendered slice to the exact timeline
+      // boundary so concat preserves every adaptive A/V synchronization anchor.
+      'apad=pad_dur=1',
+      ...buildAtempoChain(segmentSpeed),
+      `atrim=0:${number(timelineSegment)}`,
+      'asetpts=PTS-STARTPTS',
+    ];
+    parts.push(`${splitLabels[index]}${filters.join(',')}${renderedLabels[index]}`);
+  }
+  parts.push(
+    `${renderedLabels.join('')}concat=n=${rampAudioSegments}:v=0:a=1,` +
+    `volume=${number(volume)}${outputLabel}`,
+  );
+  return parts;
 }
 
 function buildClipFilters(spec) {
@@ -143,6 +604,9 @@ function buildClipFilters(spec) {
     reframe,
     videoLabel,
     audioLabel,
+    motionBlurOptions,
+    flattenOnBlack,
+    workPrefix,
   } = spec;
   const speed = clip.speed ?? 1;
   const duration = clipDuration(clip);
@@ -150,11 +614,13 @@ function buildClipFilters(spec) {
     ? 0
     : finite(clip.volume ?? 1, 'クリップ音量', 0, 2);
   const videoFilters = [
-    `trim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`,
+    `trim=${number(clip.trimStart)}:${number(clip.trimEnd)}`,
     'setpts=PTS-STARTPTS',
   ];
-  if (Math.abs(speed - 1) > 1e-3) {
-    videoFilters.push(`setpts=${(1 / speed).toFixed(4)}*PTS`);
+  const rampSetpts = speedRampSetpts(clip, duration);
+  if (rampSetpts) videoFilters.push(rampSetpts);
+  else if (Math.abs(speed - 1) > 1e-3) {
+    videoFilters.push(`setpts=${number(1 / speed)}*PTS`);
   }
 
   const sourceMatchesOutput = asset.width === width && asset.height === height;
@@ -167,7 +633,7 @@ function buildClipFilters(spec) {
   if (clip.stretchToFill === true) {
     videoFilters.push(`scale=${width}:${height}`);
   } else if (height > width && sourceWiderThanOutput) {
-    const pan = ((Math.max(-1, Math.min(1, reframe)) + 1) / 2).toFixed(4);
+    const pan = ((clamp(reframe, -1, 1) + 1) / 2).toFixed(4);
     videoFilters.push(`scale=${width}:${height}:force_original_aspect_ratio=increase`);
     videoFilters.push(`crop=${width}:${height}:(iw-ow)*${pan}:(ih-oh)/2`);
   } else if (!sourceMatchesOutput) {
@@ -176,42 +642,168 @@ function buildClipFilters(spec) {
   }
   videoFilters.push('setsar=1', `fps=${fps}`);
 
+  const parts = [];
+  let videoInput = `[${inputIndex}:v]`;
+  const blur = motionBlurSpec(clip, motionBlurOptions);
+  if (blur?.hudStrength > EPS) {
+    const preLabel = `[${workPrefix}pre]`;
+    const sharpLabel = `[${workPrefix}sharp]`;
+    const blurInputLabel = `[${workPrefix}blurin]`;
+    const blurredLabel = `[${workPrefix}blurred]`;
+    const protectedLabel = `[${workPrefix}protected]`;
+    parts.push(`${videoInput}${videoFilters.join(',')}${preLabel}`);
+    parts.push(`${preLabel}split=2${sharpLabel}${blurInputLabel}`);
+    parts.push(
+      `${blurInputLabel}tmix=frames=${blur.frames}:` +
+      `weights='${blur.weights.map(number).join(' ')}'${blurredLabel}`,
+    );
+    const mask =
+      `${number(blur.hudStrength)}*gt(${hudRegionExpression(blur.preset)}\\,0)`;
+    parts.push(
+      `${blurredLabel}${sharpLabel}blend=all_expr='A*(1-(${mask}))+B*(${mask})'` +
+      protectedLabel,
+    );
+    videoInput = protectedLabel;
+    videoFilters.length = 0;
+  } else if (blur) {
+    videoFilters.push(
+      `tmix=frames=${blur.frames}:weights='${blur.weights.map(number).join(' ')}'`,
+    );
+  }
+  videoFilters.push(...buildColorFilters(clip.colorGrade));
+
   const effects = Array.isArray(clip.effects) ? clip.effects : [];
   const fadeIn = effects.find((effect) => effect?.type === 'fade-in');
-  if (fadeIn) {
-    const fadeDuration = Math.max(
-      0.05,
-      Math.min(duration, finite(fadeIn.duration ?? 0.4, 'フェード時間', 0, MAX_TIMELINE_SECONDS)),
-    );
-    videoFilters.push(`fade=t=in:st=0:d=${fadeDuration.toFixed(3)}`);
-  }
   const fadeOut = effects.find((effect) => effect?.type === 'fade-out');
-  if (fadeOut) {
-    const fadeDuration = Math.max(
-      0.05,
-      Math.min(duration, finite(fadeOut.duration ?? 0.4, 'フェード時間', 0, MAX_TIMELINE_SECONDS)),
+  const spatialTransform =
+    animatableHasChange(clip.transform?.x, 0) ||
+    animatableHasChange(clip.transform?.y, 0) ||
+    animatableHasChange(clip.transform?.scale, 1) ||
+    animatableHasChange(clip.transform?.rotation, 0) ||
+    clip.transitionIn?.type === 'slide' ||
+    clip.transitionIn?.type === 'zoom' ||
+    clip.transitionOut?.type === 'slide' ||
+    clip.transitionOut?.type === 'zoom';
+  const opacityTransform =
+    animatableHasChange(clip.transform?.opacity, 1) ||
+    hasActiveTransition(clip.transitionIn) ||
+    hasActiveTransition(clip.transitionOut);
+  const simpleBaseFade =
+    flattenOnBlack &&
+    !spatialTransform &&
+    !opacityTransform &&
+    (fadeIn || fadeOut);
+
+  if (simpleBaseFade) {
+    if (fadeIn) {
+      const d = Math.max(
+        0.05,
+        Math.min(duration, finite(fadeIn.duration ?? 0.4, 'フェード時間', 0, MAX_TIMELINE_SECONDS)),
+      );
+      videoFilters.push(`fade=t=in:st=0:d=${number(d)}`);
+    }
+    if (fadeOut) {
+      const d = Math.max(
+        0.05,
+        Math.min(duration, finite(fadeOut.duration ?? 0.4, 'フェード時間', 0, MAX_TIMELINE_SECONDS)),
+      );
+      videoFilters.push(`fade=t=out:st=${number(Math.max(0, duration - d))}:d=${number(d)}`);
+    }
+  }
+
+  const needsAlpha = spatialTransform || opacityTransform || (!flattenOnBlack && (fadeIn || fadeOut));
+  if (needsAlpha) {
+    videoFilters.push('format=rgba');
+    if (spatialTransform) {
+      const perspectiveTime = `(on/${fps})`;
+      const transition = transitionExpressions(clip, duration, perspectiveTime);
+      const x =
+        `(${animatableExpression(clip.transform?.x, 0, 'X位置', perspectiveTime)})+` +
+        `(${transition.x})`;
+      const y = animatableExpression(clip.transform?.y, 0, 'Y位置', perspectiveTime);
+      const scale =
+        `(${animatableExpression(clip.transform?.scale, 1, '拡大率', perspectiveTime)})*` +
+        `(${transition.scale})`;
+      const rotation = animatableExpression(
+        clip.transform?.rotation,
+        0,
+        '回転',
+        perspectiveTime,
+      );
+      const angle = `((${rotation})*PI/180)`;
+      const cos = `cos(${angle})`;
+      const sin = `sin(${angle})`;
+      const x0 =
+        `W/2+(${x})*W/100-(${scale})*(${cos})*W/2+(${scale})*(${sin})*H/2`;
+      const y0 =
+        `H/2+(${y})*H/100-(${scale})*(${sin})*W/2-(${scale})*(${cos})*H/2`;
+      const x1 = `(${x0})+(${scale})*(${cos})*W`;
+      const y1 = `(${y0})+(${scale})*(${sin})*W`;
+      const x2 = `(${x0})-(${scale})*(${sin})*H`;
+      const y2 = `(${y0})+(${scale})*(${cos})*H`;
+      const x3 = `(${x1})-(${scale})*(${sin})*H`;
+      const y3 = `(${y1})+(${scale})*(${cos})*H`;
+      videoFilters.push(
+        `perspective=x0='${x0}':y0='${y0}':x1='${x1}':y1='${y1}':` +
+        `x2='${x2}':y2='${y2}':x3='${x3}':y3='${y3}':sense=destination:eval=frame`,
+      );
+    }
+    if (opacityTransform || fadeIn || fadeOut) {
+      const opacityTransition = transitionExpressions(clip, duration);
+      let opacity =
+        `(${animatableExpression(clip.transform?.opacity, 1, '不透明度')})*` +
+        `(${opacityTransition.opacity})`;
+      if (fadeIn) {
+        const d = Math.max(
+          0.05,
+          Math.min(duration, finite(fadeIn.duration ?? 0.4, 'フェード時間', 0, MAX_TIMELINE_SECONDS)),
+        );
+        opacity += `*min(1\\,T/${number(d)})`;
+      }
+      if (fadeOut) {
+        const d = Math.max(
+          0.05,
+          Math.min(duration, finite(fadeOut.duration ?? 0.4, 'フェード時間', 0, MAX_TIMELINE_SECONDS)),
+        );
+        opacity += `*min(1\\,(${number(duration)}-T)/${number(d)})`;
+      }
+      videoFilters.push(
+        `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':` +
+        `a='alpha(X,Y)*max(0\\,min(1\\,${opacity}))'`,
+      );
+    }
+  }
+
+  if (flattenOnBlack && needsAlpha) {
+    const effectLabel = `[${workPrefix}fx]`;
+    const blackLabel = `[${workPrefix}black]`;
+    parts.push(`${videoInput}${videoFilters.join(',')}${effectLabel}`);
+    parts.push(
+      `color=c=black:s=${width}x${height}:r=${fps}:d=${number(duration)},` +
+      `format=rgba,setsar=1${blackLabel}`,
     );
-    videoFilters.push(
-      `fade=t=out:st=${Math.max(0, duration - fadeDuration).toFixed(3)}:` +
-      `d=${fadeDuration.toFixed(3)}`,
+    parts.push(
+      `${blackLabel}${effectLabel}overlay=0:0:shortest=1:format=auto,` +
+      `format=yuv420p${videoLabel}`,
+    );
+  } else {
+    if (flattenOnBlack) videoFilters.push('format=yuv420p');
+    parts.push(
+      `${videoInput}${videoFilters.length > 0 ? videoFilters.join(',') : 'null'}${videoLabel}`,
     );
   }
 
-  const videoChain = `[${inputIndex}:v]${videoFilters.join(',')}${videoLabel}`;
-  if (!hasAudio) {
-    return (
-      `${videoChain};` +
-      `anullsrc=r=44100:cl=stereo,atrim=0:${duration.toFixed(4)},` +
-      `asetpts=PTS-STARTPTS,volume=${clipVolume.toFixed(3)}${audioLabel}`
-    );
+  if (audioLabel) {
+    parts.push(...buildAudioFilterParts({
+      inputIndex,
+      clip,
+      hasAudio,
+      volume: clipVolume,
+      outputLabel: audioLabel,
+      prefix: `${workPrefix}a`,
+    }));
   }
-  const audioFilters = [
-    `atrim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`,
-    'asetpts=PTS-STARTPTS',
-    ...buildAtempoChain(speed),
-    `volume=${clipVolume.toFixed(3)}`,
-  ];
-  return `${videoChain};[${inputIndex}:a]${audioFilters.join(',')}${audioLabel}`;
+  return parts.join(';');
 }
 
 function hasUnsupportedTransform(transform) {
@@ -240,29 +832,8 @@ function hasActiveTransition(value) {
 }
 
 function collectUnsupportedFeatures(request) {
-  const reasons = new Set();
-  if (request?.options?.motionBlur === true) reasons.add('HUD対応モーションブラー');
-  const clips = Array.isArray(request?.clips) ? request.clips : [];
-  for (const clip of clips) {
-    const ramp = clip?.speedRamp;
-    if (
-      ramp &&
-      Number.isFinite(ramp.from) &&
-      Number.isFinite(ramp.to) &&
-      Math.abs(ramp.from - ramp.to) > 1e-6
-    ) {
-      reasons.add('速度ランプ');
-    }
-    if (hasUnsupportedTransform(clip?.transform)) reasons.add('キーフレーム/変形');
-    if (hasUnsupportedColorGrade(clip?.colorGrade)) reasons.add('カラー調整');
-    if (
-      hasActiveTransition(clip?.transitionIn) ||
-      hasActiveTransition(clip?.transitionOut)
-    ) {
-      reasons.add('クリップトランジション');
-    }
-  }
-  return [...reasons];
+  void request;
+  return [];
 }
 
 function resolveDucking(raw) {
@@ -287,19 +858,49 @@ function resolveDucking(raw) {
 function buildDuckExpression(markers, videoClips, rawDucking) {
   const duck = resolveDucking(rawDucking);
   if (!duck.enabled || !Array.isArray(markers) || markers.length === 0) return null;
+  const markersByAssetId = new Map();
+  for (const marker of markers) {
+    if (!marker || typeof marker.assetId !== 'string' || !Number.isFinite(marker.time)) {
+      continue;
+    }
+    const assetMarkers = markersByAssetId.get(marker.assetId) ?? [];
+    assetMarkers.push(marker.time);
+    markersByAssetId.set(marker.assetId, assetMarkers);
+  }
+  for (const assetMarkers of markersByAssetId.values()) {
+    assetMarkers.sort((a, b) => a - b);
+  }
+  const lowerBound = (values, target) => {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (values[middle] < target) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
   const points = [];
   for (const clip of videoClips) {
-    const speed = clip.speed ?? 1;
-    for (const marker of markers) {
-      if (
-        marker?.assetId !== clip.assetId ||
-        !Number.isFinite(marker.time) ||
-        marker.time < clip.trimStart - 1e-6 ||
-        marker.time > clip.trimEnd + 1e-6
-      ) {
-        continue;
+    const assetMarkers = markersByAssetId.get(clip.assetId) ?? [];
+    const sourceSpan = clip.trimEnd - clip.trimStart;
+    const duration = clipDuration(clip);
+    const ramp = validateSpeedRamp(clip.speedRamp);
+    const first = lowerBound(assetMarkers, clip.trimStart - 1e-6);
+    const afterLast = lowerBound(assetMarkers, clip.trimEnd + 1e-6);
+    for (let index = first; index < afterLast; index += 1) {
+      const markerTime = assetMarkers[index];
+      const sourceFraction = clamp((markerTime - clip.trimStart) / sourceSpan, 0, 1);
+      const progress = ramp
+        ? rampProgressAtSourceFraction(ramp, sourceFraction)
+        : sourceFraction;
+      points.push(clip.start + progress * duration);
+      if (points.length > MAX_DUCK_POINTS) {
+        throw new NativeExportPlanError(
+          'PROJECT_TOO_COMPLEX',
+          'ダッキング対象のマーカーが多すぎます。タイムラインを分割してください。',
+        );
       }
-      points.push(clip.start + (marker.time - clip.trimStart) / speed);
     }
   }
   points.sort((a, b) => a - b);
@@ -420,6 +1021,21 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
   }
   const encoding = encodingSettings(options.quality);
   const reframe = finite(options.verticalReframe ?? 0, '縦動画の位置', -1, 1);
+  if (options.motionBlur !== undefined && typeof options.motionBlur !== 'boolean') {
+    throw new NativeExportPlanError('INVALID_OPTIONS', 'モーションブラー設定が不正です');
+  }
+  if (options.motionBlurStrength !== undefined) {
+    finite(options.motionBlurStrength, 'モーションブラー強度', 0, 2.5);
+  }
+  if (
+    options.motionBlurHudPreset !== undefined &&
+    !['valorant', 'cs2', 'apex', 'none'].includes(options.motionBlurHudPreset)
+  ) {
+    throw new NativeExportPlanError('INVALID_OPTIONS', 'HUDプリセットが不正です');
+  }
+  if (options.motionBlurHudMaskStrength !== undefined) {
+    finite(options.motionBlurHudMaskStrength, 'HUD保護強度', 0, 1);
+  }
 
   const trackIds = new Set();
   for (const track of request.tracks) {
@@ -446,8 +1062,12 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     assetById.set(asset.id, asset);
   }
 
+  const trackById = new Map(request.tracks.map((track) => [track.id, track]));
   const clipIds = new Set();
   let overlayItemCount = 0;
+  let totalRampAudioSegments = 0;
+  let totalNativeKeyframes = 0;
+  let activeNativeClipCount = 0;
   for (const clip of request.clips) {
     safeId(clip?.id, 'クリップID');
     safeId(clip?.trackId, 'クリップのトラックID');
@@ -461,6 +1081,115 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         `クリップの素材またはトラックが見つかりません: ${clip.id}`,
       );
     }
+    const clipTrack = trackById.get(clip.trackId);
+    const clipAsset = assetById.get(clip.assetId);
+    const compatible =
+      clipAsset.kind === 'audio'
+        ? clipTrack.kind === 'audio'
+        : clipTrack.kind === 'video' || clipTrack.kind === 'overlay';
+    if (!compatible) {
+      throw new NativeExportPlanError(
+        'INVALID_PROJECT',
+        `クリップの素材とトラック種別が一致しません: ${clip.id}`,
+      );
+    }
+    if (!clipTrack.hidden) {
+      activeNativeClipCount += 1;
+      if (activeNativeClipCount > MAX_ACTIVE_NATIVE_CLIPS) {
+        throw new NativeExportPlanError(
+          'PROJECT_TOO_COMPLEX',
+          '表示中のクリップが多すぎます。プロジェクトを分割してください。',
+        );
+      }
+    }
+    finite(clip.start, 'クリップ開始位置', 0, MAX_TIMELINE_SECONDS);
+    const validatedRamp = validateSpeedRamp(clip.speedRamp);
+    if (validatedRamp) {
+      const sourceSpan =
+        finite(clip.trimEnd, 'トリム終了', 0, MAX_TIMELINE_SECONDS) -
+        finite(clip.trimStart, 'トリム開始', 0, MAX_TIMELINE_SECONDS);
+      if (sourceSpan <= 0) {
+        throw new NativeExportPlanError('INVALID_PROJECT', 'トリム範囲が不正です');
+      }
+      totalRampAudioSegments += rampAudioSegmentCount(
+        validatedRamp,
+        sourceSpan,
+        clipDuration(clip),
+      );
+      if (totalRampAudioSegments > MAX_TOTAL_RAMP_AUDIO_SEGMENTS) {
+        throw new NativeExportPlanError(
+          'PROJECT_TOO_COMPLEX',
+          '速度ランプ音声の精密処理が多すぎます。プロジェクトを分割してください。',
+        );
+      }
+    }
+    if (!Array.isArray(clip.effects) || clip.effects.length > 32) {
+      throw new NativeExportPlanError('INVALID_PROJECT', 'クリップ効果が不正です');
+    }
+    for (const effect of clip.effects) {
+      if (!effect || !['fade-in', 'fade-out', 'motion-blur'].includes(effect.type)) {
+        throw new NativeExportPlanError('INVALID_PROJECT', 'クリップ効果が不正です');
+      }
+      if (effect.duration !== undefined) {
+        finite(effect.duration, 'フェード時間', 0, MAX_TIMELINE_SECONDS);
+      }
+      if (effect.intensity !== undefined) finite(effect.intensity, 'ブラー強度', 0, 100);
+    }
+    if (clip.transform !== undefined) {
+      if (!clip.transform || typeof clip.transform !== 'object') {
+        throw new NativeExportPlanError('INVALID_PROJECT', '変形設定が不正です');
+      }
+      for (const [key, fallback, label] of [
+        ['x', 0, 'X位置'],
+        ['y', 0, 'Y位置'],
+        ['scale', 1, '拡大率'],
+        ['rotation', 0, '回転'],
+        ['opacity', 1, '不透明度'],
+      ]) {
+        const value = clip.transform[key];
+        if (Array.isArray(value)) {
+          if (value.length > MAX_KEYFRAMES_PER_PROPERTY) {
+            throw new NativeExportPlanError(
+              'PROJECT_TOO_COMPLEX',
+              `${label}のキーフレームが多すぎます`,
+            );
+          }
+          totalNativeKeyframes += value.length;
+          if (totalNativeKeyframes > MAX_TOTAL_NATIVE_KEYFRAMES) {
+            throw new NativeExportPlanError(
+              'PROJECT_TOO_COMPLEX',
+              'キーフレームが多すぎます。アニメーションを分割してください。',
+            );
+          }
+        }
+        animatableExpression(value, fallback, label);
+      }
+    }
+    for (const transition of [clip.transitionIn, clip.transitionOut]) {
+      if (transition === undefined) continue;
+      if (
+        !transition ||
+        !['none', 'cut', 'fade', 'slide', 'zoom'].includes(transition.type)
+      ) {
+        throw new NativeExportPlanError('INVALID_PROJECT', 'トランジションが不正です');
+      }
+      finite(transition.duration, 'トランジション時間', 0, MAX_TIMELINE_SECONDS);
+    }
+    if (clip.colorGrade !== undefined) {
+      const grade = clip.colorGrade;
+      if (
+        !grade ||
+        typeof grade !== 'object' ||
+        !['none', 'cinema', 'vivid', 'cool', 'warm', 'mono'].includes(
+          grade.preset ?? 'none',
+        )
+      ) {
+        throw new NativeExportPlanError('INVALID_PROJECT', 'カラー設定が不正です');
+      }
+      for (const key of ['exposure', 'contrast', 'saturation', 'temperature']) {
+        if (grade[key] !== undefined) finite(grade[key], 'カラー設定', -100_000, 100_000);
+      }
+    }
     if (clip.overlays !== undefined && !Array.isArray(clip.overlays)) {
       throw new NativeExportPlanError('INVALID_OVERLAY', 'テキスト設定が不正です');
     }
@@ -472,8 +1201,15 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     clipIds.add(clip.id);
   }
 
-  const mainVideoTrack = request.tracks.find((track) => track.kind === 'video');
-  if (!mainVideoTrack || mainVideoTrack.hidden) {
+  const visibleVisualTracks = request.tracks.filter(
+    (track) => !track.hidden && (track.kind === 'video' || track.kind === 'overlay'),
+  );
+  const mainVideoTrack = visibleVisualTracks.find(
+    (track) =>
+      track.kind === 'video' &&
+      request.clips.some((clip) => clip.trackId === track.id),
+  );
+  if (!mainVideoTrack) {
     throw new NativeExportPlanError('NO_VIDEO', '書き出せる映像トラックがありません');
   }
   const videoClips = request.clips
@@ -482,36 +1218,37 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
   if (videoClips.length === 0) {
     throw new NativeExportPlanError('NO_VIDEO', '映像クリップがありません');
   }
-  const unsupportedLaneClips = request.clips.filter((clip) => {
-    const track = request.tracks.find((candidate) => candidate.id === clip.trackId);
-    return (
-      track &&
-      !track.hidden &&
-      (track.kind === 'overlay' ||
-        (track.kind === 'video' && track.id !== mainVideoTrack.id))
+  const upperVisualClips = visibleVisualTracks
+    .filter((track) => track.id !== mainVideoTrack.id)
+    .flatMap((track) =>
+      request.clips
+        .filter((clip) => clip.trackId === track.id)
+        .sort((a, b) => a.start - b.start || String(a.id).localeCompare(String(b.id))),
     );
-  });
-  if (unsupportedLaneClips.length > 0) {
-    throw new NativeExportPlanError(
-      'UNSUPPORTED_LANES',
-      'サブ映像/オーバーレイトラックは書き出し未対応です',
-    );
-  }
   const audioTrackIds = new Set(
     request.tracks.filter((track) => track.kind === 'audio').map((track) => track.id),
   );
   const audioClips = request.clips
     .filter((clip) => audioTrackIds.has(clip.trackId))
     .sort((a, b) => a.start - b.start);
-  const playableAudioClips = audioClips.filter((clip) => {
-    const track = request.tracks.find((candidate) => candidate.id === clip.trackId);
-    return !clip.muted && !track?.muted && !track?.hidden;
+  const playableAudioClips = [...audioClips, ...upperVisualClips].filter((clip) => {
+    const track = trackById.get(clip.trackId);
+    if (clip.muted || track?.muted || track?.hidden) return false;
+    return track?.kind === 'audio' || sourceByAssetId.get(clip.assetId)?.hasAudio === true;
   });
 
   const timeline = buildTimeline(videoClips);
-  const totalDuration = timeline.at(-1)?.end ?? 0;
+  const visualEnd = [...videoClips, ...upperVisualClips].reduce(
+    (max, clip) => Math.max(max, clip.start + clipDuration(clip)),
+    0,
+  );
+  const baseEnd = timeline.at(-1)?.end ?? 0;
+  if (visualEnd > baseEnd + EPS) {
+    timeline.push({ kind: 'gap', start: baseEnd, end: visualEnd });
+  }
+  const totalDuration = visualEnd;
   const requiredAssetIds = [];
-  for (const clip of [...videoClips, ...playableAudioClips]) {
+  for (const clip of [...videoClips, ...upperVisualClips, ...playableAudioClips]) {
     if (!requiredAssetIds.includes(clip.assetId)) requiredAssetIds.push(clip.assetId);
   }
   const inputIndexByAssetId = new Map();
@@ -567,36 +1304,80 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         reframe,
         videoLabel,
         audioLabel,
+        motionBlurOptions: options,
+        flattenOnBlack: true,
+        workPrefix: `p${index}`,
       }),
     );
   });
   const concatInputs = videoLabels.map((label, index) => `${label}${audioLabels[index]}`).join('');
-  filters.push(`${concatInputs}concat=n=${videoLabels.length}:v=1:a=1[vbase][abase]`);
+  filters.push(`${concatInputs}concat=n=${videoLabels.length}:v=1:a=1[vbase0][abase]`);
+
+  // Tracks are composited in project array order. The first visible video is
+  // the opaque base; every later visible video/overlay clip is an upper layer.
+  let layeredVideoLabel = '[vbase0]';
+  upperVisualClips.forEach((clip, index) => {
+    const asset = assetById.get(clip.assetId);
+    const source = sourceByAssetId.get(clip.assetId);
+    const clipLabel = `[lv${index}]`;
+    const shiftedLabel = `[lvs${index}]`;
+    filters.push(
+      buildClipFilters({
+        inputIndex: inputIndexByAssetId.get(clip.assetId),
+        clip,
+        asset,
+        width,
+        height,
+        fps,
+        videoTrackMuted: trackById.get(clip.trackId)?.muted === true,
+        hasAudio: source.hasAudio,
+        reframe,
+        videoLabel: clipLabel,
+        audioLabel: null,
+        motionBlurOptions: options,
+        flattenOnBlack: false,
+        workPrefix: `u${index}`,
+      }),
+    );
+    filters.push(
+      `${clipLabel}setpts=PTS+${number(clip.start)}/TB${shiftedLabel}`,
+    );
+    const output = `[vbase${index + 1}]`;
+    filters.push(
+      `${layeredVideoLabel}${shiftedLabel}overlay=0:0:eof_action=pass:shortest=0${output}`,
+    );
+    layeredVideoLabel = output;
+  });
 
   const overlays = [];
-  for (const item of timeline) {
-    if (item.kind !== 'clip' || !Array.isArray(item.clip.overlays) || item.clip.overlays.length === 0) {
+  const visualClipsInTrackOrder = visibleVisualTracks.flatMap((track) =>
+    request.clips
+      .filter((clip) => clip.trackId === track.id)
+      .sort((a, b) => a.start - b.start || String(a.id).localeCompare(String(b.id))),
+  );
+  for (const clip of visualClipsInTrackOrder) {
+    if (!Array.isArray(clip.overlays) || clip.overlays.length === 0) {
       continue;
     }
-    const overlayPath = overlayPathByClipId.get(item.clip.id);
+    const overlayPath = overlayPathByClipId.get(clip.id);
     if (!overlayPath) {
       throw new NativeExportPlanError(
         'INVALID_OVERLAY',
-        `テキスト画像を確認できません: ${item.clip.id}`,
+        `テキスト画像を確認できません: ${clip.id}`,
       );
     }
     overlays.push({
-      clip: item.clip,
+      clip,
       path: overlayPath,
-      start: item.start,
-      end: item.end,
+      start: clip.start,
+      end: clip.start + clipDuration(clip),
     });
   }
   if (overlays.length > MAX_OVERLAYS) {
     throw new NativeExportPlanError('INVALID_OVERLAY', 'テキスト画像が多すぎます');
   }
 
-  let videoOutputLabel = '[vbase]';
+  let videoOutputLabel = layeredVideoLabel;
   if (overlays.length > 0) {
     const imageDuration = (Math.max(0.1, totalDuration) + 1).toFixed(3);
     overlays.forEach((overlay, index) => {
@@ -644,12 +1425,16 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
           `音声ストリームが見つかりません: ${assetById.get(clip.assetId)?.name ?? clip.assetId}`,
         );
       }
-      const filtersForClip = [
-        `atrim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`,
-        'asetpts=PTS-STARTPTS',
-        ...buildAtempoChain(clip.speed ?? 1),
-        `volume=${finite(clip.volume ?? 1, '音量', 0, 2).toFixed(3)}`,
-      ];
+      const rawLabel = `[baraw${index}]`;
+      filters.push(...buildAudioFilterParts({
+        inputIndex: inputIndexByAssetId.get(clip.assetId),
+        clip,
+        hasAudio: true,
+        volume: finite(clip.volume ?? 1, '音量', 0, 2),
+        outputLabel: rawLabel,
+        prefix: `ba${index}`,
+      }));
+      const filtersForClip = [];
       const startMs = Math.round(
         finite(clip.start, '音声開始位置', 0, MAX_TIMELINE_SECONDS) * 1000,
       );
@@ -658,10 +1443,12 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         filtersForClip.push(`volume=${duckExpression}:eval=frame`);
       }
       const label = `[ba${index}]`;
-      filters.push(
-        `[${inputIndexByAssetId.get(clip.assetId)}:a]${filtersForClip.join(',')}${label}`,
-      );
-      mixLabels.push(label);
+      if (filtersForClip.length > 0) {
+        filters.push(`${rawLabel}${filtersForClip.join(',')}${label}`);
+        mixLabels.push(label);
+      } else {
+        mixLabels.push(rawLabel);
+      }
     });
     filters.push(
       `[abase]${mixLabels.join('')}amix=inputs=${mixLabels.length + 1}:` +
@@ -671,6 +1458,13 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     audioOutputLabel = '[aout]';
   }
 
+  const filterGraph = filters.join(';\n');
+  if (filterGraph.length > MAX_FILTER_CHARS) {
+    throw new NativeExportPlanError(
+      'PROJECT_TOO_COMPLEX',
+      'キーフレームまたはレイヤーが多く、書き出しグラフの上限を超えました。',
+    );
+  }
   const args = [
     '-hide_banner',
     '-nostdin',
@@ -724,7 +1518,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
   }
   return {
     args,
-    filterGraph: filters.join(';\n'),
+    filterGraph,
     totalDuration,
     width,
     height,

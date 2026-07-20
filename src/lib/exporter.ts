@@ -1595,11 +1595,18 @@ export async function exportProject(
   throwIfAborted(options.signal);
   const { clips, tracks, assets } = input;
   const markers = input.markers ?? [];
-  const videoTrack = tracks.find((t) => t.kind === 'video');
+  const videoTrack = tracks.find(
+    (track) =>
+      track.kind === 'video' &&
+      !track.hidden &&
+      clips.some((clip) => clip.trackId === track.id),
+  );
   const trackMutedById = (trackId: string): boolean =>
     tracks.find((t) => t.id === trackId)?.muted ?? false;
-  const isAudioTrackId = (trackId: string): boolean =>
-    tracks.find((t) => t.id === trackId)?.kind === 'audio';
+  const isPlayableAudioTrackId = (trackId: string): boolean => {
+    const track = tracks.find((candidate) => candidate.id === trackId);
+    return track?.kind === 'audio' && !track.hidden;
+  };
   // The FIRST audio track is the BGM lane (subsequent audio tracks are SE etc.)
   // — only BGM is auto-ducked around kills, mirroring the preview.
   const bgmTrackId = tracks.find((t) => t.kind === 'audio')?.id ?? null;
@@ -1610,7 +1617,7 @@ export async function exportProject(
   // Mix ALL audio tracks (BGM + SE + …), not just the first — previously the
   // SE track's clips were silently dropped from the export.
   const audioClips = clips
-    .filter((c) => isAudioTrackId(c.trackId))
+    .filter((c) => isPlayableAudioTrackId(c.trackId))
     .sort((a, b) => a.start - b.start);
 
   if (videoClips.length === 0) {

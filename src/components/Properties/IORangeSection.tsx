@@ -31,9 +31,16 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
 
   const beginCut = () => {
     if (ranges.length === 0) return;
-    const videoTrack = useProjectStore.getState().tracks.find((track) => track.kind === 'video');
-    if (videoTrack?.locked) {
-      setResultMessage('映像トラックのロックを解除してください');
+    const videoTrack = useProjectStore
+      .getState()
+      .tracks.find(
+        (track) =>
+          track.kind === 'video' &&
+          !track.hidden &&
+          !track.locked,
+      );
+    if (!videoTrack) {
+      setResultMessage('表示中の映像トラックのロックを解除してください');
       return;
     }
     setConfirmOpen(true);

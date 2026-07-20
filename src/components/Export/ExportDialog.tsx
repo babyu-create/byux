@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, FolderOpen, Play } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
@@ -320,17 +320,31 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
     };
   }, [downloadUrl]);
 
-  const mainVideoTrack = tracks.find((track) => track.kind === 'video');
-  const totalClips =
-    mainVideoTrack && !mainVideoTrack.hidden
-      ? clips.filter((clip) => clip.trackId === mainVideoTrack.id).length
-      : 0;
-  const exportDuration =
-    mainVideoTrack && !mainVideoTrack.hidden
-      ? clips
-          .filter((clip) => clip.trackId === mainVideoTrack.id)
-          .reduce((end, clip) => Math.max(end, clip.start + clipDuration(clip)), 0)
-      : 0;
+  const exportedVisualClips = useMemo(() => {
+    const visibleVisualTrackIds = new Set(
+      tracks
+        .filter(
+          (track) =>
+            !track.hidden &&
+            (track.kind === 'video' || track.kind === 'overlay'),
+        )
+        .map((track) => track.id),
+    );
+    return clips.filter((clip) => visibleVisualTrackIds.has(clip.trackId));
+  }, [clips, tracks]);
+  const visibleBaseVideoTrack = tracks.find(
+    (track) =>
+      track.kind === 'video' &&
+      !track.hidden &&
+      clips.some((clip) => clip.trackId === track.id),
+  );
+  const totalClips = visibleBaseVideoTrack
+    ? clips.filter((clip) => clip.trackId === visibleBaseVideoTrack.id).length
+    : 0;
+  const exportDuration = exportedVisualClips.reduce(
+    (end, clip) => Math.max(end, clip.start + clipDuration(clip)),
+    0,
+  );
   const estimatedBytes = estimateExportBytes(exportDuration, resolution, fps, quality);
   const estimatedSizeMb = estimatedBytes / (1024 * 1024);
 

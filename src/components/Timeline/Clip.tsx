@@ -14,10 +14,14 @@ import {
   timeToPx,
   timelineTimeAtSourceTime,
 } from '../../lib/timeline';
-import { formatDuration } from '../../lib/media';
+import { formatDuration, formatTimecode } from '../../lib/media';
 import { KillMarkerFlag } from './KillMarkerFlag';
 import { IORangeBar, PendingInIndicator } from './IORangeBar';
 import { AudioWaveform } from './AudioWaveform';
+import {
+  consumeClipNudgeGesture,
+  releasePointerCaptureIfHeld,
+} from './timelineCommands';
 import styles from './Clip.module.css';
 
 const SNAP_THRESHOLD_PX = 8;
@@ -43,6 +47,7 @@ type DragMode = 'move' | 'trim-start' | 'trim-end';
 interface DragState {
   mode: DragMode;
   pointerId: number;
+  captureTarget: HTMLDivElement;
   startX: number;
   /** scrollLeft of the timeline container when the drag began. */
   startScroll: number;
@@ -67,6 +72,7 @@ export const Clip = memo(function Clip({
   const trimClipStart = useProjectStore((s) => s.trimClipStart);
   const trimClipEnd = useProjectStore((s) => s.trimClipEnd);
   const selectClipAction = useProjectStore((s) => s.selectClip);
+  const fps = useProjectStore((s) => s.fps);
   const selectMediaAsset = useMediaStore((s) => s.selectAsset);
   const isSelected = useProjectStore((s) => s.selectedClipIds.includes(clip.id));
 
@@ -131,10 +137,12 @@ export const Clip = memo(function Clip({
     if (!asset) return;
     selectClip(clip.id, e.shiftKey);
     if (locked) return;
+    clipElementRef.current?.focus();
 
     dragRef.current = {
       mode,
       pointerId: e.pointerId,
+      captureTarget: e.currentTarget,
       startX: e.clientX,
       startScroll: getScrollLeft(),
       origStart: clip.start,
@@ -257,12 +265,33 @@ export const Clip = memo(function Clip({
   const handlePointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (drag && drag.pointerId === e.pointerId) {
-      (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+      releasePointerCaptureIfHeld(e.currentTarget, e.pointerId);
       dragRef.current = null;
       setDraggingMode(null);
       stopAutoScroll();
       useProjectStore.getState().setSnapIndicator(null);
     }
+  };
+
+  const cancelActiveDrag = () => {
+    const drag = dragRef.current;
+    if (!drag) return false;
+    releasePointerCaptureIfHeld(drag.captureTarget, drag.pointerId);
+    if (drag.mode === 'move') {
+      moveClip(clip.id, drag.origStart);
+    } else if (drag.mode === 'trim-start') {
+      trimClipStart(clip.id, drag.origTrimStart);
+    } else {
+      trimClipEnd(clip.id, drag.origTrimEnd);
+    }
+    dragRef.current = null;
+    setDraggingMode(null);
+    stopAutoScroll();
+    useProjectStore.getState().setSnapIndicator(null);
+    useProjectStore
+      .getState()
+      .showMessage('info', 'ドラッグ操作を取り消しました', 2200);
+    return true;
   };
 
   const handleClick = (e: React.MouseEvent) => {
@@ -347,7 +376,37 @@ export const Clip = memo(function Clip({
       onPointerCancel={handlePointerUp}
       onClick={handleClick}
       onKeyDown={(event) => {
-        if (event.key === 'Enter') {
+        if (event.key === 'Escape' && cancelActiveDrag()) {
+          event.preventDefault();
+          event.stopPropagation();
+        } else if (consumeClipNudgeGesture(event)) {
+          selectClip(clip.id);
+          if (locked) {
+            useProjectStore
+              .getState()
+              .showMessage('info', 'トラックのロックを解除すると移動できます');
+            return;
+          }
+          const step = event.shiftKey ? 1 : 0.1;
+          const requested =
+            clip.start + (event.key === 'ArrowRight' ? step : -step);
+          moveClip(clip.id, requested);
+          const actual =
+            useProjectStore.getState().clips.find((item) => item.id === clip.id)
+              ?.start ?? clip.start;
+          useProjectStore
+            .getState()
+            .showMessage(
+              Math.abs(actual - clip.start) > 1e-6 ? 'success' : 'info',
+              Math.abs(actual - clip.start) > 1e-6
+                ? `${label}を${formatTimecode(
+                    actual,
+                    useProjectStore.getState().fps,
+                  )}へ移動`
+                : '隣のクリップまたは先頭に接しているため、これ以上移動できません',
+              1800,
+            );
+        } else if (event.key === 'Enter') {
           event.preventDefault();
           event.stopPropagation();
           selectClip(clip.id, event.shiftKey);
@@ -366,7 +425,8 @@ export const Clip = memo(function Clip({
       data-clip-id={clip.id}
       tabIndex={keyboardTabStop ? 0 : -1}
       aria-current={isSelected ? 'true' : undefined}
-      aria-label={`${label}、${formatDuration(clipDuration(clip))}、Enterで選択、左右矢印で前後のクリップへ移動`}
+      aria-roledescription="タイムラインクリップ"
+      aria-label={`${label}、${formatDuration(clipDuration(clip))}、Enterで選択、左右矢印で前後のクリップ、Alt+左右矢印で位置を移動`}
     >
       {!locked && asset ? (
         <div
@@ -382,7 +442,7 @@ export const Clip = memo(function Clip({
           aria-valuemin={0}
           aria-valuemax={Math.max(0, clip.trimEnd - 0.1)}
           aria-valuenow={clip.trimStart}
-          aria-valuetext={formatDuration(clip.trimStart)}
+          aria-valuetext={formatTimecode(clip.trimStart, fps)}
         />
       ) : null}
       <div className={styles.body}>
@@ -457,7 +517,7 @@ export const Clip = memo(function Clip({
           aria-valuemin={clip.trimStart + 0.1}
           aria-valuemax={asset.duration}
           aria-valuenow={clip.trimEnd}
-          aria-valuetext={formatDuration(clip.trimEnd)}
+          aria-valuetext={formatTimecode(clip.trimEnd, fps)}
         />
       ) : null}
     </div>

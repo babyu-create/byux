@@ -11,6 +11,10 @@ import { TrackHeader } from './TrackHeader';
 import { Playhead } from './Playhead';
 import { SnapGuide } from './SnapGuide';
 import { TimelineToolbar } from './TimelineToolbar';
+import {
+  removeSelectedWithFeedback,
+  splitSelectedWithFeedback,
+} from './timelineCommands';
 import { TimelineScrollProvider } from '../../hooks/useTimelineAutoScroll';
 import styles from './Timeline.module.css';
 
@@ -38,8 +42,6 @@ export function Timeline() {
   // This prevents all of Timeline from re-rendering on every scrub frame.
   const zoom = useProjectStore((s) => s.zoom);
   const clearSelection = useProjectStore((s) => s.clearSelection);
-  const removeSelectedClips = useProjectStore((s) => s.removeSelectedClips);
-  const splitSelected = useProjectStore((s) => s.splitSelectedAtPlayhead);
   const zoomIn = useProjectStore((s) => s.zoomIn);
   const zoomOut = useProjectStore((s) => s.zoomOut);
 
@@ -64,8 +66,14 @@ export function Timeline() {
   const trackAreaRef = useRef<HTMLDivElement>(null);
 
   // Stable callbacks so the keydown effect doesn't re-register on every render
-  const stableRemoveSelected = useCallback(() => removeSelectedClips(), [removeSelectedClips]);
-  const stableSplitSelected = useCallback(() => splitSelected(), [splitSelected]);
+  const stableRemoveSelected = useCallback(
+    () => removeSelectedWithFeedback(),
+    [],
+  );
+  const stableSplitSelected = useCallback(
+    () => splitSelectedWithFeedback(),
+    [],
+  );
   const stableZoomIn = useCallback(() => zoomIn(), [zoomIn]);
   const stableZoomOut = useCallback(() => zoomOut(), [zoomOut]);
 
@@ -87,11 +95,15 @@ export function Timeline() {
 
       // Helpers
       const findVideoActiveClip = () => {
-        const trackId = state.tracks.find((t) => t.kind === 'video')?.id;
-        if (!trackId) return null;
+        const visibleVideoTrackIds = new Set(
+          state.tracks
+            .filter((track) => track.kind === 'video' && !track.hidden)
+            .map((track) => track.id),
+        );
+        if (visibleVideoTrackIds.size === 0) return null;
         return (
           state.clips.find((c) => {
-            if (c.trackId !== trackId) return false;
+            if (!visibleVideoTrackIds.has(c.trackId)) return false;
             const end = c.start + clipDuration(c);
             return state.playhead >= c.start - 1e-6 && state.playhead < end - 1e-6;
           }) ?? null
@@ -105,7 +117,9 @@ export function Timeline() {
             state.clips.some((clip) =>
               state.tracks.some(
                 (track) =>
-                  track.id === clip.trackId && track.kind === 'video' && !track.hidden,
+                  track.id === clip.trackId &&
+                  (track.kind === 'video' || track.kind === 'overlay') &&
+                  !track.hidden,
               ),
             )
           ) {

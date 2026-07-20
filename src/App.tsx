@@ -199,9 +199,14 @@ function App() {
     });
   };
 
-  const hasVideoClips = useProjectStore((s) => {
-    const mainVideo = s.tracks.find((track) => track.kind === 'video');
-    return !!mainVideo && !mainVideo.hidden && s.clips.some((clip) => clip.trackId === mainVideo.id);
+  const hasExportableVideoClips = useProjectStore((s) => {
+    const baseVideoTrack = s.tracks.find(
+      (track) =>
+        !track.hidden &&
+        track.kind === 'video' &&
+        s.clips.some((clip) => clip.trackId === track.id),
+    );
+    return Boolean(baseVideoTrack);
   });
   const canUndo = useCanUndo();
   const canRedo = useCanRedo();
@@ -745,6 +750,25 @@ function App() {
         return;
       }
       const target = e.target instanceof Element ? e.target : null;
+      const isEditingText = Boolean(
+        target?.closest(
+          'textarea, [contenteditable="true"], input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input[type="password"], input[type="number"]',
+        ),
+      );
+      if (mod && key === 'z' && !e.shiftKey && !isEditingText) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (
+        mod &&
+        (key === 'y' || (key === 'z' && e.shiftKey)) &&
+        !isEditingText
+      ) {
+        e.preventDefault();
+        redo();
+        return;
+      }
       if (
         target?.closest(
           'input, textarea, select, button, [contenteditable="true"], [role="button"], [role="slider"], [role="menuitem"]',
@@ -752,13 +776,7 @@ function App() {
       ) {
         return;
       }
-      if (mod && key === 'z' && !e.shiftKey) {
-        e.preventDefault();
-        undo();
-      } else if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) {
-        e.preventDefault();
-        redo();
-      } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
         e.preventDefault();
         setHelpOpen((v) => !v);
       }
@@ -966,7 +984,7 @@ function App() {
             type="button"
             className={styles.exportBtn}
             onClick={() => setExportOpen(true)}
-            disabled={!hasVideoClips}
+            disabled={!hasExportableVideoClips}
             aria-label="動画を書き出す"
           >
             <Download size={15} strokeWidth={2.2} aria-hidden="true" />

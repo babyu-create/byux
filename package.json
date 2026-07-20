@@ -2,9 +2,9 @@
   "name": "highlight-maker",
   "productName": "Byux",
   "private": true,
-  "version": "1.0.19",
+  "version": "1.0.20",
   "license": "MIT",
-  "description": "FPSキル集編集に特化したシンプルな動画エディタ",
+  "description": "迷わず使えて、長い動画も軽く扱えるデスクトップ動画エディタ",
   "homepage": "https://github.com/babyu-create/byux",
   "repository": {
     "type": "git",

@@ -5,6 +5,7 @@ import type { MediaAsset, Track } from '../lib/types';
 
 const TRACKS: Track[] = [
   { id: 'video', kind: 'video', label: 'Video', locked: false, muted: false, hidden: false },
+  { id: 'audio', kind: 'audio', label: 'Audio', locked: false, muted: false, hidden: false },
 ];
 
 const ASSET: MediaAsset = {
@@ -71,6 +72,37 @@ describe('project store safety invariants', () => {
         deleteSourceClips: true,
       }),
     ).toBe(0);
+    expect(useProjectStore.getState().clips).toHaveLength(0);
+  });
+
+  it('never adds a media asset to a locked or unknown track', () => {
+    useProjectStore.setState({
+      tracks: [{ ...TRACKS[0], locked: true }, TRACKS[1]],
+    });
+    expect(
+      useProjectStore
+        .getState()
+        .addClipFromAsset(ASSET.id, TRACKS[0].id, ASSET.duration),
+    ).toBeNull();
+    expect(
+      useProjectStore
+        .getState()
+        .addClipFromAsset(ASSET.id, 'missing-track', ASSET.duration),
+    ).toBeNull();
+    expect(useProjectStore.getState().clips).toHaveLength(0);
+  });
+
+  it('never adds an unknown asset or a video asset to an audio track', () => {
+    expect(
+      useProjectStore
+        .getState()
+        .addClipFromAsset('missing-asset', TRACKS[0].id, ASSET.duration),
+    ).toBeNull();
+    expect(
+      useProjectStore
+        .getState()
+        .addClipFromAsset(ASSET.id, TRACKS[1].id, ASSET.duration),
+    ).toBeNull();
     expect(useProjectStore.getState().clips).toHaveLength(0);
   });
 

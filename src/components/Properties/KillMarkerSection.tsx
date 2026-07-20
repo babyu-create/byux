@@ -45,12 +45,16 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
 
   const jumpToMarker = (markerId: string, time: number) => {
     selectMarker(markerId);
-    // Find a clip on the video track that contains this asset and seek to it.
-    const videoTrackId = tracks.find((t) => t.kind === 'video')?.id;
+    // Find a clip on any visible video track that contains this asset.
+    const visibleVideoTrackIds = new Set(
+      tracks
+        .filter((track) => track.kind === 'video' && !track.hidden)
+        .map((track) => track.id),
+    );
     const targetClip = clips
       .filter(
         (c) =>
-          c.trackId === videoTrackId &&
+          visibleVideoTrackIds.has(c.trackId) &&
           c.assetId === asset.id &&
           time >= c.trimStart - 1e-6 &&
           time <= c.trimEnd + 1e-6,
@@ -63,10 +67,14 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
 
   const handleAddAtPlayhead = () => {
     // Determine source time from playhead by inverting the active clip mapping.
-    const videoTrackId = tracks.find((t) => t.kind === 'video')?.id;
-    if (!videoTrackId) return;
+    const visibleVideoTrackIds = new Set(
+      tracks
+        .filter((track) => track.kind === 'video' && !track.hidden)
+        .map((track) => track.id),
+    );
+    if (visibleVideoTrackIds.size === 0) return;
     const activeClip = clips.find((c) => {
-      if (c.trackId !== videoTrackId) return false;
+      if (!visibleVideoTrackIds.has(c.trackId)) return false;
       if (c.assetId !== asset.id) return false;
       const end = c.start + clipDuration(c);
       return playhead >= c.start - 1e-6 && playhead < end - 1e-6;
@@ -83,9 +91,16 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
 
   const beginAutoClip = () => {
     if (sortedMarkers.length === 0) return;
-    const videoTrack = useProjectStore.getState().tracks.find((track) => track.kind === 'video');
-    if (videoTrack?.locked) {
-      setResultMessage('映像トラックのロックを解除してください');
+    const videoTrack = useProjectStore
+      .getState()
+      .tracks.find(
+        (track) =>
+          track.kind === 'video' &&
+          !track.hidden &&
+          !track.locked,
+      );
+    if (!videoTrack) {
+      setResultMessage('表示中の映像トラックのロックを解除してください');
       return;
     }
     setConfirmOpen(true);

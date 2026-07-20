@@ -328,6 +328,7 @@ ipcMain.handle('project:open-dialog', async (event) => {
     if (requestSessionId !== documentSessionId) {
       return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
     }
+    authorizeProjectMediaRefs(text);
     pendingProjectPath = filePath;
     pendingProjectSessionId = requestSessionId;
     return { ok: true, canceled: false, path: filePath, text };
@@ -491,6 +492,7 @@ ipcMain.handle('project:check-recovery', async (event) => {
   // Keep the recovery file until the renderer has parsed and applied it.
   // A malformed document or renderer crash must not destroy the only copy.
   pendingRecovery = { id: recoveryId, projectPath: recoveredProjectPath };
+  authorizeProjectMediaRefs(recovery.text);
   return {
     ok: true,
     recovered: true,
@@ -602,6 +604,7 @@ ipcMain.handle('project:open-recent', async (event, requestedPath) => {
     if (requestSessionId !== documentSessionId) {
       return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
     }
+    authorizeProjectMediaRefs(text);
     pendingProjectPath = entry.path;
     pendingProjectSessionId = requestSessionId;
     return { ok: true, canceled: false, path: entry.path, text };
@@ -1010,13 +1013,10 @@ async function leaseNativeSources(request, binaryPath, entry) {
     !Array.isArray(request?.clips) ||
     request.clips.length > 10_000 ||
     !Array.isArray(request?.tracks) ||
-    request.tracks.length > 128
+    request.tracks.length > 100
   ) {
     throw new NativeExportPlanError('INVALID_PROJECT', '素材一覧が不正です');
   }
-  const mainVideoTrack = Array.isArray(request?.tracks)
-    ? request.tracks.find((track) => track?.kind === 'video')
-    : null;
   const trackById = new Map(
     Array.isArray(request?.tracks)
       ? request.tracks.map((track) => [track?.id, track])
@@ -1028,8 +1028,11 @@ async function leaseNativeSources(request, binaryPath, entry) {
       throw new NativeExportPlanError('INVALID_PROJECT', 'クリップの素材IDが不正です');
     }
     const track = trackById.get(clip.trackId);
+    const isVisibleVisual =
+      track?.hidden !== true &&
+      (track?.kind === 'video' || track?.kind === 'overlay');
     if (
-      track?.id === mainVideoTrack?.id ||
+      isVisibleVisual ||
       (track?.kind === 'audio' &&
         track.hidden !== true &&
         track.muted !== true &&
@@ -1689,7 +1692,71 @@ ipcMain.handle('export:show-in-folder', (event) => {
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi']);
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac']);
 const registeredMedia = new Map();
+const authorizedMediaRefs = new Map();
 const MAX_MEDIA_CHUNK_BYTES = 8 * 1024 * 1024;
+
+function mediaApprovalKey(filePath, name, size) {
+  const normalized = path.resolve(filePath);
+  const platformPath = process.platform === 'win32'
+    ? normalized.toLowerCase()
+    : normalized;
+  return `${platformPath}\u0000${name}\u0000${size}`;
+}
+
+function authorizeMediaRef(ref) {
+  if (
+    !ref ||
+    typeof ref.path !== 'string' ||
+    !path.isAbsolute(ref.path) ||
+    typeof ref.name !== 'string' ||
+    ref.name.length === 0 ||
+    ref.name.length > 1_024 ||
+    typeof ref.size !== 'number' ||
+    !Number.isSafeInteger(ref.size) ||
+    ref.size < 0 ||
+    path.basename(ref.path).toLowerCase() !== ref.name.toLowerCase()
+  ) {
+    return false;
+  }
+  const ext = path.extname(ref.path).toLowerCase();
+  if (!VIDEO_EXTENSIONS.has(ext) && !AUDIO_EXTENSIONS.has(ext)) return false;
+  for (const [key, approval] of authorizedMediaRefs) {
+    if (approval.sessionId !== documentSessionId) authorizedMediaRefs.delete(key);
+  }
+  const key = mediaApprovalKey(ref.path, ref.name, ref.size);
+  if (!authorizedMediaRefs.has(key) && authorizedMediaRefs.size >= 4_096) return false;
+  authorizedMediaRefs.set(key, {
+    sessionId: documentSessionId,
+  });
+  return true;
+}
+
+function authorizeProjectMediaRefs(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed?.assets) || parsed.assets.length > 2_000) return;
+    for (const asset of parsed.assets) {
+      authorizeMediaRef(asset);
+    }
+  } catch {
+    // Renderer validation remains authoritative for project structure.
+  }
+}
+
+ipcMain.on('media:authorize-file-sync', (event, ref) => {
+  event.returnValue = false;
+  if (!isTrustedIpcEvent(event) || !authorizeMediaRef(ref)) return;
+  try {
+    const stat = fsStream.statSync(ref.path);
+    if (!stat.isFile() || stat.size !== ref.size) {
+      authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.name, ref.size));
+      return;
+    }
+    event.returnValue = true;
+  } catch {
+    authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.name, ref.size));
+  }
+});
 
 function mediaExtensionMatchesKind(filePath, kind) {
   const ext = path.extname(filePath).toLowerCase();
@@ -1710,6 +1777,15 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     !mediaExtensionMatchesKind(ref.path, ref.kind) ||
     path.basename(ref.path).toLowerCase() !== ref.name.toLowerCase()
   ) {
+    return null;
+  }
+  const approvalKey = mediaApprovalKey(ref.path, ref.name, ref.size);
+  const approval = authorizedMediaRefs.get(approvalKey);
+  if (
+    !approval ||
+    approval.sessionId !== documentSessionId
+  ) {
+    authorizedMediaRefs.delete(approvalKey);
     return null;
   }
   try {

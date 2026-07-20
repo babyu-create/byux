@@ -113,11 +113,16 @@ describe('getNativeExportCompatibility', () => {
     });
   });
 
-  it('reports every WebCodecs-only feature without duplicate reasons', () => {
+  it('accepts every semantic feature supported by the native graph', () => {
     const clip = makeClip({
       speedRamp: { from: 0.5, to: 1.5 },
-      transform: { x: 10 },
-      colorGrade: { preset: 'mono' },
+      transform: {
+        x: [
+          { t: 0, value: 0 },
+          { t: 1, value: 10 },
+        ],
+      },
+      colorGrade: { preset: 'mono', exposure: 10 },
       transitionIn: { type: 'fade', duration: 0.4 },
     });
     const result = getNativeExportCompatibility(
@@ -125,13 +130,7 @@ describe('getNativeExportCompatibility', () => {
       makeOptions({ motionBlur: true }),
     );
 
-    expect(result.compatible).toBe(false);
-    expect(result.reasons).toHaveLength(5);
-    expect(result.reasons.join(' ')).toContain('速度ランプ');
-    expect(result.reasons.join(' ')).toContain('トランスフォーム');
-    expect(result.reasons.join(' ')).toContain('カラー調整');
-    expect(result.reasons.join(' ')).toContain('トランジション');
-    expect(result.reasons.join(' ')).toContain('モーションブラー');
+    expect(result).toMatchObject({ compatible: true, reasons: [] });
   });
 
   it('does not reject explicitly configured identity values', () => {
@@ -146,7 +145,52 @@ describe('getNativeExportCompatibility', () => {
     ).toMatchObject({ compatible: true, reasons: [] });
   });
 
-  it('mirrors main-process checks for unsupported secondary visual lanes', () => {
+  it('accepts hold speed ramps as their normalized constant-speed result', () => {
+    const active = getNativeExportCompatibility(
+      makeInput([
+        makeClip({ speedRamp: { from: 0.5, to: 1.5, easing: 'hold' } }),
+      ]),
+      makeOptions(),
+    );
+    const identity = getNativeExportCompatibility(
+      makeInput([
+        makeClip({ speedRamp: { from: 1, to: 1, easing: 'hold' } }),
+      ]),
+      makeOptions(),
+    );
+
+    expect(active).toMatchObject({ compatible: true, reasons: [] });
+    expect(identity).toMatchObject({ compatible: true, reasons: [] });
+  });
+
+  it('reports the smoke-tested native keyframe boundary before export starts', () => {
+    const result = getNativeExportCompatibility(
+      makeInput([
+        makeClip({
+          transform: {
+            x: Array.from({ length: 65 }, (_, index) => ({
+              t: index / 60,
+              value: index,
+            })),
+          },
+        }),
+      ]),
+      makeOptions(),
+    );
+
+    expect(result.compatible).toBe(false);
+    expect(result.reasons.join(' ')).toContain('64');
+  });
+
+  it('accepts visible secondary video and overlay lanes', () => {
+    const secondaryVideoTrack: Track = {
+      id: 'secondary-video',
+      kind: 'video',
+      label: 'サブ映像',
+      locked: false,
+      muted: false,
+      hidden: false,
+    };
     const overlayTrack: Track = {
       id: 'overlay',
       kind: 'overlay',
@@ -159,15 +203,98 @@ describe('getNativeExportCompatibility', () => {
       makeInput(
         [
           makeClip(),
-          makeClip({ id: 'secondary', trackId: overlayTrack.id }),
+          makeClip({ id: 'secondary', trackId: secondaryVideoTrack.id }),
+          makeClip({ id: 'graphic', trackId: overlayTrack.id }),
         ],
         [makeAsset()],
-        [VIDEO_TRACK, AUDIO_TRACK, overlayTrack],
+        [VIDEO_TRACK, secondaryVideoTrack, AUDIO_TRACK, overlayTrack],
       ),
       makeOptions(),
     );
+    expect(result).toMatchObject({ compatible: true, reasons: [] });
+  });
+
+  it('reports overlay-only projects before native export starts', () => {
+    const overlayTrack: Track = {
+      id: 'overlay-only',
+      kind: 'overlay',
+      label: 'Overlay',
+      locked: false,
+      muted: false,
+      hidden: false,
+    };
+    const result = getNativeExportCompatibility(
+      makeInput(
+        [makeClip({ trackId: overlayTrack.id })],
+        [makeAsset()],
+        [overlayTrack],
+      ),
+      makeOptions(),
+    );
+
     expect(result.compatible).toBe(false);
-    expect(result.reasons.join(' ')).toContain('オーバーレイトラック');
+    expect(result.reasons.join(' ')).toContain('メイン映像');
+  });
+
+  it('uses the first visible video track that actually contains clips', () => {
+    const emptyTrack: Track = {
+      ...VIDEO_TRACK,
+      id: 'empty-video',
+      label: 'Empty',
+    };
+    const result = getNativeExportCompatibility(
+      makeInput(
+        [makeClip()],
+        [makeAsset()],
+        [emptyTrack, VIDEO_TRACK, AUDIO_TRACK],
+      ),
+      makeOptions(),
+    );
+
+    expect(result).toMatchObject({ compatible: true, reasons: [] });
+  });
+
+  it('uses every visible visual lane for long-export duration', () => {
+    const hiddenFirst: Track = {
+      ...VIDEO_TRACK,
+      id: 'hidden-first',
+      hidden: true,
+    };
+    const visibleSecond: Track = {
+      ...VIDEO_TRACK,
+      id: 'visible-second',
+    };
+    const overlayTrack: Track = {
+      id: 'overlay',
+      kind: 'overlay',
+      label: 'オーバーレイ',
+      locked: false,
+      muted: false,
+      hidden: false,
+    };
+    const result = getNativeExportCompatibility(
+      makeInput(
+        [
+          makeClip({ id: 'hidden', trackId: hiddenFirst.id, trimEnd: 20 }),
+          makeClip({ id: 'base', trackId: visibleSecond.id, trimEnd: 3 }),
+          makeClip({
+            id: 'upper',
+            trackId: overlayTrack.id,
+            start: 10,
+            trimEnd: 5,
+          }),
+        ],
+        [makeAsset()],
+        [hiddenFirst, visibleSecond, overlayTrack, AUDIO_TRACK],
+      ),
+      makeOptions(),
+    );
+
+    expect(result).toEqual({
+      compatible: true,
+      reasons: [],
+      duration: 15,
+    });
   });
 });
 
@@ -248,6 +375,71 @@ describe('prepareNativeExportRequest', () => {
     expect(releaseMediaFile).toHaveBeenCalledWith('temporary-token');
   });
 
+  it('sends validation metadata without registering hidden or muted sources', async () => {
+    const registerMediaFile = vi.fn();
+    const releaseMediaFile = vi.fn().mockResolvedValue(true);
+    installFceApi({ registerMediaFile, releaseMediaFile });
+    const hiddenTrack: Track = {
+      id: 'hidden-overlay',
+      kind: 'overlay',
+      label: '非表示',
+      locked: false,
+      muted: false,
+      hidden: true,
+    };
+    const mutedTrack: Track = {
+      ...AUDIO_TRACK,
+      id: 'muted-audio',
+      muted: true,
+    };
+    const hiddenAsset = makeAsset({
+      id: 'hidden-asset',
+      name: 'hidden.mov',
+      sourceToken: undefined,
+      path: 'C:\\video\\hidden.mov',
+    });
+    const mutedAsset = makeAsset({
+      id: 'muted-asset',
+      name: 'muted.wav',
+      kind: 'audio',
+      mimeType: 'audio/wav',
+      sourceToken: undefined,
+      path: 'C:\\audio\\muted.wav',
+      width: undefined,
+      height: undefined,
+    });
+    const prepared = await prepareNativeExportRequest(
+      makeInput(
+        [
+          makeClip(),
+          makeClip({
+            id: 'hidden-clip',
+            trackId: hiddenTrack.id,
+            assetId: hiddenAsset.id,
+          }),
+          makeClip({
+            id: 'muted-clip',
+            trackId: mutedTrack.id,
+            assetId: mutedAsset.id,
+          }),
+        ],
+        [makeAsset(), hiddenAsset, mutedAsset],
+        [VIDEO_TRACK, AUDIO_TRACK, hiddenTrack, mutedTrack],
+      ),
+      makeOptions(),
+    );
+
+    expect(registerMediaFile).not.toHaveBeenCalled();
+    expect(prepared.request.assets).toHaveLength(3);
+    expect(
+      prepared.request.assets.find((asset) => asset.id === hiddenAsset.id),
+    ).not.toHaveProperty('sourceToken');
+    expect(
+      prepared.request.assets.find((asset) => asset.id === mutedAsset.id),
+    ).not.toHaveProperty('sourceToken');
+    await prepared.release();
+  });
+
   it('releases earlier temporary registrations when later preparation fails', async () => {
     const registerMediaFile = vi.fn()
       .mockResolvedValueOnce({
@@ -314,6 +506,91 @@ describe('prepareNativeExportRequest', () => {
     await prepared.release();
   });
 
+  it('preserves native semantic effects and rasterizes secondary visual lanes', async () => {
+    const overlayTrack: Track = {
+      id: 'overlay',
+      kind: 'overlay',
+      label: 'オーバーレイ',
+      locked: false,
+      muted: false,
+      hidden: false,
+    };
+    const semanticClip = makeClip({
+      speedRamp: { from: 0.5, to: 1.5, easing: 'linear' },
+      transform: {
+        x: [
+          { t: 0, value: 0 },
+          { t: 1, value: 12 },
+        ],
+        opacity: 0.8,
+      },
+      colorGrade: { preset: 'warm', saturation: 15 },
+      transitionIn: { type: 'slide', duration: 0.35 },
+      transitionOut: { type: 'zoom', duration: 0.25 },
+      effects: [{ type: 'motion-blur', intensity: 65 }],
+    });
+    const secondaryClip = makeClip({
+      id: 'secondary',
+      trackId: overlayTrack.id,
+      start: 1,
+      overlays: [{
+        id: 'overlay-secondary',
+        text: 'Secondary {n}/{total}',
+        fontSize: 8,
+        color: '#ffffff',
+        position: 'center',
+      }],
+    });
+    const options = makeOptions({
+      motionBlur: true,
+      motionBlurStrength: 0.7,
+      motionBlurHudPreset: 'valorant',
+      motionBlurHudMaskStrength: 0.85,
+    });
+    const prepared = await prepareNativeExportRequest(
+      makeInput(
+        [semanticClip, secondaryClip],
+        [makeAsset()],
+        [VIDEO_TRACK, AUDIO_TRACK, overlayTrack],
+      ),
+      options,
+    );
+
+    expect(prepared.request.options).toMatchObject({
+      motionBlur: true,
+      motionBlurStrength: 0.7,
+      motionBlurHudPreset: 'valorant',
+      motionBlurHudMaskStrength: 0.85,
+    });
+    expect(prepared.request.clips[0]).toMatchObject({
+      speedRamp: semanticClip.speedRamp,
+      transform: semanticClip.transform,
+      colorGrade: semanticClip.colorGrade,
+      transitionIn: semanticClip.transitionIn,
+      transitionOut: semanticClip.transitionOut,
+      effects: semanticClip.effects,
+    });
+    expect(rasterizeOverlaysMock).toHaveBeenCalledWith(
+      secondaryClip.overlays,
+      1920,
+      1080,
+      { n: '1', total: '1' },
+    );
+    expect(prepared.request.overlays).toEqual([
+      expect.objectContaining({ clipId: 'secondary' }),
+    ]);
+
+    // The IPC snapshot must not retain references to mutable editor state.
+    (semanticClip.transform!.x as Array<{ t: number; value: number }>)[1].value = 99;
+    expect(
+      (
+        prepared.request.clips[0].transform!.x as
+          Array<{ t: number; value: number }>
+      )[1].value,
+    ).toBe(12);
+    await prepared.release();
+  });
+
   it('forces scaling when proxy dimensions merely match the requested output', async () => {
     const prepared = await prepareNativeExportRequest(
       makeInput(
@@ -368,16 +645,4 @@ describe('prepareNativeExportRequest', () => {
     ).rejects.toThrow('登録できません');
   });
 
-  it('rejects incompatible projects before registering any source', async () => {
-    const registerMediaFile = vi.fn();
-    const releaseMediaFile = vi.fn();
-    installFceApi({ registerMediaFile, releaseMediaFile });
-    await expect(
-      prepareNativeExportRequest(
-        makeInput([makeClip({ transform: { scale: 1.2 } })]),
-        makeOptions(),
-      ),
-    ).rejects.toThrow('トランスフォーム');
-    expect(registerMediaFile).not.toHaveBeenCalled();
-  });
 });

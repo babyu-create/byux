@@ -7,6 +7,10 @@ import { Clip } from './Clip';
 import { ContextMenu } from '../Common/ContextMenu';
 import { ClipVolumeSection } from '../Properties/ClipVolumeSection';
 import { ClipSpeedSection } from '../Properties/ClipSpeedSection';
+import {
+  removeClipWithFeedback,
+  splitClipWithFeedback,
+} from './timelineCommands';
 import styles from './Track.module.css';
 
 interface TrackProps {
@@ -87,10 +91,8 @@ export const Track = memo(function Track({
     setContextMenu({ x: start.x, y: start.y, clip: hit });
   };
 
-  // Drop OS files straight onto a track — skips the Media Library round-trip.
-  // Audio can land on any audio lane. Until real multi-video compositing is
-  // implemented, video is accepted only on the primary video lane so the UI
-  // cannot create clips that preview/export would silently discard.
+  // Drop OS files straight onto any compatible track. Visible video and
+  // overlay lanes are composited in both preview and native export.
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
     if (!track || track.locked) return;
     e.preventDefault();
@@ -115,12 +117,11 @@ export const Track = memo(function Track({
       .then((newAssets) => {
         let cursor = dropTime;
         let skipped = 0;
-        const primaryVideoTrackId = tracks.find((candidate) => candidate.kind === 'video')?.id;
         for (const asset of newAssets) {
           const compatible =
             asset.kind === 'audio'
               ? track.kind === 'audio'
-              : track.kind === 'video' && track.id === primaryVideoTrackId;
+              : track.kind === 'video' || track.kind === 'overlay';
           if (!compatible) {
             skipped += 1;
             continue;
@@ -131,7 +132,7 @@ export const Track = memo(function Track({
         if (skipped > 0) {
           ps.showMessage(
             'error',
-            `${skipped}個のファイルはこのトラックに追加できません（映像はメイン映像、音声は音声トラックへ追加してください）`,
+            `${skipped}個のファイルはこの種類のトラックに追加できません`,
             3500,
           );
         }
@@ -198,10 +199,7 @@ export const Track = memo(function Track({
           },
           {
             label: '分割（再生位置で）',
-            onSelect: () => {
-              const ps = useProjectStore.getState();
-              ps.splitClipAt(contextMenu.clip.id, ps.playhead);
-            },
+            onSelect: () => splitClipWithFeedback(contextMenu.clip.id),
           },
           {
             label: contextMenu.clip.muted ? 'ミュート解除' : 'ミュート',
@@ -209,7 +207,7 @@ export const Track = memo(function Track({
           },
           {
             label: '削除',
-            onSelect: () => useProjectStore.getState().removeClip(contextMenu.clip.id),
+            onSelect: () => removeClipWithFeedback(contextMenu.clip.id),
           },
         ]}
       />

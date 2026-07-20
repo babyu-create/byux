@@ -38,7 +38,14 @@ contextBridge.exposeInMainWorld('fce', {
     });
   },
   getPathForFile(file) {
-    return webUtils.getPathForFile(file);
+    const filePath = webUtils.getPathForFile(file);
+    if (!filePath) return '';
+    const approved = ipcRenderer.sendSync('media:authorize-file-sync', {
+      path: filePath,
+      name: file?.name,
+      size: file?.size,
+    });
+    return approved === true ? filePath : '';
   },
   registerMediaFile(ref) {
     return ipcRenderer.invoke('media:register-file', ref);
