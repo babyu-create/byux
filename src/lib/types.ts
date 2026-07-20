@@ -84,6 +84,27 @@ export interface MediaAsset {
   previewProxy?: boolean;
 }
 
+/** A disk-backed media source explicitly selected and registered by Electron. */
+export interface NativeMediaSource {
+  path: string;
+  name: string;
+  size: number;
+  kind: 'video' | 'audio';
+  token: string;
+  url: string;
+}
+
+export type NativeMediaRegistrationResult =
+  | { ok: true; source: NativeMediaSource }
+  | {
+      ok: false;
+      code:
+        | 'NOT_DISK_BACKED'
+        | 'NOT_AUTHORIZED'
+        | 'REGISTRATION_FAILED'
+        | 'INVALID_KIND';
+    };
+
 export type ClipEffectType = 'fade-in' | 'fade-out' | 'motion-blur';
 
 export interface ClipEffect {

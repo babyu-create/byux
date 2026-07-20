@@ -246,6 +246,31 @@ export function probeVideoUrlMetadata(url: string): Promise<MediaProbeResult> {
   });
 }
 
+/** Probe a main-process streamed audio URL without copying the whole source
+ * into renderer memory. */
+export function probeAudioUrlMetadata(url: string): Promise<MediaProbeResult> {
+  return new Promise((resolve, reject) => {
+    const audio = document.createElement('audio');
+    const cleanup = () => {
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+      audio.removeAttribute('src');
+      audio.load();
+    };
+    audio.preload = 'metadata';
+    audio.onloadedmetadata = () => {
+      const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+      cleanup();
+      resolve({ duration });
+    };
+    audio.onerror = () => {
+      cleanup();
+      reject(new Error('Failed to read streamed audio metadata'));
+    };
+    audio.src = url;
+  });
+}
+
 export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) {
     return '00:00';

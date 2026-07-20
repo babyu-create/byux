@@ -3,6 +3,23 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const updaterListeners = new Set();
 const nativeExportListeners = new Set();
 
+function localMediaRef(file, kind) {
+  if (kind !== 'video' && kind !== 'audio') {
+    return { ok: false, code: 'INVALID_KIND' };
+  }
+  const filePath = webUtils.getPathForFile(file);
+  if (!filePath) return { ok: false, code: 'NOT_DISK_BACKED' };
+  const ref = {
+    path: filePath,
+    name: file?.name,
+    size: file?.size,
+    kind,
+  };
+  const approved = ipcRenderer.sendSync('media:authorize-file-sync', ref);
+  if (approved !== true) return { ok: false, code: 'NOT_AUTHORIZED' };
+  return { ok: true, ref };
+}
+
 ipcRenderer.on('updater', (_event, payload) => {
   for (const cb of updaterListeners) cb(payload);
 });
@@ -46,6 +63,26 @@ contextBridge.exposeInMainWorld('fce', {
       size: file?.size,
     });
     return approved === true ? filePath : '';
+  },
+  async registerMediaFileFromFile(file, kind) {
+    const local = localMediaRef(file, kind);
+    if (!local.ok) return local;
+    const registered = await ipcRenderer.invoke('media:register-file', local.ref);
+    if (!registered?.token) {
+      return { ok: false, code: 'REGISTRATION_FAILED' };
+    }
+    return {
+      ok: true,
+      source: {
+        ...registered,
+        path: local.ref.path,
+        name: local.ref.name,
+        kind: local.ref.kind,
+      },
+    };
+  },
+  selectMediaFiles(options) {
+    return ipcRenderer.invoke('media:select-files', options);
   },
   registerMediaFile(ref) {
     return ipcRenderer.invoke('media:register-file', ref);

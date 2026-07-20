@@ -20,6 +20,7 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
   const importStatus = useMediaStore((s) => s.importStatus);
   const importError = useMediaStore((s) => s.importError);
   const addFiles = useMediaStore((s) => s.addFiles);
+  const addNativeSources = useMediaStore((s) => s.addNativeSources);
   const selectAsset = useMediaStore((s) => s.selectAsset);
   const removeAsset = useMediaStore((s) => s.removeAsset);
   const clearError = useMediaStore((s) => s.clearError);
@@ -57,7 +58,36 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
     });
   };
 
-  const handleClick = () => fileInputRef.current?.click();
+  const handleClick = () => {
+    if (isImporting) {
+      showMessage('info', '現在の読み込みが終わるまでお待ちください', 2500);
+      return;
+    }
+    const selectMediaFiles = window.fce?.selectMediaFiles;
+    if (!selectMediaFiles) {
+      fileInputRef.current?.click();
+      return;
+    }
+    void selectMediaFiles({ multiple: true })
+      .then(async (sources) => {
+        if (sources.length === 0) return;
+        const created = await addNativeSources(sources);
+        if (created.length === sources.length) {
+          showMessage('success', `${created.length}個のファイルを追加しました`, 1800);
+        } else if (created.length > 0) {
+          showMessage(
+            'info',
+            `${created.length}個を追加、${sources.length - created.length}個は読み込めませんでした`,
+            4000,
+          );
+        } else {
+          showMessage('error', 'ファイルを追加できませんでした。形式を確認してください', 4000);
+        }
+      })
+      .catch(() => {
+        showMessage('error', 'ファイル選択を開けませんでした', 4000);
+      });
+  };
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
     handleFiles(e.target.files);
     e.target.value = '';
@@ -84,9 +114,45 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
     if (dragDepthRef.current === 0) setIsDragging(false);
   };
 
+  const finishRelink = (
+    asset: MediaAsset,
+    target: ProjectAssetRef,
+    sourceName: string,
+  ) => {
+    if (asset.kind !== target.kind) {
+      removeAsset(asset.id);
+      showMessage(
+        'error',
+        target.kind === 'video' ? '動画ファイルを選択してください' : '音声ファイルを選択してください',
+        4000,
+      );
+      return;
+    }
+    remapAssetIds({ [target.id]: asset.id });
+    showMessage('success', `「${target.name}」を「${sourceName}」へ再リンクしました`, 4000);
+  };
+
   const chooseRelinkFile = (ref: ProjectAssetRef) => {
     if (isImporting) {
       showMessage('info', '現在の読み込みが終わるまでお待ちください', 2500);
+      return;
+    }
+    const selectMediaFiles = window.fce?.selectMediaFiles;
+    if (selectMediaFiles) {
+      void selectMediaFiles({ kind: ref.kind, multiple: false })
+        .then(async (sources) => {
+          if (sources.length === 0) return;
+          const created = await addNativeSources(sources);
+          const asset = created[0];
+          if (!asset) {
+            showMessage('error', '選択したファイルを読み込めませんでした', 4000);
+            return;
+          }
+          finishRelink(asset, ref, sources[0].name);
+        })
+        .catch(() => {
+          showMessage('error', 'ファイル選択を開けませんでした', 4000);
+        });
       return;
     }
     setRelinkTarget(ref);
@@ -105,17 +171,7 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
       showMessage('error', '選択したファイルを読み込めませんでした', 4000);
       return;
     }
-    if (asset.kind !== target.kind) {
-      removeAsset(asset.id);
-      showMessage(
-        'error',
-        target.kind === 'video' ? '動画ファイルを選択してください' : '音声ファイルを選択してください',
-        4000,
-      );
-      return;
-    }
-    remapAssetIds({ [target.id]: asset.id });
-    showMessage('success', `「${target.name}」を「${file.name}」へ再リンクしました`, 4000);
+    finishRelink(asset, target, file.name);
   };
 
   const videoAssets = assets.filter((a) => a.kind === 'video');

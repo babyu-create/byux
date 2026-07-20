@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Sparkles, Download, CheckCircle2, AlertTriangle } from 'lucide-react';
 import type { NativeExportRequest } from '../../lib/nativeExporter';
+import type {
+  NativeMediaRegistrationResult,
+  NativeMediaSource,
+} from '../../lib/types';
 import styles from './UpdateBanner.module.css';
 
 type UpdaterEvent =
@@ -173,6 +177,16 @@ interface FCEGlobal {
   completeSaveBeforeClose?: (id: string, success: boolean) => void;
   /** Real disk path of a File the user dropped/picked (empty string if none). */
   getPathForFile?: (file: File) => string;
+  /** Resolve and register a user-provided disk File before editing starts. */
+  registerMediaFileFromFile?: (
+    file: File,
+    kind: 'video' | 'audio',
+  ) => Promise<NativeMediaRegistrationResult>;
+  /** Use Electron's native picker so the main process owns the selected paths. */
+  selectMediaFiles?: (options?: {
+    kind?: 'video' | 'audio';
+    multiple?: boolean;
+  }) => Promise<NativeMediaSource[]>;
   /** Register a saved source path and receive an opaque streaming handle. */
   registerMediaFile?: (ref: {
     path: string;

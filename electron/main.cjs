@@ -32,6 +32,7 @@ const {
   validateOutput,
   verifyFfmpegBinary,
 } = require('./nativeFfmpeg.cjs');
+const { renameWithRetry, syncFileForCommit } = require('./nativeFs.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -228,7 +229,7 @@ async function atomicWriteText(targetPath, text) {
       await handle.sync();
       await handle.close();
       handle = null;
-      await fs.rename(temporaryPath, targetPath);
+      await renameWithRetry(temporaryPath, targetPath);
     } catch (error) {
       await handle?.close().catch(() => {});
       await fs.rm(temporaryPath, { force: true }).catch(() => {});
@@ -666,7 +667,7 @@ async function writeExportJournalSnapshot(snapshot) {
       encoding: 'utf8',
       mode: 0o600,
     });
-    await fs.rename(temporary, target);
+    await renameWithRetry(temporary, target);
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => {});
   }
@@ -1180,10 +1181,21 @@ function redactNativeError(error, entry) {
   if (entry.cancelled) {
     return { code: 'CANCELLED', message: '書き出しを中止しました' };
   }
-  if (/Permission denied|EACCES|EPERM/i.test(diagnostic)) {
+  if (/Permission denied|EACCES|EPERM|EBUSY/i.test(diagnostic)) {
     return {
       code: 'PERMISSION',
-      message: '保存先へ書き込めません。保存先またはアクセス権を確認してください',
+      message:
+        entry.state === 'committing'
+          ? '完成ファイルの確定が一時的に拒否されました。少し待って再試行してください'
+          : '書き出し中のファイル操作が拒否されました。素材と保存先のアクセス権を確認してください',
+      details: [
+        `phase=${entry.state}`,
+        `errorCode=${
+          error && typeof error === 'object' && typeof error.code === 'string'
+            ? error.code
+            : 'unknown'
+        }`,
+      ],
     };
   }
   let message = error instanceof Error ? error.message : 'ネイティブ書き出しに失敗しました';
@@ -1364,15 +1376,14 @@ async function runNativeExport(token, entry, request) {
     });
     if (entry.cancelled) throw new Error('書き出しが中止されました');
 
-    const outputHandle = await fs.open(entry.temporaryPath, 'r');
-    try {
-      await outputHandle.sync();
-    } finally {
-      await outputHandle.close();
-    }
+    await syncFileForCommit(entry.temporaryPath, {
+      shouldAbort: () => entry.cancelled,
+    });
     if (entry.cancelled) throw new Error('書き出しが中止されました');
     entry.state = 'committing';
-    await fs.rename(entry.temporaryPath, entry.path);
+    await renameWithRetry(entry.temporaryPath, entry.path, {
+      shouldAbort: () => entry.cancelled,
+    });
     entry.committed = true;
     entry.state = 'committed';
     lastExportPath = entry.path;
@@ -1652,7 +1663,10 @@ ipcMain.handle('export:write-chunk', async (event, token, offset, chunk, final) 
         assertActiveExport(token, entry);
         // Keep an existing export intact until every byte of the new one has
         // landed and been fsynced. rename replaces it only at successful commit.
-        await fs.rename(entry.temporaryPath, entry.path);
+        await renameWithRetry(entry.temporaryPath, entry.path, {
+          shouldAbort: () =>
+            entry.cancelled || pendingExports.get(token) !== entry,
+        });
         entry.committed = true;
         entry.state = 'committed';
         pendingExports.delete(token);
@@ -1763,6 +1777,86 @@ function mediaExtensionMatchesKind(filePath, kind) {
   return kind === 'video' ? VIDEO_EXTENSIONS.has(ext) : AUDIO_EXTENSIONS.has(ext);
 }
 
+function mediaKindForPath(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (VIDEO_EXTENSIONS.has(ext)) return 'video';
+  if (AUDIO_EXTENSIONS.has(ext)) return 'audio';
+  return null;
+}
+
+function registerResolvedMedia(realPath, stat, kind, name) {
+  const token = crypto.randomUUID();
+  registeredMedia.set(token, {
+    path: realPath,
+    size: stat.size,
+    kind,
+    name,
+    dev: stat.dev,
+    ino: stat.ino,
+    mtimeMs: stat.mtimeMs,
+    leases: 0,
+    releaseRequested: false,
+  });
+  return {
+    token,
+    url: `fce-media://asset/${token}`,
+    size: stat.size,
+  };
+}
+
+ipcMain.handle('media:select-files', async (event, options) => {
+  if (!isTrustedIpcEvent(event)) return [];
+  const requestedKind =
+    options?.kind === 'video' || options?.kind === 'audio'
+      ? options.kind
+      : null;
+  const multiple = options?.multiple !== false;
+  const extensions = requestedKind === 'video'
+    ? [...VIDEO_EXTENSIONS].map((ext) => ext.slice(1))
+    : requestedKind === 'audio'
+      ? [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1))
+      : [...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS].map((ext) => ext.slice(1));
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: requestedKind === 'audio' ? '音声ファイルを追加' : '動画・音声ファイルを追加',
+    properties: multiple ? ['openFile', 'multiSelections'] : ['openFile'],
+    filters: [
+      {
+        name: requestedKind === 'video'
+          ? '動画'
+          : requestedKind === 'audio'
+            ? '音声'
+            : '動画・音声',
+        extensions,
+      },
+    ],
+  });
+  if (result.canceled) return [];
+
+  const sources = [];
+  for (const selectedPath of result.filePaths) {
+    try {
+      if (isDangerousWindowsDevicePath(selectedPath)) continue;
+      const realPath = await fs.realpath(selectedPath);
+      if (isDangerousWindowsDevicePath(realPath)) continue;
+      const kind = mediaKindForPath(realPath);
+      if (!kind || (requestedKind && kind !== requestedKind)) continue;
+      const stat = await fs.stat(realPath);
+      if (!stat.isFile()) continue;
+      const name = path.basename(realPath);
+      const registered = registerResolvedMedia(realPath, stat, kind, name);
+      sources.push({
+        ...registered,
+        path: realPath,
+        name,
+        kind,
+      });
+    } catch {
+      // A selection may disappear or become unreadable before registration.
+    }
+  }
+  return sources;
+});
+
 ipcMain.handle('media:register-file', async (event, ref) => {
   if (!isTrustedIpcEvent(event)) return null;
   if (
@@ -1794,23 +1888,7 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     if (isDangerousWindowsDevicePath(realPath)) return null;
     const stat = await fs.stat(realPath);
     if (!stat.isFile() || stat.size !== ref.size) return null;
-    const token = crypto.randomUUID();
-    registeredMedia.set(token, {
-      path: realPath,
-      size: stat.size,
-      kind: ref.kind,
-      name: ref.name,
-      dev: stat.dev,
-      ino: stat.ino,
-      mtimeMs: stat.mtimeMs,
-      leases: 0,
-      releaseRequested: false,
-    });
-    return {
-      token,
-      url: `fce-media://asset/${token}`,
-      size: stat.size,
-    };
+    return registerResolvedMedia(realPath, stat, ref.kind, ref.name);
   } catch {
     return null;
   }
@@ -2123,13 +2201,12 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     if (result.code !== 0) {
       throw new Error(`プレビュー変換に失敗しました (FFmpeg: ${String(result.code)})`);
     }
-    const handle = await fs.open(temporaryPath, 'r');
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await fs.rename(temporaryPath, proxyPath);
+    await syncFileForCommit(temporaryPath, {
+      shouldAbort: () => job.cancelled,
+    });
+    await renameWithRetry(temporaryPath, proxyPath, {
+      shouldAbort: () => job.cancelled,
+    });
     const registered = await registerProxyFile(proxyPath);
     pendingProxyJobs.delete(token);
     if (!job.sourceLeaseReleased) {

@@ -3,11 +3,17 @@ import type { MediaAsset } from '../lib/types';
 import {
   fileToMediaAsset,
   guessMimeType,
+  isAudioFile,
   isVideoFile,
+  probeAudioUrlMetadata,
   probeVideoUrlMetadata,
 } from '../lib/media';
 import { computeWaveform } from '../lib/audio';
 import type { ProjectAssetRef } from '../lib/project';
+import type {
+  NativeMediaRegistrationResult,
+  NativeMediaSource,
+} from '../lib/types';
 
 interface MediaStoreState {
   assets: MediaAsset[];
@@ -18,6 +24,7 @@ interface MediaStoreState {
   /** Returns the assets actually created (skips unsupported files), so a
    *  caller like Track's drop handler can place clips for them immediately. */
   addFiles: (files: File[] | FileList) => Promise<MediaAsset[]>;
+  addNativeSources: (sources: NativeMediaSource[]) => Promise<MediaAsset[]>;
   addRecoveredAsset: (
     ref: ProjectAssetRef,
     source: { token: string; url: string; size: number },
@@ -28,6 +35,73 @@ interface MediaStoreState {
   clearError: () => void;
   setAssetBeats: (id: string, beats: number[]) => void;
   setAssetWaveform: (id: string, waveform: { peaks: Float32Array; peaksPerSecond: number }) => void;
+}
+
+function nativeRegistrationError(
+  fileName: string,
+  result: Extract<NativeMediaRegistrationResult, { ok: false }>,
+): Error {
+  const detail =
+    result.code === 'NOT_DISK_BACKED'
+      ? 'ドラッグ元からディスク上の場所を取得できません'
+      : result.code === 'NOT_AUTHORIZED'
+        ? 'ファイルの参照を安全に承認できません'
+        : result.code === 'INVALID_KIND'
+          ? 'ファイル形式を判定できません'
+          : 'ファイルを安全に登録できません';
+  return new Error(
+    `${detail}: ${fileName}。「ファイルを追加」ボタンから選び直してください`,
+  );
+}
+
+async function assetFromNativeSource(
+  source: NativeMediaSource,
+): Promise<MediaAsset> {
+  let previewToken: string | undefined;
+  try {
+    let previewUrl = source.url;
+    let previewProxy = false;
+    if (
+      source.kind === 'video' &&
+      /\.(?:avi|mkv)$/i.test(source.name) &&
+      window.fce?.createPreviewProxy
+    ) {
+      const proxy = await window.fce.createPreviewProxy(source.token);
+      if (!proxy.ok || !proxy.token || !proxy.url || !proxy.size) {
+        throw new Error(
+          proxy.error ?? `${source.name} の互換プレビューを作成できません`,
+        );
+      }
+      previewToken = proxy.token;
+      previewUrl = proxy.url;
+      previewProxy = true;
+    }
+    const metadata =
+      source.kind === 'video'
+        ? await probeVideoUrlMetadata(previewUrl)
+        : await probeAudioUrlMetadata(previewUrl);
+    return {
+      id: crypto.randomUUID(),
+      name: source.name,
+      kind: source.kind,
+      url: previewUrl,
+      size: source.size,
+      mimeType: guessMimeType(source.name, source.kind),
+      duration: metadata.duration,
+      width: metadata.width,
+      height: metadata.height,
+      path: source.path,
+      sourceToken: source.token,
+      previewSourceToken: previewToken,
+      previewProxy,
+    };
+  } catch (error) {
+    if (previewToken) {
+      await window.fce?.releaseMediaFile?.(previewToken).catch(() => {});
+    }
+    await window.fce?.releaseMediaFile?.(source.token).catch(() => {});
+    throw error;
+  }
 }
 
 function releaseAssetMediaTokens(asset: MediaAsset): void {
@@ -51,6 +125,50 @@ function releaseAssetMediaTokens(asset: MediaAsset): void {
   }
 }
 
+async function releaseAssetMediaTokensNow(asset: MediaAsset): Promise<void> {
+  const releaseMediaFile = window.fce?.releaseMediaFile;
+  if (!releaseMediaFile) return;
+  const tokens = new Set(
+    [asset.sourceToken, asset.previewSourceToken].filter(
+      (token): token is string => Boolean(token),
+    ),
+  );
+  await Promise.all(
+    [...tokens].map(async (token) => {
+      try {
+        await releaseMediaFile(token);
+      } catch {
+        // The main process also drops registrations at renderer shutdown.
+      }
+    }),
+  );
+}
+
+async function disposeImportedAssets(assets: MediaAsset[]): Promise<void> {
+  await Promise.all(
+    assets.map(async (asset) => {
+      if (asset.url.startsWith('blob:')) URL.revokeObjectURL(asset.url);
+      await releaseAssetMediaTokensNow(asset);
+    }),
+  );
+}
+
+async function releaseNativeSources(sources: NativeMediaSource[]): Promise<void> {
+  const releaseMediaFile = window.fce?.releaseMediaFile;
+  if (!releaseMediaFile) return;
+  await Promise.all(
+    sources.map(async (source) => {
+      try {
+        await releaseMediaFile(source.token);
+      } catch {
+        // A failed cleanup must not strand the import state.
+      }
+    }),
+  );
+}
+
+let mediaImportGeneration = 0;
+
 export const useMediaStore = create<MediaStoreState>((set, get) => ({
   assets: [],
   selectedAssetId: null,
@@ -62,6 +180,7 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
     if (get().isImporting) return [];
     const list = Array.from(files);
     if (list.length === 0) return [];
+    const importGeneration = ++mediaImportGeneration;
 
     set({ isImporting: true, importStatus: '読み込み中…', importError: null });
 
@@ -71,7 +190,25 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
     // Process sequentially: compatibility transcoding is memory-heavy and the
     // shared FFmpeg instance must never receive overlapping commands.
     for (const file of list) {
+      if (importGeneration !== mediaImportGeneration) {
+        await disposeImportedAssets(newAssets);
+        return [];
+      }
+      let registeredSource: NativeMediaSource | undefined;
+      let keepRegisteredSource = false;
       try {
+        const kind = isVideoFile(file)
+          ? 'video'
+          : isAudioFile(file)
+            ? 'audio'
+            : null;
+        const registerFromFile = window.fce?.registerMediaFileFromFile;
+        if (window.fce?.isElectron && kind && registerFromFile) {
+          const result = await registerFromFile(file, kind);
+          if (!result.ok) throw nativeRegistrationError(file.name, result);
+          registeredSource = result.source;
+        }
+
         let asset: MediaAsset | null;
         try {
           if (
@@ -82,28 +219,44 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
             throw new Error('長尺対応の互換プレビューを作成します');
           }
           asset = await fileToMediaAsset(file);
+          if (asset && registeredSource) {
+            asset = {
+              ...asset,
+              path: registeredSource.path,
+              sourceToken: registeredSource.token,
+            };
+          }
         } catch (probeError) {
           if (!isVideoFile(file)) throw probeError;
           const { createPreviewProxy } = await import('../lib/exporter');
-          const originalPath = window.fce?.getPathForFile?.(file) || undefined;
-          const registerMediaFile = window.fce?.registerMediaFile;
           const createNativeProxy = window.fce?.createPreviewProxy;
-          if (originalPath && registerMediaFile && createNativeProxy) {
-            set({ importStatus: `${file.name} を長尺対応のプレビューへ変換中…` });
-            const original = await registerMediaFile({
-              path: originalPath,
-              name: file.name,
-              size: file.size,
-              kind: 'video',
-            });
-            if (!original?.token) {
-              throw new Error(`素材を安全に登録できません: ${file.name}`, {
-                cause: probeError,
+          if (!registeredSource) {
+            const originalPath = window.fce?.getPathForFile?.(file) || undefined;
+            const registerMediaFile = window.fce?.registerMediaFile;
+            if (originalPath && registerMediaFile) {
+              const original = await registerMediaFile({
+                path: originalPath,
+                name: file.name,
+                size: file.size,
+                kind: 'video',
               });
+              if (original?.token) {
+                registeredSource = {
+                  ...original,
+                  path: originalPath,
+                  name: file.name,
+                  kind: 'video',
+                };
+              }
+            }
+          }
+          if (registeredSource && createNativeProxy) {
+            if (importGeneration === mediaImportGeneration) {
+              set({ importStatus: `${file.name} を長尺対応のプレビューへ変換中…` });
             }
             let proxyToken: string | undefined;
             try {
-              const proxy = await createNativeProxy(original.token);
+              const proxy = await createNativeProxy(registeredSource.token);
               if (!proxy.ok || !proxy.token || !proxy.url || !proxy.size) {
                 throw new Error(
                   proxy.error ?? `${file.name} のプレビュー変換に失敗しました`,
@@ -123,8 +276,8 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
                 duration: meta.duration,
                 width: meta.width,
                 height: meta.height,
-                path: originalPath,
-                sourceToken: original.token,
+                path: registeredSource.path,
+                sourceToken: registeredSource.token,
                 previewSourceToken: proxy.token,
                 previewProxy: true,
               };
@@ -132,12 +285,13 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
               if (proxyToken) {
                 await window.fce?.releaseMediaFile?.(proxyToken).catch(() => {});
               }
-              await window.fce?.releaseMediaFile?.(original.token).catch(() => {});
               throw error;
             }
           } else {
             const proxy = await createPreviewProxy(file, (importStatus) =>
-              set({ importStatus }),
+              importGeneration === mediaImportGeneration
+                ? set({ importStatus })
+                : undefined,
             );
             const proxyAsset = await fileToMediaAsset(proxy);
             if (!proxyAsset) throw probeError;
@@ -147,20 +301,44 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
               file,
               size: file.size,
               mimeType: file.type || guessMimeType(file.name, 'video'),
-              path: originalPath,
+              path: registeredSource?.path,
+              sourceToken: registeredSource?.token,
               previewProxy: true,
             };
           }
         }
-        if (asset) newAssets.push(asset);
-        else errors.push(`非対応のファイル形式: ${file.name}`);
+        if (asset) {
+          if (importGeneration !== mediaImportGeneration) {
+            if (asset.url.startsWith('blob:')) URL.revokeObjectURL(asset.url);
+            if (asset.previewSourceToken) {
+              await window.fce
+                ?.releaseMediaFile?.(asset.previewSourceToken)
+                .catch(() => {});
+            }
+            await disposeImportedAssets(newAssets);
+            return [];
+          }
+          newAssets.push(asset);
+          keepRegisteredSource = true;
+        } else {
+          errors.push(`非対応のファイル形式: ${file.name}`);
+        }
       } catch (error) {
         errors.push(error instanceof Error ? error.message : `読み込み失敗: ${file.name}`);
       } finally {
-        set({ importStatus: '読み込み中…' });
+        if (registeredSource && !keepRegisteredSource) {
+          await window.fce?.releaseMediaFile?.(registeredSource.token).catch(() => {});
+        }
+        if (importGeneration === mediaImportGeneration) {
+          set({ importStatus: '読み込み中…' });
+        }
       }
     }
 
+    if (importGeneration !== mediaImportGeneration) {
+      await disposeImportedAssets(newAssets);
+      return [];
+    }
     set((state) => {
       const merged = [...state.assets, ...newAssets];
       const nextSelected = state.selectedAssetId ?? newAssets[0]?.id ?? null;
@@ -177,6 +355,7 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
     for (const a of newAssets) {
       if (a.kind !== 'audio' || !a.file) continue;
       void computeWaveform(a.file).then((wf) => {
+        if (importGeneration !== mediaImportGeneration) return;
         useMediaStore.getState().setAssetWaveform(a.id, {
           peaks: wf.peaks,
           peaksPerSecond: wf.peaksPerSecond,
@@ -190,7 +369,67 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
     return newAssets;
   },
 
+  addNativeSources: async (sources) => {
+    if (sources.length === 0) return [];
+    if (get().isImporting) {
+      await releaseNativeSources(sources);
+      return [];
+    }
+    const importGeneration = ++mediaImportGeneration;
+    set({ isImporting: true, importStatus: '読み込み中…', importError: null });
+    const newAssets: MediaAsset[] = [];
+    const errors: string[] = [];
+    for (let index = 0; index < sources.length; index += 1) {
+      if (importGeneration !== mediaImportGeneration) {
+        await Promise.all([
+          disposeImportedAssets(newAssets),
+          releaseNativeSources(sources.slice(index)),
+        ]);
+        return [];
+      }
+      const source = sources[index];
+      try {
+        set({ importStatus: `${source.name} を読み込み中…` });
+        const asset = await assetFromNativeSource(source);
+        if (importGeneration !== mediaImportGeneration) {
+          await Promise.all([
+            disposeImportedAssets([...newAssets, asset]),
+            releaseNativeSources(sources.slice(index + 1)),
+          ]);
+          return [];
+        }
+        newAssets.push(asset);
+      } catch (error) {
+        if (importGeneration !== mediaImportGeneration) {
+          await Promise.all([
+            disposeImportedAssets(newAssets),
+            releaseNativeSources(sources.slice(index + 1)),
+          ]);
+          return [];
+        }
+        errors.push(
+          error instanceof Error
+            ? `${source.name}: ${error.message}`
+            : `読み込み失敗: ${source.name}`,
+        );
+      }
+    }
+    if (importGeneration !== mediaImportGeneration) {
+      await disposeImportedAssets(newAssets);
+      return [];
+    }
+    set((state) => ({
+      assets: [...state.assets, ...newAssets],
+      selectedAssetId: state.selectedAssetId ?? newAssets[0]?.id ?? null,
+      isImporting: false,
+      importStatus: null,
+      importError: errors.length > 0 ? errors.join(' / ') : null,
+    }));
+    return newAssets;
+  },
+
   addRecoveredAsset: async (ref, source) => {
+    const importGeneration = mediaImportGeneration;
     let previewToken: string | undefined;
     try {
       let preview = {
@@ -236,6 +475,9 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
         previewSourceToken: previewToken,
         previewProxy: preview.previewProxy,
       };
+      if (importGeneration !== mediaImportGeneration) {
+        throw new Error('素材の復元が中止されました');
+      }
       set((state) => ({
         assets: [...state.assets, asset],
         selectedAssetId: state.selectedAssetId ?? asset.id,
@@ -263,6 +505,7 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
   },
 
   clearAssets: () => {
+    mediaImportGeneration += 1;
     const assets = get().assets;
     for (const asset of assets) {
       if (asset.url.startsWith('blob:')) URL.revokeObjectURL(asset.url);

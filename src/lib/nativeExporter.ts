@@ -263,21 +263,33 @@ export async function prepareNativeExportRequest(
       let sourceToken = requiresSource ? asset.sourceToken : undefined;
       if (requiresSource && !sourceToken) {
         const registerMediaFile = window.fce?.registerMediaFile;
+        const registerMediaFileFromFile = window.fce?.registerMediaFileFromFile;
         const releaseMediaFile = window.fce?.releaseMediaFile;
-        if (!asset.path || !registerMediaFile || !releaseMediaFile) {
+        if (!releaseMediaFile) {
           throw new Error(
             `素材をネイティブ書き出し用に登録できません: ${asset.name}`,
           );
         }
-        const registered = await registerMediaFile({
-          path: asset.path,
-          name: asset.name,
-          size: asset.size,
-          kind: asset.kind,
-        });
+        let registered:
+          | { token: string; url: string; size: number }
+          | undefined;
+        if (asset.file && registerMediaFileFromFile) {
+          const result = await registerMediaFileFromFile(asset.file, asset.kind);
+          if (result.ok) registered = result.source;
+        }
+        if (!registered && asset.path && registerMediaFile) {
+          registered =
+            (await registerMediaFile({
+              path: asset.path,
+              name: asset.name,
+              size: asset.size,
+              kind: asset.kind,
+            })) ?? undefined;
+        }
         if (!registered?.token) {
           throw new Error(
-            `素材をネイティブ書き出し用に登録できません: ${asset.name}`,
+            `素材との接続が失われました: ${asset.name}。` +
+              '素材一覧から削除し、「ファイルを追加」ボタンで元ファイルを選び直してください',
           );
         }
         sourceToken = registered.token;
