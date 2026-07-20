@@ -113,3 +113,39 @@ export function removeClipWithFeedback(clipId: string): number {
   );
   return showEditFeedback('delete', changedCount);
 }
+
+export function copySelectedWithFeedback(): number {
+  const count = useProjectStore.getState().copySelectedClips();
+  useProjectStore.getState().showMessage(
+    count > 0 ? 'success' : 'info',
+    count > 0
+      ? `${count}本のクリップをコピーしました`
+      : 'コピーするクリップを選択してください',
+    2400,
+  );
+  return count;
+}
+
+export function pasteAtPlayheadWithFeedback(): number {
+  const count = useProjectStore.getState().pasteClipsAtPlayhead();
+  useProjectStore.getState().showMessage(
+    count > 0 ? 'success' : 'info',
+    count > 0
+      ? `${count}本を再生位置へ貼り付けました（Ctrl+Zで元に戻せます）`
+      : '貼り付けるクリップがないか、追加先トラックがロックされています',
+    3200,
+  );
+  return count;
+}
+
+export function duplicateSelectedWithFeedback(): number {
+  const count = useProjectStore.getState().duplicateSelectedClips();
+  useProjectStore.getState().showMessage(
+    count > 0 ? 'success' : 'info',
+    count > 0
+      ? `${count}本のクリップを複製しました（Ctrl+Zで元に戻せます）`
+      : '複製するクリップを選択するか、トラックのロックを解除してください',
+    3200,
+  );
+  return count;
+}

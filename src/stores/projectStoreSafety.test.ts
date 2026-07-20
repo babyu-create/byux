@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearHistory, useProjectStore } from './projectStore';
 import { useMediaStore } from './mediaStore';
 import type { MediaAsset, Track } from '../lib/types';
+import { clearClipClipboard } from '../lib/clipClipboard';
 
 const TRACKS: Track[] = [
   { id: 'video', kind: 'video', label: 'Video', locked: false, muted: false, hidden: false },
@@ -20,6 +21,7 @@ const ASSET: MediaAsset = {
 
 describe('project store safety invariants', () => {
   beforeEach(() => {
+    clearClipClipboard();
     clearHistory();
     useMediaStore.setState({ assets: [ASSET], selectedAssetId: ASSET.id });
     useProjectStore.setState({
@@ -257,5 +259,61 @@ describe('project store safety invariants', () => {
     expect(duplicated?.id).not.toBe('source-clip');
     expect(duplicated?.overlays?.[0].id).not.toBe('source-overlay');
     expect(useProjectStore.getState().selectedClipIds).toEqual([duplicated?.id]);
+  });
+
+  it('copies and pastes a clip at the first collision-free position', () => {
+    useProjectStore.setState({
+      playhead: 1,
+      clips: [{
+        id: 'source-clip',
+        trackId: 'video',
+        assetId: ASSET.id,
+        start: 0,
+        trimStart: 0,
+        trimEnd: 2,
+        effects: [],
+        overlays: [{
+          id: 'source-overlay',
+          text: 'ACE',
+          fontSize: 8,
+          color: '#fff',
+          position: 'center',
+        }],
+      }],
+      selectedClipIds: ['source-clip'],
+    });
+
+    expect(useProjectStore.getState().copySelectedClips()).toBe(1);
+    expect(useProjectStore.getState().pasteClipsAtPlayhead()).toBe(1);
+
+    const pasted = useProjectStore.getState().clips[1];
+    expect(pasted.start).toBe(2);
+    expect(pasted.id).not.toBe('source-clip');
+    expect(pasted.overlays?.[0].id).not.toBe('source-overlay');
+    expect(useProjectStore.getState().selectedClipIds).toEqual([pasted.id]);
+  });
+
+  it('duplicates selected clips as an adjacent group and respects track locks', () => {
+    useProjectStore.setState({
+      clips: [{
+        id: 'source-clip',
+        trackId: 'video',
+        assetId: ASSET.id,
+        start: 3,
+        trimStart: 0,
+        trimEnd: 2,
+        effects: [],
+      }],
+      selectedClipIds: ['source-clip'],
+    });
+
+    expect(useProjectStore.getState().duplicateSelectedClips()).toBe(1);
+    expect(useProjectStore.getState().clips[1].start).toBe(5);
+
+    useProjectStore.setState({
+      tracks: [{ ...TRACKS[0], locked: true }, TRACKS[1]],
+      selectedClipIds: ['source-clip'],
+    });
+    expect(useProjectStore.getState().duplicateSelectedClips()).toBe(0);
   });
 });

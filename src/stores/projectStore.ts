@@ -16,6 +16,11 @@ import type { HudPreset } from '../lib/motionBlurCore';
 import type { AudioDucking } from '../lib/audioDucking';
 import { applyClipLook } from '../lib/presets';
 import {
+  placeClipCopies,
+  readClipClipboard,
+  writeClipClipboard,
+} from '../lib/clipClipboard';
+import {
   applyKillBeatSyncSuggestions,
   buildKillBeatSyncSuggestions,
 } from '../lib/killBeatSync';
@@ -103,6 +108,9 @@ interface ProjectStoreState {
   removeAssetReferences: (assetId: string) => void;
   selectClip: (clipId: string, additive?: boolean) => void;
   clearSelection: () => void;
+  copySelectedClips: () => number;
+  pasteClipsAtPlayhead: () => number;
+  duplicateSelectedClips: () => number;
   setPlayhead: (time: number) => void;
   setZoom: (zoom: number) => void;
   zoomIn: () => void;
@@ -221,6 +229,33 @@ const MAX_ZOOM = 8;
 const MIN_CLIP_DURATION = 0.1;
 const MAX_TRACKS = 100;
 const MAX_TRACK_LABEL_LENGTH = 48;
+const MAX_PROJECT_CLIPS = 10_000;
+
+function withFreshClipIdentity(clip: Clip): Clip {
+  return {
+    ...clip,
+    id: crypto.randomUUID(),
+    overlays: clip.overlays?.map((overlay) => ({
+      ...overlay,
+      id: crypto.randomUUID(),
+    })),
+  };
+}
+
+function clipboardCompatibleClips(state: ProjectStoreState, clips: Clip[]): Clip[] {
+  const assets = new Map(
+    useMediaStore.getState().assets.map((asset) => [asset.id, asset]),
+  );
+  const tracks = new Map(state.tracks.map((track) => [track.id, track]));
+  return clips.filter((clip) => {
+    const asset = assets.get(clip.assetId);
+    const track = tracks.get(clip.trackId);
+    if (!asset || !track || track.locked) return false;
+    return asset.kind === 'audio'
+      ? track.kind === 'audio'
+      : track.kind === 'video' || track.kind === 'overlay';
+  });
+}
 
 // --- Undo / redo (zundo temporal) ------------------------------------------
 // Only the editable "document" is undoable; ephemeral UI state (playhead,
@@ -603,6 +638,55 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   clearSelection: () => set({ selectedClipIds: [] }),
+
+  copySelectedClips: () => {
+    const state = get();
+    const selectedIds = new Set(state.selectedClipIds);
+    return writeClipClipboard(
+      state.clips.filter((clip) => selectedIds.has(clip.id)),
+    );
+  },
+
+  pasteClipsAtPlayhead: () => {
+    const state = get();
+    const available = Math.max(0, MAX_PROJECT_CLIPS - state.clips.length);
+    const templates = clipboardCompatibleClips(
+      state,
+      readClipClipboard(),
+    ).slice(0, available);
+    if (templates.length === 0) return 0;
+    const copies = placeClipCopies(
+      templates,
+      state.clips,
+      state.playhead,
+    ).map(withFreshClipIdentity);
+    set({
+      clips: [...state.clips, ...copies],
+      selectedClipIds: copies.map((clip) => clip.id),
+    });
+    return copies.length;
+  },
+
+  duplicateSelectedClips: () => {
+    const state = get();
+    const selectedIds = new Set(state.selectedClipIds);
+    const available = Math.max(0, MAX_PROJECT_CLIPS - state.clips.length);
+    const templates = clipboardCompatibleClips(
+      state,
+      state.clips.filter((clip) => selectedIds.has(clip.id)),
+    ).slice(0, available);
+    if (templates.length === 0) return 0;
+    const origin = Math.min(...templates.map((clip) => clip.start));
+    const copies = placeClipCopies(templates, state.clips, origin).map(
+      withFreshClipIdentity,
+    );
+    set({
+      clips: [...state.clips, ...copies],
+      selectedClipIds: copies.map((clip) => clip.id),
+    });
+    return copies.length;
+  },
+
   setPlayhead: (time) => set({ playhead: Math.max(0, time) }),
   setZoom: (zoom) => set({ zoom: clamp(zoom, MIN_ZOOM, MAX_ZOOM) }),
   zoomIn: () => set((s) => ({ zoom: clamp(s.zoom * 1.4, MIN_ZOOM, MAX_ZOOM) })),

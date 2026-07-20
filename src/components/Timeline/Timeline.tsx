@@ -11,7 +11,7 @@ import { useProjectStore, useTimelineDuration } from '../../stores/projectStore'
 import { useMediaStore } from '../../stores/mediaStore';
 import { clipDuration, sourceTimeAtTimelineTime, timeToPx } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
-import { matchAction } from '../../lib/keybindings';
+import { eventToKey, matchAction } from '../../lib/keybindings';
 import type { MediaAsset } from '../../lib/types';
 import { Ruler } from './Ruler';
 import { Track } from './Track';
@@ -22,6 +22,9 @@ import { TimelineToolbar } from './TimelineToolbar';
 import {
   removeSelectedWithFeedback,
   splitSelectedWithFeedback,
+  copySelectedWithFeedback,
+  pasteAtPlayheadWithFeedback,
+  duplicateSelectedWithFeedback,
 } from './timelineCommands';
 import { TimelineScrollProvider } from '../../hooks/useTimelineAutoScroll';
 import styles from './Timeline.module.css';
@@ -113,9 +116,25 @@ export function Timeline() {
       ) {
         return;
       }
+      const state = useProjectStore.getState();
+      const shortcut = eventToKey(e);
+      if (shortcut === 'ctrl+c' || shortcut === 'meta+c') {
+        e.preventDefault();
+        copySelectedWithFeedback();
+        return;
+      }
+      if (shortcut === 'ctrl+v' || shortcut === 'meta+v') {
+        e.preventDefault();
+        pasteAtPlayheadWithFeedback();
+        return;
+      }
+      if (shortcut === 'ctrl+d' || shortcut === 'meta+d') {
+        e.preventDefault();
+        duplicateSelectedWithFeedback();
+        return;
+      }
       const action = matchAction(e);
       if (!action) return;
-      const state = useProjectStore.getState();
 
       // Helpers
       const findVideoActiveClip = () => {

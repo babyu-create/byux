@@ -72,6 +72,12 @@ export const RESERVED_BINDINGS: Readonly<Record<string, string>> = {
   'ctrl+y': 'やり直す',
   'ctrl+shift+z': 'やり直す',
   'meta+shift+z': 'やり直す',
+  'ctrl+c': '選択クリップをコピー',
+  'meta+c': '選択クリップをコピー',
+  'ctrl+v': '再生位置へ貼り付け',
+  'meta+v': '再生位置へ貼り付け',
+  'ctrl+d': '選択クリップを複製',
+  'meta+d': '選択クリップを複製',
 };
 
 const STORAGE_KEY = 'fce.pref.keybindings.v1';

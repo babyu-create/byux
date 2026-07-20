@@ -10,6 +10,8 @@ import { ClipSpeedSection } from '../Properties/ClipSpeedSection';
 import {
   removeClipWithFeedback,
   splitClipWithFeedback,
+  copySelectedWithFeedback,
+  duplicateSelectedWithFeedback,
 } from './timelineCommands';
 import styles from './Track.module.css';
 
@@ -87,7 +89,8 @@ export const Track = memo(function Track({
       (c) => time >= c.start - 1e-6 && time <= c.start + clipDuration(c) + 1e-6,
     );
     if (!hit) return;
-    useProjectStore.getState().selectClip(hit.id);
+    const state = useProjectStore.getState();
+    if (!state.selectedClipIds.includes(hit.id)) state.selectClip(hit.id);
     setContextMenu({ x: start.x, y: start.y, clip: hit });
   };
 
@@ -196,6 +199,14 @@ export const Track = memo(function Track({
                 kind: 'speed',
                 clipId: contextMenu.clip.id,
               }),
+          },
+          {
+            label: 'コピー（Ctrl+C）',
+            onSelect: copySelectedWithFeedback,
+          },
+          {
+            label: '複製（Ctrl+D）',
+            onSelect: duplicateSelectedWithFeedback,
           },
           {
             label: '分割（再生位置で）',
