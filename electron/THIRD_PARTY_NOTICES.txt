@@ -1,0 +1,13 @@
+Byux native video export includes a separate FFmpeg executable.
+
+FFmpeg
+------
+Project: https://ffmpeg.org/
+Bundled binary provider: https://github.com/eugeneware/ffmpeg-static
+Binary build source/configuration: see the bundled ffmpeg.exe.README file.
+License: GNU General Public License, version 3 or later.
+Full license text: see the bundled LICENSE and ffmpeg.exe.LICENSE files.
+
+FFmpeg is launched as a separate command-line process. Byux does not modify
+the bundled executable. FFmpeg and its libraries retain their respective
+copyrights and licenses.

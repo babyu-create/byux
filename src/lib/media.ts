@@ -204,6 +204,48 @@ export async function mediaAssetToFile(asset: MediaAsset): Promise<File> {
   return new File([blob], asset.name, { type: asset.mimeType });
 }
 
+/** Probe a main-process streamed preview URL without materialising the proxy as
+ * a renderer File/Blob. Used by the native long-form compatibility pipeline. */
+export function probeVideoUrlMetadata(url: string): Promise<MediaProbeResult> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    const cleanup = () => {
+      // Clearing the handlers first is important: calling load() after
+      // removing src can itself emit `error`, which otherwise re-enters
+      // cleanup and may loop on some Chromium versions.
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      video.removeAttribute('src');
+      video.load();
+    };
+    video.preload = 'metadata';
+    video.crossOrigin = 'anonymous';
+    video.onloadedmetadata = () => {
+      const result = {
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      };
+      cleanup();
+      if (
+        !Number.isFinite(result.duration) ||
+        result.duration <= 0 ||
+        result.width <= 0 ||
+        result.height <= 0
+      ) {
+        reject(new Error('プレビュー用動画の情報を読み取れませんでした'));
+        return;
+      }
+      resolve(result);
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error('プレビュー用動画を読み込めませんでした'));
+    };
+    video.src = url;
+  });
+}
+
 export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) {
     return '00:00';

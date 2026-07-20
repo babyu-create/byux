@@ -14,9 +14,24 @@ const http = require('node:http');
 const fsStream = require('node:fs');
 const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
 const { shouldClearRecovery } = require('./projectState.cjs');
+const {
+  NativeExportPlanError,
+  buildNativeExportPlan,
+  parseProgressText,
+} = require('./nativeExportPlan.cjs');
+const {
+  appendTail,
+  minimalEnvironment,
+  probeInputHasAudio,
+  resolveFfmpegBinary,
+  terminateProcess,
+  validateOutput,
+  verifyFfmpegBinary,
+} = require('./nativeFfmpeg.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -611,8 +626,160 @@ ipcMain.handle('project:remove-recent', async (event, requestedPath) => {
 // IPC. The only writable path is the one the user selected in showSaveDialog.
 const MAX_EXPORT_CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_EXPORT_FILE_BYTES = 64 * 1024 * 1024 * 1024;
+const MAX_NATIVE_OVERLAY_BYTES = 8 * 1024 * 1024;
+const MAX_NATIVE_OVERLAY_TOTAL_BYTES = 64 * 1024 * 1024;
+const MAX_NATIVE_OVERLAY_DIMENSION = 8_192;
+const MAX_NATIVE_OVERLAY_DECODED_BYTES = 512 * 1024 * 1024;
 const pendingExports = new Map();
+const pendingProxyJobs = new Map();
 let lastExportPath = null;
+let ffmpegCapabilityPromise = null;
+let exportJournalOperation = Promise.resolve();
+
+function exportJournalPath() {
+  return path.join(app.getPath('userData'), 'pending-exports.json');
+}
+
+function nativeWorkRoot() {
+  return path.join(app.getPath('temp'), 'byux-native-export');
+}
+
+function exportJournalSnapshot() {
+  return [...pendingExports.entries()].map(([token, entry]) => ({
+    token,
+    path: entry.path,
+    temporaryPath: entry.temporaryPath,
+    workDir: entry.workDir ?? null,
+    createdAt: entry.createdAt,
+  }));
+}
+
+async function writeExportJournalSnapshot(snapshot) {
+  const target = exportJournalPath();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temporary = `${target}.${process.pid}.tmp`;
+  try {
+    await fs.writeFile(temporary, JSON.stringify(snapshot), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await fs.rename(temporary, target);
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+function persistExportJournal() {
+  const snapshot = exportJournalSnapshot();
+  exportJournalOperation = exportJournalOperation.catch(() => {}).then(async () => {
+    await writeExportJournalSnapshot(snapshot);
+  });
+  return exportJournalOperation;
+}
+
+function isJournalTemporaryPath(record) {
+  if (
+    !record ||
+    typeof record.token !== 'string' ||
+    !/^[0-9a-f-]{36}$/i.test(record.token) ||
+    typeof record.path !== 'string' ||
+    typeof record.temporaryPath !== 'string'
+  ) {
+    return false;
+  }
+  const expectedName = `.${path.basename(record.path)}.${record.token}.part`;
+  return (
+    path.dirname(record.path) === path.dirname(record.temporaryPath) &&
+    path.basename(record.temporaryPath) === expectedName
+  );
+}
+
+async function cleanupOrphanedExports() {
+  let records;
+  try {
+    records = JSON.parse(await fs.readFile(exportJournalPath(), 'utf8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') records = [];
+    else return;
+  }
+  if (!Array.isArray(records)) return;
+  const root = path.resolve(nativeWorkRoot());
+  const remaining = [];
+  for (const record of records) {
+    if (!isJournalTemporaryPath(record)) {
+      remaining.push(record);
+      continue;
+    }
+    let cleanupFailed = false;
+    try {
+      await fs.rm(record.temporaryPath, { force: true });
+    } catch {
+      cleanupFailed = true;
+    }
+    if (typeof record.workDir === 'string') {
+      const resolvedWork = path.resolve(record.workDir);
+      if (path.dirname(resolvedWork) === root && path.basename(resolvedWork) === record.token) {
+        try {
+          await fs.rm(resolvedWork, { recursive: true, force: true });
+        } catch {
+          cleanupFailed = true;
+        }
+      } else {
+        cleanupFailed = true;
+      }
+    }
+    if (cleanupFailed) remaining.push(record);
+  }
+  // A crashed FFmpeg can still own its output briefly. Preserve failed records
+  // so a later launch retries instead of permanently losing cleanup authority.
+  await writeExportJournalSnapshot(remaining);
+  // The directory is private to Byux and contains only UUID-named render
+  // scratch folders. This also covers a crash between mkdir and journal flush.
+  let scratchEntries = [];
+  try {
+    scratchEntries = await fs.readdir(nativeWorkRoot(), { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await Promise.all(
+    scratchEntries
+      .filter(
+        (entry) =>
+          entry.isDirectory() && /^[0-9a-f-]{36}$/i.test(entry.name),
+      )
+      .map((entry) =>
+        fs.rm(path.join(nativeWorkRoot(), entry.name), {
+          recursive: true,
+          force: true,
+        }).catch(() => {}),
+      ),
+  );
+}
+
+function ffmpegBinaryPath() {
+  return resolveFfmpegBinary(app.isPackaged, process.resourcesPath, path.join(__dirname, '..'));
+}
+
+function ensureNativeFfmpeg() {
+  if (!ffmpegCapabilityPromise) {
+    ffmpegCapabilityPromise = verifyFfmpegBinary(ffmpegBinaryPath()).catch((error) => {
+      ffmpegCapabilityPromise = null;
+      throw error;
+    });
+  }
+  return ffmpegCapabilityPromise;
+}
+
+function sendNativeExportEvent(token, payload) {
+  const entry = pendingExports.get(token);
+  if (!entry || !mainWindow || mainWindow.isDestroyed()) return;
+  entry.eventSequence = (entry.eventSequence ?? 0) + 1;
+  mainWindow.webContents.send('export:native-event', {
+    token,
+    sequence: entry.eventSequence,
+    ...payload,
+  });
+}
 
 function safeExportFilename(value) {
   const stem = String(value || 'byux-export.mp4')
@@ -638,6 +805,14 @@ async function cleanupExportFiles(entry, removePartial = true) {
       cleanupError ??= error;
     }
   }
+  if (entry.workDir) {
+    try {
+      await fs.rm(entry.workDir, { recursive: true, force: true });
+      entry.workDir = null;
+    } catch (error) {
+      cleanupError ??= error;
+    }
+  }
   if (cleanupError) throw cleanupError;
 }
 
@@ -647,12 +822,26 @@ async function abandonExport(token, removePartial = true) {
   if (entry.cleanupPromise) return entry.cleanupPromise;
   entry.cancelled = true;
   const cleanupPromise = (async () => {
+    if (entry.backend === 'native-ffmpeg') {
+      entry.state = 'cancelling';
+      sendNativeExportEvent(token, {
+        phase: 'cancelling',
+        stage: '書き出しを安全に中止しています',
+        overallProgress: entry.progress ?? 0,
+      });
+      // Signal before awaiting the operation. Do not swallow a failure to
+      // confirm process exit: deleting its open output would orphan the child.
+      await terminateProcess(entry.child);
+      entry.child = null;
+    }
     // Keep the entry in pendingExports until its queued disk operation and
     // cleanup have really completed. A second close request must not be able
     // to terminate the process while a large partial file is still open.
     await entry.operation.catch(() => {});
     await cleanupExportFiles(entry, removePartial);
+    releaseExportSourceLeases(entry);
     if (pendingExports.get(token) === entry) pendingExports.delete(token);
+    await persistExportJournal();
     return {
       ok: true,
       abandoned: !entry.committed,
@@ -666,7 +855,7 @@ async function abandonExport(token, removePartial = true) {
   } catch (error) {
     // Keep the cancelled entry visible to close protection and allow an
     // explicit retry if antivirus or another process temporarily held it.
-    entry.cleanupPromise = null;
+    if (entry.cleanupPromise === cleanupPromise) entry.cleanupPromise = null;
     throw error;
   }
 }
@@ -687,6 +876,7 @@ async function failExportEntry(token, entry) {
   entry.cancelled = true;
   await cleanupExportFiles(entry);
   if (pendingExports.get(token) === entry) pendingExports.delete(token);
+  await persistExportJournal();
 }
 
 function resetDocumentSession() {
@@ -699,9 +889,10 @@ function resetDocumentSession() {
 }
 
 function abandonAllExports() {
-  return Promise.all(
-    [...pendingExports.keys()].map((token) => abandonExport(token)),
-  );
+  return Promise.all([
+    ...[...pendingExports.keys()].map((token) => abandonExport(token)),
+    ...[...pendingProxyJobs.keys()].map((token) => abandonProxyJob(token)),
+  ]);
 }
 
 async function confirmDiscardBeforeClose() {
@@ -713,7 +904,7 @@ async function confirmDiscardBeforeClose() {
     // is ignored, but can no longer overwrite a project file.
     cancelPendingCloseSaveRequest();
   }
-  const hasExport = pendingExports.size > 0;
+  const hasExport = pendingExports.size > 0 || pendingProxyJobs.size > 0;
   const hasChanges = isDirty;
   if (!hasExport && !hasChanges && !autosaveCleanupRequired) return true;
   if (!hasExport && !hasChanges && autosaveCleanupRequired) {
@@ -785,6 +976,499 @@ async function showCloseCleanupError(error) {
   });
 }
 
+function releaseRegisteredMediaLease(token) {
+  const source = registeredMedia.get(token);
+  if (!source) return;
+  source.leases = Math.max(0, (source.leases ?? 0) - 1);
+  if (source.leases === 0 && source.releaseRequested) {
+    registeredMedia.delete(token);
+  }
+}
+
+function releaseExportSourceLeases(entry) {
+  for (const token of entry.sourceLeases ?? []) {
+    releaseRegisteredMediaLease(token);
+  }
+  entry.sourceLeases = [];
+}
+
+function isDangerousWindowsDevicePath(value) {
+  if (process.platform !== 'win32') return false;
+  const normalized = String(value).replaceAll('/', '\\').toLowerCase();
+  return (
+    normalized.startsWith('\\\\.\\') ||
+    normalized.startsWith('\\\\?\\globalroot\\') ||
+    normalized.startsWith('\\device\\') ||
+    normalized.startsWith('\\\\?\\pipe\\')
+  );
+}
+
+async function leaseNativeSources(request, binaryPath, entry) {
+  if (
+    !Array.isArray(request?.assets) ||
+    request.assets.length > 2_000 ||
+    !Array.isArray(request?.clips) ||
+    request.clips.length > 10_000 ||
+    !Array.isArray(request?.tracks) ||
+    request.tracks.length > 128
+  ) {
+    throw new NativeExportPlanError('INVALID_PROJECT', '素材一覧が不正です');
+  }
+  const mainVideoTrack = Array.isArray(request?.tracks)
+    ? request.tracks.find((track) => track?.kind === 'video')
+    : null;
+  const trackById = new Map(
+    Array.isArray(request?.tracks)
+      ? request.tracks.map((track) => [track?.id, track])
+      : [],
+  );
+  const requiredAssetIds = new Set();
+  for (const clip of request.clips) {
+    if (typeof clip?.assetId !== 'string' || clip.assetId.length > 200) {
+      throw new NativeExportPlanError('INVALID_PROJECT', 'クリップの素材IDが不正です');
+    }
+    const track = trackById.get(clip.trackId);
+    if (
+      track?.id === mainVideoTrack?.id ||
+      (track?.kind === 'audio' &&
+        track.hidden !== true &&
+        track.muted !== true &&
+        clip.muted !== true)
+    ) {
+      requiredAssetIds.add(clip.assetId);
+    }
+  }
+  const sources = new Map();
+  const audioProbeByToken = new Map();
+  try {
+    for (const asset of request.assets) {
+      if (!requiredAssetIds.has(asset?.id)) continue;
+      if (entry.cancelled) {
+        throw new NativeExportPlanError('CANCELLED', '書き出しを中止しました');
+      }
+      if (
+        typeof asset?.id !== 'string' ||
+        typeof asset?.sourceToken !== 'string' ||
+        sources.has(asset.id)
+      ) {
+        throw new NativeExportPlanError('INVALID_PROJECT', '素材トークンが不正です');
+      }
+      const source = registeredMedia.get(asset.sourceToken);
+      if (
+        !source ||
+        source.kind !== asset.kind ||
+        source.size !== asset.size ||
+        isDangerousWindowsDevicePath(source.path)
+      ) {
+        throw new NativeExportPlanError(
+          'MISSING_MEDIA',
+          `元素材を確認できません: ${String(asset.name || asset.id)}`,
+        );
+      }
+      const [realPath, stat] = await Promise.all([
+        fs.realpath(source.path),
+        fs.stat(source.path),
+      ]);
+      if (
+        !stat.isFile() ||
+        realPath !== source.path ||
+        stat.size !== source.size ||
+        (source.dev !== undefined && stat.dev !== source.dev) ||
+        (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+        (source.mtimeMs !== undefined && Math.abs(stat.mtimeMs - source.mtimeMs) > 1)
+      ) {
+        throw new NativeExportPlanError(
+          'SOURCE_CHANGED',
+          `元素材が読み込み後に変更されました: ${String(asset.name || asset.id)}`,
+        );
+      }
+      source.leases = (source.leases ?? 0) + 1;
+      entry.sourceLeases.push(asset.sourceToken);
+      let audioProbe = audioProbeByToken.get(asset.sourceToken);
+      if (!audioProbe) {
+        audioProbe = probeInputHasAudio(binaryPath, source.path);
+        audioProbeByToken.set(asset.sourceToken, audioProbe);
+      }
+      const hasAudio = await audioProbe;
+      if (entry.cancelled) {
+        throw new NativeExportPlanError('CANCELLED', '書き出しを中止しました');
+      }
+      sources.set(asset.id, {
+        path: source.path,
+        hasAudio,
+      });
+    }
+    return sources;
+  } catch (error) {
+    releaseExportSourceLeases(entry);
+    throw error;
+  }
+}
+
+async function writeNativeOverlayFiles(request, entry) {
+  const overlays = request?.overlays;
+  if (!Array.isArray(overlays) || overlays.length > 512) {
+    throw new NativeExportPlanError('INVALID_OVERLAY', 'テキスト画像が不正です');
+  }
+  const result = new Map();
+  let totalBytes = 0;
+  let totalDecodedBytes = 0;
+  const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  for (let index = 0; index < overlays.length; index++) {
+    if (entry.cancelled) {
+      throw new NativeExportPlanError('CANCELLED', '書き出しを中止しました');
+    }
+    const overlay = overlays[index];
+    if (
+      typeof overlay?.clipId !== 'string' ||
+      result.has(overlay.clipId) ||
+      !ArrayBuffer.isView(overlay.png)
+    ) {
+      throw new NativeExportPlanError('INVALID_OVERLAY', 'テキスト画像が不正です');
+    }
+    const bytes = Buffer.from(
+      overlay.png.buffer,
+      overlay.png.byteOffset,
+      overlay.png.byteLength,
+    );
+    totalBytes += bytes.byteLength;
+    const width = bytes.byteLength >= 24 ? bytes.readUInt32BE(16) : 0;
+    const height = bytes.byteLength >= 24 ? bytes.readUInt32BE(20) : 0;
+    const hasIhdr =
+      bytes.byteLength >= 24 && bytes.subarray(12, 16).toString('ascii') === 'IHDR';
+    totalDecodedBytes += width * height * 4;
+    if (
+      bytes.byteLength < pngHeader.length ||
+      bytes.byteLength > MAX_NATIVE_OVERLAY_BYTES ||
+      totalBytes > MAX_NATIVE_OVERLAY_TOTAL_BYTES ||
+      !bytes.subarray(0, pngHeader.length).equals(pngHeader) ||
+      !hasIhdr ||
+      width < 1 ||
+      height < 1 ||
+      width > MAX_NATIVE_OVERLAY_DIMENSION ||
+      height > MAX_NATIVE_OVERLAY_DIMENSION ||
+      totalDecodedBytes > MAX_NATIVE_OVERLAY_DECODED_BYTES
+    ) {
+      throw new NativeExportPlanError('INVALID_OVERLAY', 'テキスト画像が大きすぎるか破損しています');
+    }
+    const filename = `overlay-${index}.png`;
+    await fs.writeFile(path.join(entry.workDir, filename), bytes, {
+      flag: 'wx',
+      mode: 0o600,
+    });
+    result.set(overlay.clipId, path.join(entry.workDir, filename));
+  }
+  return result;
+}
+
+function redactNativeError(error, entry) {
+  if (error instanceof NativeExportPlanError) {
+    return { code: error.code, message: error.message, details: error.details };
+  }
+  const diagnostic = `${entry.stderrTail ?? ''}\n${
+    error instanceof Error ? error.message : String(error)
+  }`;
+  if (/No space left on device|not enough space|ENOSPC/i.test(diagnostic)) {
+    return {
+      code: 'ENOSPC',
+      message: '保存先の空き容量が不足したため、書き出しを中止しました',
+    };
+  }
+  if (entry.cancelled) {
+    return { code: 'CANCELLED', message: '書き出しを中止しました' };
+  }
+  if (/Permission denied|EACCES|EPERM/i.test(diagnostic)) {
+    return {
+      code: 'PERMISSION',
+      message: '保存先へ書き込めません。保存先またはアクセス権を確認してください',
+    };
+  }
+  let message = error instanceof Error ? error.message : 'ネイティブ書き出しに失敗しました';
+  for (const source of registeredMedia.values()) {
+    message = message.replaceAll(source.path, '[素材]');
+  }
+  message = message
+    .replaceAll(entry.path, '[出力先]')
+    .replaceAll(entry.temporaryPath, '[一時ファイル]')
+    .slice(0, 800);
+  return { code: 'NATIVE_FFMPEG_FAILED', message };
+}
+
+function waitForNativeChild(entry, child, totalDuration) {
+  return new Promise((resolve, reject) => {
+    let progressBuffer = '';
+    let progressBlock = '';
+    let closed = false;
+    let lastDiskCheck = 0;
+    const finish = (error, result) => {
+      if (closed) return;
+      closed = true;
+      if (error) reject(error);
+      else resolve(result);
+    };
+    child.stderr.on('data', (chunk) => {
+      entry.stderrTail = appendTail(entry.stderrTail ?? '', chunk);
+    });
+    const progressStream = child.stdio[3];
+    progressStream?.on('data', (chunk) => {
+      progressBuffer += chunk.toString('utf8');
+      if (progressBuffer.length > 1024 * 1024) {
+        entry.runtimeError = new Error('FFmpegの進捗データが不正です');
+        entry.cancelled = true;
+        void terminateProcess(child).catch((error) => {
+          entry.runtimeError = error;
+        });
+        return;
+      }
+      let newline;
+      while ((newline = progressBuffer.indexOf('\n')) >= 0) {
+        const line = progressBuffer.slice(0, newline).replace(/\r$/, '');
+        progressBuffer = progressBuffer.slice(newline + 1);
+        progressBlock += `${line}\n`;
+        if (!line.startsWith('progress=')) continue;
+        const parsed = parseProgressText(progressBlock, totalDuration, entry.progress ?? 0);
+        progressBlock = '';
+        entry.progress = parsed.overallProgress;
+        if (
+          Number.isSafeInteger(parsed.totalBytes) &&
+          parsed.totalBytes > entry.maxBytes &&
+          !entry.cancelled
+        ) {
+          entry.runtimeError = new Error('書き出しファイルが安全な上限を超えました');
+          entry.cancelled = true;
+          void terminateProcess(child).catch((error) => {
+            entry.runtimeError = error;
+          });
+        }
+        sendNativeExportEvent(entry.token, {
+          phase: 'encoding',
+          stage: parsed.speed
+            ? `エンコード中（${parsed.speed.toFixed(2)}x）`
+            : 'エンコード中',
+          overallProgress: parsed.overallProgress,
+          processedSeconds: parsed.processedSeconds,
+          totalSeconds: totalDuration,
+          speed: parsed.speed,
+          etaSec: parsed.etaSec,
+          fps: parsed.fps,
+          totalBytes: parsed.totalBytes,
+        });
+
+        const now = Date.now();
+        if (now - lastDiskCheck >= 5_000) {
+          lastDiskCheck = now;
+          void fs.statfs(path.dirname(entry.path)).then((stats) => {
+            const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+            if (
+              freeBytes < 64 * 1024 * 1024 &&
+              !entry.cancelled &&
+              entry.state === 'encoding' &&
+              pendingExports.get(entry.token) === entry
+            ) {
+              entry.runtimeError = new Error('ENOSPC: 保存先の空き容量が不足しています');
+              entry.cancelled = true;
+              void terminateProcess(child).catch((error) => {
+                entry.runtimeError = error;
+              });
+            }
+          }).catch(() => {
+            // FFmpeg's own write error remains the authoritative signal if a
+            // removable/network destination disappears.
+          });
+        }
+      }
+    });
+    child.once('error', (error) => finish(error));
+    child.once('close', (code, signal) => finish(null, { code, signal }));
+  });
+}
+
+async function runNativeExport(token, entry, request) {
+  let cleanupError = null;
+  try {
+    entry.backend = 'native-ffmpeg';
+    entry.state = 'preflight';
+    entry.token = token;
+    sendNativeExportEvent(token, {
+      phase: 'preflight',
+      stage: '素材と書き出し設定を確認しています',
+      overallProgress: 0,
+    });
+    await ensureNativeFfmpeg();
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+
+    const binaryPath = ffmpegBinaryPath();
+    const sourceByAssetId = await leaseNativeSources(request, binaryPath, entry);
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+
+    await fs.mkdir(nativeWorkRoot(), { recursive: true, mode: 0o700 });
+    entry.workDir = path.join(nativeWorkRoot(), token);
+    await fs.mkdir(entry.workDir, { recursive: false, mode: 0o700 });
+    await persistExportJournal();
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+    const overlayPathByClipId = await writeNativeOverlayFiles(request, entry);
+    const plan = buildNativeExportPlan(
+      request,
+      sourceByAssetId,
+      overlayPathByClipId,
+      entry.temporaryPath,
+    );
+    await fs.writeFile(path.join(entry.workDir, 'filter-complex.txt'), plan.filterGraph, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    });
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+
+    entry.state = 'encoding';
+    entry.started = true;
+    sendNativeExportEvent(token, {
+      phase: 'preparing',
+      stage: 'ネイティブFFmpegを起動しています',
+      overallProgress: 0,
+      totalSeconds: plan.totalDuration,
+    });
+    const child = spawn(binaryPath, plan.args, {
+      shell: false,
+      windowsHide: true,
+      detached: false,
+      cwd: entry.workDir,
+      stdio: ['ignore', 'ignore', 'pipe', 'pipe'],
+      env: minimalEnvironment(),
+    });
+    entry.child = child;
+    const result = await waitForNativeChild(entry, child, plan.totalDuration);
+    entry.child = null;
+    if (entry.runtimeError) throw entry.runtimeError;
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+    if (result.code !== 0) {
+      throw new Error(`FFmpegが終了コード ${String(result.code)} で停止しました`);
+    }
+
+    entry.state = 'finalizing';
+    entry.progress = 0.99;
+    sendNativeExportEvent(token, {
+      phase: 'finalizing',
+      stage: '完成動画を検証しています',
+      overallProgress: 0.99,
+      totalSeconds: plan.totalDuration,
+    });
+    const validation = await validateOutput(binaryPath, entry.temporaryPath, {
+      width: plan.width,
+      height: plan.height,
+      duration: plan.totalDuration,
+      maxBytes: entry.maxBytes,
+    });
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+
+    const outputHandle = await fs.open(entry.temporaryPath, 'r');
+    try {
+      await outputHandle.sync();
+    } finally {
+      await outputHandle.close();
+    }
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+    entry.state = 'committing';
+    await fs.rename(entry.temporaryPath, entry.path);
+    entry.committed = true;
+    entry.state = 'committed';
+    lastExportPath = entry.path;
+    await cleanupExportFiles(entry, false);
+    releaseExportSourceLeases(entry);
+    sendNativeExportEvent(token, {
+      phase: 'done',
+      stage: '書き出しが完了しました',
+      overallProgress: 1,
+      processedSeconds: plan.totalDuration,
+      totalSeconds: plan.totalDuration,
+      totalBytes: validation.size,
+    });
+    pendingExports.delete(token);
+    await persistExportJournal();
+    return {
+      ok: true,
+      complete: true,
+      path: entry.path,
+      size: validation.size,
+      duration: validation.duration,
+    };
+  } catch (error) {
+    try {
+      await terminateProcess(entry.child);
+      entry.child = null;
+    } catch (terminationError) {
+      cleanupError = terminationError;
+    }
+    if (!cleanupError && entry.committed) {
+      // The output is already atomically committed. Preserve the entry and its
+      // journal until an explicit cleanup retry removes the scratch directory.
+      cleanupError = error;
+      releaseExportSourceLeases(entry);
+    } else if (!cleanupError) {
+      try {
+        await cleanupExportFiles(entry);
+      } catch (cleanupFailure) {
+        cleanupError = cleanupFailure;
+      }
+      releaseExportSourceLeases(entry);
+    }
+    const failure = redactNativeError(error, entry);
+    sendNativeExportEvent(token, {
+      phase: cleanupError ? 'cleanup-error' : entry.cancelled ? 'cancelled' : 'failed',
+      stage: cleanupError ? '一時ファイルを削除できませんでした' : failure.message,
+      overallProgress: entry.progress ?? 0,
+      error: failure,
+    });
+    if (!cleanupError) {
+      if (pendingExports.get(token) === entry) pendingExports.delete(token);
+      await persistExportJournal();
+    } else {
+      entry.state = 'cleanup-error';
+    }
+    return {
+      ok: false,
+      canceled: entry.cancelled && !entry.runtimeError,
+      cleanupPending: Boolean(cleanupError),
+      error: cleanupError
+        ? '作成途中のファイルを削除できませんでした'
+        : failure.message,
+      code: cleanupError ? 'CLEANUP_FAILED' : failure.code,
+      details: failure.details,
+    };
+  }
+}
+
+ipcMain.handle('export:native-capabilities', async (event) => {
+  if (!isTrustedIpcEvent(event)) return { available: false, error: 'untrusted sender' };
+  try {
+    await ensureNativeFfmpeg();
+    return { available: true, backend: 'native-ffmpeg' };
+  } catch (error) {
+    return {
+      available: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+
+ipcMain.handle('export:start-native', async (event, token, request) => {
+  if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  const entry = typeof token === 'string' ? pendingExports.get(token) : null;
+  if (!entry || entry.backend !== null || entry.state !== 'reserved') {
+    return { ok: false, error: '書き出しジョブが不正です' };
+  }
+  if (
+    [...pendingExports.values()].some(
+      (candidate) => candidate !== entry && candidate.backend === 'native-ffmpeg',
+    )
+  ) {
+    return { ok: false, error: '別の動画を書き出しています' };
+  }
+  const operation = runNativeExport(token, entry, request);
+  entry.operation = operation.then(() => undefined, () => undefined);
+  return operation;
+});
+
 ipcMain.handle('export:choose-output', async (event, payload) => {
   if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
   const filename = safeExportFilename(payload?.suggestedName);
@@ -794,11 +1478,16 @@ ipcMain.handle('export:choose-output', async (event, payload) => {
     filters: [{ name: 'MP4動画', extensions: ['mp4'] }],
   });
   if (result.canceled || !result.filePath) return { ok: true, canceled: true };
-  const targetPath = result.filePath.toLowerCase().endsWith('.mp4')
+  const selectedTargetPath = result.filePath.toLowerCase().endsWith('.mp4')
     ? result.filePath
     : `${result.filePath}.mp4`;
+  let reservedToken = null;
   try {
-    const stats = await fs.statfs(path.dirname(targetPath));
+    // Freeze the dialog-selected directory to its canonical location. A
+    // symlink/junction must not be repointed between selection and spawn.
+    const targetDirectory = await fs.realpath(path.dirname(selectedTargetPath));
+    const targetPath = path.join(targetDirectory, path.basename(selectedTargetPath));
+    const stats = await fs.statfs(targetDirectory);
     const freeBytes = Number(stats.bavail) * Number(stats.bsize);
     const estimatedBytes =
       Number.isSafeInteger(payload?.estimatedBytes) && payload.estimatedBytes > 0
@@ -812,6 +1501,7 @@ ipcMain.handle('export:choose-output', async (event, payload) => {
       };
     }
     const token = crypto.randomUUID();
+    reservedToken = token;
     const temporaryPath = path.join(
       path.dirname(targetPath),
       `.${path.basename(targetPath)}.${token}.part`,
@@ -819,6 +1509,7 @@ ipcMain.handle('export:choose-output', async (event, payload) => {
     pendingExports.set(token, {
       path: targetPath,
       temporaryPath,
+      createdAt: new Date().toISOString(),
       handle: null,
       written: 0,
       started: false,
@@ -826,6 +1517,13 @@ ipcMain.handle('export:choose-output', async (event, payload) => {
       expectedBytes: null,
       cancelled: false,
       committed: false,
+      backend: null,
+      state: 'reserved',
+      child: null,
+      workDir: null,
+      progress: 0,
+      sourceLeases: [],
+      eventSequence: 0,
       operation: Promise.resolve(),
       cleanupPromise: null,
       maxBytes: Math.min(
@@ -833,6 +1531,7 @@ ipcMain.handle('export:choose-output', async (event, payload) => {
         Math.max(512 * 1024 * 1024, estimatedBytes > 0 ? estimatedBytes * 4 : 0),
       ),
     });
+    await persistExportJournal();
     return {
       ok: true,
       canceled: false,
@@ -841,6 +1540,13 @@ ipcMain.handle('export:choose-output', async (event, payload) => {
       freeBytes,
     };
   } catch (error) {
+    if (reservedToken) {
+      const entry = pendingExports.get(reservedToken);
+      if (entry) {
+        pendingExports.delete(reservedToken);
+        await cleanupExportFiles(entry).catch(() => {});
+      }
+    }
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -853,6 +1559,7 @@ ipcMain.handle('export:set-size', async (event, token, totalBytes) => {
     try {
       assertActiveExport(token, entry);
       if (
+        (entry.backend !== null && entry.backend !== 'renderer-stream') ||
         entry.started ||
         entry.expectedBytes !== null ||
         !Number.isSafeInteger(totalBytes) ||
@@ -861,6 +1568,8 @@ ipcMain.handle('export:set-size', async (event, token, totalBytes) => {
       ) {
         throw new Error('書き出しファイルのサイズが不正です');
       }
+      entry.backend = 'renderer-stream';
+      entry.state = 'writing';
       const stats = await fs.statfs(path.dirname(entry.path));
       assertActiveExport(token, entry);
       const freeBytes = Number(stats.bavail) * Number(stats.bsize);
@@ -887,6 +1596,7 @@ ipcMain.handle('export:write-chunk', async (event, token, offset, chunk, final) 
     try {
       assertActiveExport(token, entry);
       if (
+        entry.backend !== 'renderer-stream' ||
         entry.expectedBytes === null ||
         !Number.isSafeInteger(offset) ||
         offset !== entry.written ||
@@ -941,7 +1651,9 @@ ipcMain.handle('export:write-chunk', async (event, token, offset, chunk, final) 
         // landed and been fsynced. rename replaces it only at successful commit.
         await fs.rename(entry.temporaryPath, entry.path);
         entry.committed = true;
+        entry.state = 'committed';
         pendingExports.delete(token);
+        await persistExportJournal();
         lastExportPath = entry.path;
         return { ok: true, complete: true, path: entry.path, bytesWritten: entry.written };
       }
@@ -1001,10 +1713,23 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     return null;
   }
   try {
-    const stat = await fs.stat(ref.path);
+    if (isDangerousWindowsDevicePath(ref.path)) return null;
+    const realPath = await fs.realpath(ref.path);
+    if (isDangerousWindowsDevicePath(realPath)) return null;
+    const stat = await fs.stat(realPath);
     if (!stat.isFile() || stat.size !== ref.size) return null;
     const token = crypto.randomUUID();
-    registeredMedia.set(token, { path: ref.path, size: stat.size });
+    registeredMedia.set(token, {
+      path: realPath,
+      size: stat.size,
+      kind: ref.kind,
+      name: ref.name,
+      dev: stat.dev,
+      ino: stat.ino,
+      mtimeMs: stat.mtimeMs,
+      leases: 0,
+      releaseRequested: false,
+    });
     return {
       token,
       url: `fce-media://asset/${token}`,
@@ -1046,7 +1771,313 @@ ipcMain.handle('media:read-chunk', async (event, token, offset, length) => {
 
 ipcMain.handle('media:release-file', (event, token) => {
   if (!isTrustedIpcEvent(event) || typeof token !== 'string') return false;
+  const source = registeredMedia.get(token);
+  if (!source) return false;
+  if ((source.leases ?? 0) > 0) {
+    source.releaseRequested = true;
+    return true;
+  }
   return registeredMedia.delete(token);
+});
+
+function proxyCacheRoot() {
+  return path.join(app.getPath('userData'), 'preview-proxies-v1');
+}
+
+const MAX_PROXY_CACHE_BYTES = 20 * 1024 * 1024 * 1024;
+
+async function pruneProxyCache() {
+  const root = path.resolve(proxyCacheRoot());
+  let entries;
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const activePaths = new Set(
+    [...registeredMedia.values()]
+      .map((source) => path.resolve(source.path))
+      .filter((sourcePath) => path.dirname(sourcePath) === root),
+  );
+  const cached = (
+    await Promise.all(
+      entries
+        .filter(
+          (entry) =>
+            entry.isFile() && /^[0-9a-f]{64}\.mp4$/i.test(entry.name),
+        )
+        .map(async (entry) => {
+          const filePath = path.join(root, entry.name);
+          try {
+            const stat = await fs.lstat(filePath);
+            if (!stat.isFile() || stat.isSymbolicLink()) return null;
+            return { filePath, size: stat.size, mtimeMs: stat.mtimeMs };
+          } catch {
+            return null;
+          }
+        }),
+    )
+  ).filter(Boolean);
+  let totalBytes = cached.reduce((total, entry) => total + entry.size, 0);
+  cached.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const entry of cached) {
+    if (totalBytes <= MAX_PROXY_CACHE_BYTES) break;
+    if (activePaths.has(path.resolve(entry.filePath))) continue;
+    try {
+      await fs.rm(entry.filePath, { force: true });
+      totalBytes -= entry.size;
+    } catch {
+      // A cache file held by antivirus or another process can be retried on
+      // the next startup/import. It must never prevent the project from opening.
+    }
+  }
+}
+
+async function cleanupOrphanedProxies() {
+  const root = proxyCacheRoot();
+  let entries;
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await Promise.all(
+    entries
+      .filter(
+        (entry) =>
+          entry.isFile() &&
+          /^[0-9a-f]{64}\.[0-9a-f-]{36}\.part$/i.test(entry.name),
+      )
+      .map((entry) => fs.rm(path.join(root, entry.name), { force: true }).catch(() => {})),
+  );
+  await pruneProxyCache();
+}
+
+async function registerProxyFile(proxyPath) {
+  const [realPath, stat] = await Promise.all([
+    fs.realpath(proxyPath),
+    fs.lstat(proxyPath),
+  ]);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 12) {
+    throw new Error('プレビュー用動画が破損しています');
+  }
+  const handle = await fs.open(realPath, 'r');
+  try {
+    const header = Buffer.alloc(12);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead < 12 || header.toString('ascii', 4, 8) !== 'ftyp') {
+      throw new Error('プレビュー用動画が有効なMP4ではありません');
+    }
+  } finally {
+    await handle.close();
+  }
+  const token = crypto.randomUUID();
+  registeredMedia.set(token, {
+    path: realPath,
+    size: stat.size,
+    kind: 'video',
+    name: path.basename(realPath),
+    dev: stat.dev,
+    ino: stat.ino,
+    mtimeMs: stat.mtimeMs,
+    leases: 0,
+    releaseRequested: false,
+  });
+  return {
+    token,
+    url: `fce-media://asset/${token}`,
+    size: stat.size,
+  };
+}
+
+function waitForProxyChild(job) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(result);
+    };
+    job.child.stderr.on('data', (chunk) => {
+      job.stderrTail = appendTail(job.stderrTail, chunk);
+    });
+    job.child.once('error', (error) => finish(error));
+    job.child.once('close', (code, signal) => finish(null, { code, signal }));
+  });
+}
+
+async function abandonProxyJob(token) {
+  const job = pendingProxyJobs.get(token);
+  if (!job) return false;
+  if (job.cleanupPromise) return job.cleanupPromise;
+  job.cancelled = true;
+  const cleanupPromise = (async () => {
+    await terminateProcess(job.child);
+    job.child = null;
+    await job.operation.catch(() => {});
+    await fs.rm(job.temporaryPath, { force: true });
+    if (!job.sourceLeaseReleased) {
+      job.sourceLeaseReleased = true;
+      releaseRegisteredMediaLease(job.sourceToken);
+    }
+    if (pendingProxyJobs.get(token) === job) pendingProxyJobs.delete(token);
+    return true;
+  })();
+  job.cleanupPromise = cleanupPromise;
+  try {
+    return await cleanupPromise;
+  } catch (error) {
+    if (job.cleanupPromise === cleanupPromise) job.cleanupPromise = null;
+    throw error;
+  }
+}
+
+ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') {
+    return { ok: false, error: 'untrusted sender' };
+  }
+  const source = registeredMedia.get(sourceToken);
+  if (!source || source.kind !== 'video') {
+    return { ok: false, error: '元素材を確認できません' };
+  }
+  let job = null;
+  try {
+    await ensureNativeFfmpeg();
+    const [realPath, stat] = await Promise.all([
+      fs.realpath(source.path),
+      fs.stat(source.path),
+    ]);
+    if (
+      !stat.isFile() ||
+      realPath !== source.path ||
+      stat.size !== source.size ||
+      (source.dev !== undefined && stat.dev !== source.dev) ||
+      (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+      Math.abs(stat.mtimeMs - source.mtimeMs) > 1 ||
+      isDangerousWindowsDevicePath(realPath)
+    ) {
+      throw new Error('元素材が読み込み後に変更されました');
+    }
+    const fingerprint = crypto
+      .createHash('sha256')
+      .update(`${realPath}\0${stat.size}\0${stat.mtimeMs}\0proxy-v1-1280-crf27`)
+      .digest('hex');
+    const root = proxyCacheRoot();
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    const proxyPath = path.join(root, `${fingerprint}.mp4`);
+    try {
+      await fs.utimes(proxyPath, new Date(), new Date()).catch(() => {});
+      const registered = await registerProxyFile(proxyPath);
+      await pruneProxyCache();
+      return { ok: true, ...registered, cached: true };
+    } catch {
+      await fs.rm(proxyPath, { force: true }).catch(() => {});
+    }
+
+    const token = crypto.randomUUID();
+    const temporaryPath = path.join(root, `${fingerprint}.${token}.part`);
+    source.leases = (source.leases ?? 0) + 1;
+    job = {
+      token,
+      sourceToken,
+      child: null,
+      operation: Promise.resolve(),
+      cleanupPromise: null,
+      cancelled: false,
+      sourceLeaseReleased: false,
+      temporaryPath,
+      stderrTail: '',
+    };
+    pendingProxyJobs.set(token, job);
+    const binaryPath = ffmpegBinaryPath();
+    const child = spawn(
+      binaryPath,
+      [
+        '-hide_banner',
+        '-nostdin',
+        '-nostats',
+        '-loglevel',
+        'warning',
+        '-protocol_whitelist',
+        'file,pipe',
+        '-i',
+        source.path,
+        '-map',
+        '0:v:0',
+        '-map',
+        '0:a:0?',
+        '-vf',
+        "scale='min(1280,iw)':-2",
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '27',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-ac',
+        '2',
+        '-movflags',
+        '+faststart',
+        '-n',
+        '-f',
+        'mp4',
+        temporaryPath,
+      ],
+      {
+        shell: false,
+        windowsHide: true,
+        detached: false,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: minimalEnvironment(),
+      },
+    );
+    job.child = child;
+    const operation = waitForProxyChild(job);
+    job.operation = operation.then(() => undefined, () => undefined);
+    const result = await operation;
+    job.child = null;
+    if (job.cancelled) throw new Error('プレビュー変換を中止しました');
+    if (result.code !== 0) {
+      throw new Error(`プレビュー変換に失敗しました (FFmpeg: ${String(result.code)})`);
+    }
+    const handle = await fs.open(temporaryPath, 'r');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temporaryPath, proxyPath);
+    const registered = await registerProxyFile(proxyPath);
+    pendingProxyJobs.delete(token);
+    if (!job.sourceLeaseReleased) {
+      job.sourceLeaseReleased = true;
+      releaseRegisteredMediaLease(sourceToken);
+    }
+    await pruneProxyCache();
+    return { ok: true, ...registered, cached: false };
+  } catch (error) {
+    let cleanupError = null;
+    if (job) {
+      try {
+        await abandonProxyJob(job.token);
+      } catch (failure) {
+        cleanupError = failure;
+      }
+    }
+    let message = error instanceof Error ? error.message : String(error);
+    if (cleanupError) {
+      message = 'プレビュー変換プロセスまたは一時ファイルを安全に片付けられませんでした';
+    }
+    message = message.replaceAll(source.path, '[素材]').slice(0, 500);
+    return { ok: false, error: message };
+  }
 });
 
 // --- Auto-update wiring ---
@@ -1430,6 +2461,7 @@ async function createWindow() {
   mainWindow.on('close', (event) => {
     if (
       pendingExports.size === 0 &&
+      pendingProxyJobs.size === 0 &&
       !isDirty &&
       activeProjectSaves === 0 &&
       !pendingCloseSaveRequest &&
@@ -1467,6 +2499,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', (event) => {
   if (
     (pendingExports.size > 0 ||
+      pendingProxyJobs.size > 0 ||
       isDirty ||
       activeProjectSaves > 0 ||
       pendingCloseSaveRequest ||
@@ -1494,6 +2527,8 @@ app.on('before-quit', (event) => {
 });
 
 app.whenReady().then(async () => {
+  await cleanupOrphanedExports();
+  await cleanupOrphanedProxies();
   if (!isDev) await startAppServer();
   if (!isDev) Menu.setApplicationMenu(null);
   // This editor does not need camera, microphone, geolocation, notifications,
@@ -1549,6 +2584,16 @@ app.whenReady().then(async () => {
 });
 
 let fatalExceptionHandled = false;
+process.on('exit', () => {
+  // Best-effort synchronous signal for fatal/forced main-process exits. Durable
+  // cleanup is still guaranteed by the exact-path journal on the next launch.
+  for (const entry of pendingExports.values()) {
+    try { entry.child?.kill('SIGKILL'); } catch { /* process already gone */ }
+  }
+  for (const job of pendingProxyJobs.values()) {
+    try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
+  }
+});
 process.on('uncaughtException', (err) => {
   if (fatalExceptionHandled) {
     app.exit(1);

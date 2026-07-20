@@ -487,7 +487,12 @@ function buildClipFilters(spec: ClipFilterSpec): string {
   }
 
   // Skip identity scale — even a no-op scale touches every pixel in WASM.
-  const sourceMatchesOutput = asset.width === width && asset.height === height;
+  // Compatibility proxies are deliberately smaller than the original. Their
+  // dimensions describe only the editor preview, while FFmpeg receives the
+  // original source for export, so never use an exact proxy-size match to skip
+  // the output scale/crop step.
+  const sourceMatchesOutput =
+    !asset.previewProxy && asset.width === width && asset.height === height;
   const outIsPortrait = height > width;
   const srcW = asset.width ?? 0;
   const srcH = asset.height ?? 0;

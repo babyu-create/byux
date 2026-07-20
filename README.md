@@ -9,7 +9,8 @@ FPSキル集編集に特化したシンプルな動画エディタ。VALORANT / 
 - 🎵 **BGM + ビート検出**: 音楽の拍を自動検出、クリップ端をビートに吸着
 - ⚡ **エフェクト**: フェードイン/フェードアウト、再生速度 (¼× 〜 2×)
 - 🎬 **テキストオーバーレイ**: クリップにテキストを重ねる
-- 📦 **MP4 書き出し**: FFmpeg.wasm によるブラウザ内エンコード (1080p / 60fps)
+- 📦 **長尺MP4書き出し**: Electron版は同梱FFmpegで保存先へ直接エンコード。長い動画でも全編をメモリに保持しません
+- 🪶 **軽量プレビュー**: AVI / MKVなど編集時に重い素材は、元ファイルを保ったままディスク上のプロキシ動画でプレビュー
 - 💾 **プロジェクト保存/ロード**: JSON で進捗を保持
 - ⌨ **カスタムショートカット**: 全キーバインド変更可能
 
@@ -40,7 +41,7 @@ npm run dev
 # Electron 版で開発
 npm run electron:dev
 
-# 本番ビルド
+# 本番ビルド（FFmpegバイナリを同梱）
 npm run package:win        # Windows .exe
 npm run package:linux      # Linux .tar.gz
 npm run package:mac        # macOS .dmg (要 macOS)
@@ -51,10 +52,13 @@ npm run package:mac        # macOS .dmg (要 macOS)
 - React 19 + TypeScript + Vite
 - Zustand (状態管理)
 - @dnd-kit (ドラッグ操作)
-- FFmpeg.wasm (動画書き出し)
+- FFmpeg (Electron版の長尺書き出し・プレビュー用)
+- FFmpeg.wasm (Web版および短尺の互換書き出し用)
 - Electron + electron-builder (デスクトップ化)
 - electron-updater (自動アップデート)
 
 ## ライセンス
 
-MIT License — 詳しくは [LICENSE](./LICENSE) を参照。
+Byux本体は MIT License です。詳しくは [LICENSE](./LICENSE) を参照してください。
+
+配布版には、別プロセスとして動作するGPL版FFmpeg実行ファイルと、そのライセンス文書を同梱します。

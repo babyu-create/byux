@@ -124,7 +124,7 @@ async function relinkFromDisk(
         kind: ref.kind,
       });
       if (!source) continue;
-      const asset = useMediaStore.getState().addRecoveredAsset(ref, source);
+      const asset = await useMediaStore.getState().addRecoveredAsset(ref, source);
       idMap[ref.id] = asset.id;
       recovered += 1;
     } catch {

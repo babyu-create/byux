@@ -1,9 +1,14 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const updaterListeners = new Set();
+const nativeExportListeners = new Set();
 
 ipcRenderer.on('updater', (_event, payload) => {
   for (const cb of updaterListeners) cb(payload);
+});
+
+ipcRenderer.on('export:native-event', (_event, payload) => {
+  for (const cb of nativeExportListeners) cb(payload);
 });
 
 // Read via sync IPC rather than `require('../package.json')` — the sandboxed
@@ -37,6 +42,9 @@ contextBridge.exposeInMainWorld('fce', {
   },
   registerMediaFile(ref) {
     return ipcRenderer.invoke('media:register-file', ref);
+  },
+  createPreviewProxy(sourceToken) {
+    return ipcRenderer.invoke('media:create-preview-proxy', sourceToken);
   },
   readMediaFileChunk(token, offset, length) {
     return ipcRenderer.invoke('media:read-chunk', token, offset, length);
@@ -86,6 +94,16 @@ contextBridge.exposeInMainWorld('fce', {
     },
   },
   export: {
+    getNativeCapabilities() {
+      return ipcRenderer.invoke('export:native-capabilities');
+    },
+    startNative(token, request) {
+      return ipcRenderer.invoke('export:start-native', token, request);
+    },
+    onNativeEvent(cb) {
+      nativeExportListeners.add(cb);
+      return () => nativeExportListeners.delete(cb);
+    },
     chooseOutput(payload) {
       return ipcRenderer.invoke('export:choose-output', payload);
     },

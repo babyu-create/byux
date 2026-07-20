@@ -8,7 +8,12 @@ import {
   getActiveCoreThreadCount,
   resetFFmpeg,
   type ExportQualityPreset,
+  type ExportOptions,
 } from '../../lib/exporter';
+import {
+  getNativeExportCompatibility,
+  prepareNativeExportRequest,
+} from '../../lib/nativeExporter';
 import { clipDuration } from '../../lib/timeline';
 import { AccessibleDialog } from '../Common/AccessibleDialog';
 import styles from './ExportDialog.module.css';
@@ -17,7 +22,7 @@ interface ExportDialogProps {
   onClose: () => void;
 }
 
-type Phase = 'idle' | 'rendering' | 'done' | 'error';
+type Phase = 'idle' | 'rendering' | 'done' | 'error' | 'cancelled';
 
 /**
  * Structured error result for the dialog. `message` is the headline shown
@@ -35,6 +40,36 @@ interface HumanizedError {
  * with actionable next-step guidance. The "steps" list orders things by
  * effort (cheapest first) so users self-resolve before pinging support. */
 function humanizeError(raw: string): HumanizedError {
+  if (raw.includes('長尺ネイティブ書き出しで未対応')) {
+    return {
+      message: 'この編集内容は、まだ長尺モードで処理できません',
+      steps: [
+        'エラー詳細に表示されたエフェクトをOFFにする',
+        'エフェクトを残す場合は、その部分を短い動画に分けて書き出す',
+      ],
+      detail: raw,
+    };
+  }
+  if (raw.includes('ENOSPC') || raw.includes('空き容量が不足')) {
+    return {
+      message: '保存先の空き容量が不足しています',
+      steps: [
+        '不要なファイルを削除するか、別のドライブを保存先に選ぶ',
+        '空き容量を確保してからもう一度書き出す',
+      ],
+      detail: raw,
+    };
+  }
+  if (raw.includes('長尺用の動画処理エンジン')) {
+    return {
+      message: '長尺用の動画処理エンジンを開始できませんでした',
+      steps: [
+        'アプリを再起動してもう一度試す',
+        '改善しない場合はアプリを再インストールする',
+      ],
+      detail: raw,
+    };
+  }
   if (raw.includes('FFmpeg 初期化失敗') || raw.includes('ffmpeg-core')) {
     return {
       message: '動画処理エンジンを開始できませんでした',
@@ -56,7 +91,11 @@ function humanizeError(raw: string): HumanizedError {
       detail: raw,
     };
   }
-  if (raw.includes('元素材が見つかりません') || raw.includes('元素材が見つからない')) {
+  if (
+    raw.includes('元素材が見つかりません') ||
+    raw.includes('元素材が見つからない') ||
+    raw.includes('元素材が読み込み後に変更')
+  ) {
     return {
       message: '元のメディアファイルを確認できません',
       steps: [
@@ -96,6 +135,20 @@ function humanizeError(raw: string): HumanizedError {
       detail: raw,
     };
   }
+  if (
+    raw.includes('PERMISSION') ||
+    raw.includes('EACCES') ||
+    raw.includes('アクセス権')
+  ) {
+    return {
+      message: '選んだ保存先へ書き込めません',
+      steps: [
+        '別の保存先を選んで再試行する',
+        '保存先を使用中のアプリを閉じ、アクセス権を確認する',
+      ],
+      detail: raw,
+    };
+  }
   return {
     message: '書き出しに失敗しました',
     steps: [
@@ -126,6 +179,15 @@ function estimateExportBytes(
   const multiplier = quality === 'high' ? 1.45 : quality === 'compact' ? 0.62 : 1;
   const audioBitrate = quality === 'compact' ? 128_000 : 256_000;
   return Math.ceil(Math.max(1, durationSeconds) * (baseVideoBitrate * multiplier + audioBitrate) / 8);
+}
+
+function formatEta(secondsValue: number): string {
+  const totalSeconds = Math.max(0, Math.round(secondsValue));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0
+    ? `残り約 ${minutes}分${seconds}秒`
+    : `残り約 ${seconds}秒`;
 }
 
 async function writeBlobToNative(
@@ -185,6 +247,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const [motionBlur, setMotionBlur] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState(0);
+  const [progressIndeterminate, setProgressIndeterminate] = useState(false);
   const [stage, setStage] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<HumanizedError | null>(null);
@@ -195,8 +258,16 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const [customFilename, setCustomFilename] = useState('');
   const [fallbackFilename] = useState(() => `fps-clip-${Date.now()}.mp4`);
   const startTimeRef = useRef<number>(0);
+  const nativeRenderingRef = useRef(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [cancelling, setCancelling] = useState(false);
+  const [liveStatus, setLiveStatus] = useState('');
+  const lastAnnouncementRef = useRef({
+    at: 0,
+    percent: -10,
+    stage: '',
+  });
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
 
   // Derive core variant label for the badge (updates after FFmpeg loads).
   const [coreLabel, setCoreLabel] = useState<string>(getInitialCoreLabel);
@@ -207,12 +278,40 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
       const now = Date.now();
       if (startTimeRef.current === 0) startTimeRef.current = now;
       setElapsedSec((now - startTimeRef.current) / 1000);
+      if (nativeRenderingRef.current) return;
       // Refresh the core variant badge while rendering (it may have just loaded).
       const v = getActiveCoreVariant();
       const tc = getActiveCoreThreadCount();
       setCoreLabel(v === 'mt' ? `MT (${tc} threads)` : 'ST (single thread)');
     }, 200);
     return () => window.clearInterval(id);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase !== 'rendering' || cancelling) return;
+    const now = Date.now();
+    const percent = Math.round(progress * 100);
+    const previous = lastAnnouncementRef.current;
+    const stageChanged = stage !== previous.stage;
+    const madeMeaningfulProgress = percent >= previous.percent + 10;
+    if (
+      now - previous.at < 1_000 ||
+      (!stageChanged && !madeMeaningfulProgress)
+    ) {
+      return;
+    }
+    lastAnnouncementRef.current = { at: now, percent, stage };
+    setLiveStatus(
+      progressIndeterminate ? stage : `${stage} ${percent}%`,
+    );
+  }, [cancelling, phase, progress, progressIndeterminate, stage]);
+
+  useEffect(() => {
+    if (phase !== 'rendering') return;
+    const frame = window.requestAnimationFrame(() => {
+      cancelButtonRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [phase]);
 
   useEffect(() => {
@@ -253,20 +352,103 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const handleStart = async () => {
     if (isExportingRef.current) return;
     isExportingRef.current = true;
+    nativeRenderingRef.current = false;
     cancelRequestedRef.current = false;
     setCancelling(false);
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
     let nativeToken: string | null = null;
     let nativeCommitted = false;
+    let releasePreparedNative: (() => Promise<void>) | null = null;
+    let removeNativeListener: (() => void) | null = null;
+    const throwIfCancelled = () => {
+      if (abortController.signal.aborted) {
+        throw new DOMException('書き出しが中止されました', 'AbortError');
+      }
+    };
+    setPhase('rendering');
+    setProgress(0);
+    setProgressIndeterminate(true);
+    setStage('書き出し方法を確認中');
+    setLiveStatus('書き出し方法を確認しています');
+    lastAnnouncementRef.current = {
+      at: 0,
+      percent: 0,
+      stage: '書き出し方法を確認中',
+    };
+    setLogs([]);
+    setError(null);
+    setCoreLabel('');
+    setEtaLabel('');
+    setSavedPath(null);
+    setFileSizeMb(null);
+    if (downloadUrl) {
+      URL.revokeObjectURL(downloadUrl);
+      setDownloadUrl(null);
+    }
+    startTimeRef.current = 0;
+    setElapsedSec(0);
     try {
       const nativeExport = window.fce?.export;
+      const renderInput = { clips, tracks, assets, markers };
+      const renderOptions: ExportOptions = {
+        resolution,
+        fps,
+        quality,
+        aspectRatio,
+        motionBlur,
+        motionBlurHudPreset: hudPreset,
+        motionBlurHudMaskStrength: hudPreset === 'none' ? 0 : 1,
+        verticalReframe,
+        audioDucking,
+        signal: abortController.signal,
+      };
+      const compatibility = getNativeExportCompatibility(renderInput, renderOptions);
+      let useNative = false;
+      let nativeUnavailableReason = '';
+      if (nativeExport?.getNativeCapabilities) {
+        const capabilities = await nativeExport.getNativeCapabilities();
+        throwIfCancelled();
+        useNative = capabilities.available && compatibility.compatible;
+        nativeUnavailableReason = capabilities.error ?? '';
+      }
+      const exactEffectFrameLimit = 1_200;
+      if (
+        !compatibility.compatible &&
+        compatibility.duration * fps > exactEffectFrameLimit
+      ) {
+        throw new Error(
+          '長尺ネイティブ書き出しで未対応の機能があります: ' +
+          compatibility.reasons.join(' / ') +
+          '。該当機能をOFFにするか、動画を短く分割してください。',
+        );
+      }
+      if (
+        compatibility.compatible &&
+        compatibility.duration >= 120 &&
+        nativeExport &&
+        !useNative
+      ) {
+        throw new Error(
+          `長尺用の動画処理エンジンを起動できません${
+            nativeUnavailableReason ? `: ${nativeUnavailableReason}` : ''
+          }`,
+        );
+      }
       if (nativeExport) {
         const destination = await nativeExport.chooseOutput({
           suggestedName: downloadFilename,
           estimatedBytes,
         });
-        if (destination.canceled) return;
+        if (destination.canceled) {
+          throwIfCancelled();
+          setPhase('idle');
+          setProgressIndeterminate(false);
+          setStage('');
+          setLiveStatus('');
+          return;
+        }
+        throwIfCancelled();
         if (!destination.ok || !destination.token) {
           throw new Error(destination.error ?? '動画の保存先を選択できませんでした');
         }
@@ -275,90 +457,160 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
         setSavedPath(destination.path ?? null);
       }
 
-    setPhase('rendering');
-    setProgress(0);
-    setStage('開始中');
-    setLogs([]);
-    setError(null);
-    setEtaLabel('');
-    setSavedPath(null);
-    if (downloadUrl) {
-      URL.revokeObjectURL(downloadUrl);
-      setDownloadUrl(null);
-    }
-    startTimeRef.current = 0;
-    setElapsedSec(0);
+      setStage(useNative ? '長尺書き出しを準備中' : '開始中');
+      setEtaLabel(useNative ? '残り時間を計算中' : '');
 
-      const blob = await exportProject(
-        { clips, tracks, assets, markers },
-        {
-          resolution,
-          fps,
-          quality,
-          aspectRatio,
-          motionBlur,
-          // Carry the preview's HUD preset into the export so the blur matches
-          // what the user saw (otherwise it silently defaulted to 'valorant').
-          motionBlurHudPreset: hudPreset,
-          motionBlurHudMaskStrength: hudPreset === 'none' ? 0 : 1,
-          verticalReframe,
-          // Carry the project's BGM auto-ducking into the export so the dipped
-          // BGM in the preview matches the exported MP4 (Phase P5).
-          audioDucking,
-          signal: abortController.signal,
-          onProgress: ({ stage: s, percent, log }) => {
+      if (useNative && nativeToken && nativeExport) {
+        nativeRenderingRef.current = true;
+        setCoreLabel('Native / ディスク直書き');
+        const prepared = await prepareNativeExportRequest(
+          renderInput,
+          renderOptions,
+          ({ stage: progressStage }) => {
             if (cancelRequestedRef.current) return;
-            // Update core label whenever we receive a stage update that
-            // mentions the variant (FFmpeg just finished loading).
-            if (s.includes('MT') || s.includes('ST')) {
-              const v = getActiveCoreVariant();
-              const tc = getActiveCoreThreadCount();
-              setCoreLabel(v === 'mt' ? `MT (${tc} threads)` : 'ST (single thread)');
+            setStage(progressStage);
+            setProgressIndeterminate(true);
+          },
+        );
+        throwIfCancelled();
+        releasePreparedNative = prepared.release;
+        let latestSequence = 0;
+        removeNativeListener = nativeExport.onNativeEvent((event) => {
+          if (
+            event.token !== nativeTokenRef.current ||
+            event.sequence <= latestSequence ||
+            cancelRequestedRef.current
+          ) {
+            return;
+          }
+          latestSequence = event.sequence;
+          setStage(event.stage);
+          if (Number.isFinite(event.overallProgress)) {
+            const nextProgress = Math.max(
+              0,
+              Math.min(event.phase === 'done' ? 1 : 0.99, event.overallProgress),
+            );
+            setProgress((previous) => Math.max(previous, nextProgress));
+          }
+          setProgressIndeterminate(
+            event.phase === 'preflight' || event.phase === 'preparing',
+          );
+          if (
+            typeof event.etaSec === 'number' &&
+            Number.isFinite(event.etaSec) &&
+            event.etaSec >= 0
+          ) {
+            setEtaLabel(formatEta(event.etaSec));
+          } else if (event.phase === 'finalizing') {
+            setEtaLabel('最終確認中');
+          } else if (
+            event.phase === 'preflight' ||
+            event.phase === 'preparing'
+          ) {
+            setEtaLabel('残り時間を計算中');
+          }
+        });
+        const result = await nativeExport.startNative(nativeToken, prepared.request);
+        removeNativeListener();
+        removeNativeListener = null;
+        if (!result.ok || !result.complete || !result.path) {
+          if (result.canceled) {
+            throw new DOMException('書き出しが中止されました', 'AbortError');
+          }
+          if (result.cleanupPending) {
+            nativeTokenRef.current = nativeToken;
+            setCleanupPending(true);
+          }
+          const details = result.details?.filter(Boolean).join(' / ');
+          throw new Error(
+            `${result.code ? `${result.code}: ` : ''}${
+              result.error ?? 'ネイティブ書き出しに失敗しました'
+            }${details ? ` / ${details}` : ''}`,
+          );
+        }
+        nativeCommitted = true;
+        nativeToken = null;
+        nativeTokenRef.current = null;
+        setCleanupPending(false);
+        setSavedPath(result.path);
+        setFileSizeMb(
+          typeof result.size === 'number' ? result.size / (1024 * 1024) : null,
+        );
+      } else {
+        const blob = await exportProject(renderInput, {
+          ...renderOptions,
+          onProgress: ({ stage: progressStage, percent, log }) => {
+            if (cancelRequestedRef.current) return;
+            if (progressStage.includes('MT') || progressStage.includes('ST')) {
+              const variant = getActiveCoreVariant();
+              const threadCount = getActiveCoreThreadCount();
+              setCoreLabel(
+                variant === 'mt'
+                  ? `MT (${threadCount} threads)`
+                  : 'ST (single thread)',
+              );
             }
-
-            // Extract ETA note from stage string if present.
-            const etaMatch = /残り約\s*(\d+)s/.exec(s);
+            const etaMatch = /残り約\s*(\d+)s/.exec(progressStage);
             if (etaMatch) {
-              setEtaLabel(`残り約 ${etaMatch[1]}s`);
-              // Strip ETA from stage label for cleaner display.
-              setStage(s.replace(/\s*—\s*残り約\s*\d+s/, '').trim());
+              setEtaLabel(formatEta(Number(etaMatch[1])));
+              setStage(
+                progressStage.replace(/\s*—\s*残り約\s*\d+s/, '').trim(),
+              );
             } else {
-              setStage(s);
+              setStage(progressStage);
             }
-
-            if (percent >= 0) {
-              setProgress(percent);
+            if (percent >= 0 && Number.isFinite(percent)) {
+              setProgressIndeterminate(false);
+              const progressCeiling = nativeToken ? 0.94 : 0.99;
+              const nextProgress = Math.max(
+                0,
+                Math.min(progressCeiling, percent),
+              );
+              setProgress((previous) => Math.max(previous, nextProgress));
+            } else {
+              setProgressIndeterminate(true);
             }
             if (log) {
-              setLogs((prev) => {
-                const next = [...prev, log];
+              setLogs((previous) => {
+                const next = [...previous, log];
                 return next.length > 80 ? next.slice(next.length - 80) : next;
               });
             }
           },
-        },
-      );
-      if (abortController.signal.aborted) {
-        throw new DOMException('書き出しが中止されました', 'AbortError');
-      }
-      if (nativeToken) {
-        setStage('動画ファイルを保存中');
-        const path = await writeBlobToNative(nativeToken, blob, (fraction) => {
-          setProgress(0.95 + Math.min(1, fraction) * 0.05);
-        }, abortController.signal);
-        nativeToken = null;
-        nativeTokenRef.current = null;
-        setSavedPath(path);
-        nativeCommitted = true;
-      } else {
-        const url = URL.createObjectURL(blob);
-        setDownloadUrl(url);
+        });
+        if (abortController.signal.aborted) {
+          throw new DOMException('書き出しが中止されました', 'AbortError');
+        }
+        if (nativeToken) {
+          setStage('動画ファイルを保存中');
+          setProgressIndeterminate(false);
+          const path = await writeBlobToNative(
+            nativeToken,
+            blob,
+            (fraction) => {
+              const saveProgress =
+                0.95 + Math.max(0, Math.min(1, fraction)) * 0.049;
+              setProgress((previous) => Math.max(previous, saveProgress));
+            },
+            abortController.signal,
+          );
+          nativeToken = null;
+          nativeTokenRef.current = null;
+          setSavedPath(path);
+          nativeCommitted = true;
+        } else {
+          const url = URL.createObjectURL(blob);
+          setDownloadUrl(url);
+        }
+        setFileSizeMb(blob.size / (1024 * 1024));
       }
       if (abortController.signal.aborted && !nativeCommitted) {
         throw new DOMException('書き出しが中止されました', 'AbortError');
       }
-      setFileSizeMb(blob.size / (1024 * 1024));
       setProgress(1);
+      setProgressIndeterminate(false);
+      setEtaLabel('');
+      setLiveStatus('書き出しが完了しました');
       setPhase('done');
     } catch (e) {
       let cleanupError: unknown = null;
@@ -380,6 +632,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             cleanupError instanceof Error ? cleanupError.message : '保存先の権限と空き容量を確認してください',
           ],
         });
+        setProgressIndeterminate(false);
         setPhase('error');
         return;
       }
@@ -390,11 +643,14 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           message: '書き出しを中止しました',
           steps: ['設定を変更して、必要なときにもう一度書き出せます'],
         });
-        setPhase('error');
+        setProgressIndeterminate(false);
+        setEtaLabel('');
+        setPhase('cancelled');
         return;
       }
       const rawMsg = e instanceof Error ? e.message : '不明なエラー';
       setError(humanizeError(rawMsg));
+      setProgressIndeterminate(false);
       setPhase('error');
       // Drop the cached FFmpeg singleton so a retry rebuilds it from
       // scratch. An exec failure (OOM, filter-graph deadlock, WASM
@@ -402,7 +658,12 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
       // reset, every subsequent attempt would hit the same dead handle.
       resetFFmpeg();
     } finally {
+      removeNativeListener?.();
+      if (releasePreparedNative) {
+        await releasePreparedNative().catch(() => {});
+      }
       abortControllerRef.current = null;
+      nativeRenderingRef.current = false;
       setCancelling(false);
       isExportingRef.current = false;
     }
@@ -413,10 +674,12 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
     cancelRequestedRef.current = true;
     setCancelling(true);
     setStage('書き出しを中止しています');
+    setProgressIndeterminate(true);
+    setEtaLabel('');
+    setLiveStatus('書き出しを安全に中止しています');
     abortControllerRef.current?.abort();
     resetFFmpeg();
     const token = nativeTokenRef.current;
-    nativeTokenRef.current = null;
     if (token) {
       try {
         const result = await window.fce?.export?.abandon(token);
@@ -426,6 +689,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           cancelRequestedRef.current = false;
           if (result.path) setSavedPath(result.path);
         }
+        nativeTokenRef.current = null;
       } catch {
         // The main export flow retries cleanup and presents the actionable
         // error; avoid creating an unhandled rejection from the button click.
@@ -465,6 +729,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
     }
     setError(null);
     setPhase('idle');
+    setProgressIndeterminate(false);
     // Schedule the actual start on the next tick so the UI reflects the
     // phase change before re-entering the rendering branch.
     window.setTimeout(() => {
@@ -486,7 +751,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             {coreLabel ? (
               <span
                 className={
-                  coreLabel.startsWith('MT')
+                  coreLabel.startsWith('MT') || coreLabel.startsWith('Native')
                     ? styles.badgeMt
                     : styles.badgeSt
                 }
@@ -520,7 +785,16 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             </div>
           </div>
 
-          {phase === 'idle' || phase === 'error' ? (
+          <span
+            className={styles.srOnly}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {liveStatus}
+          </span>
+
+          {phase === 'idle' || phase === 'error' || phase === 'cancelled' ? (
             <>
               <div className={styles.optionRow}>
                 <span className={styles.optionLabel}>画質</span>
@@ -637,7 +911,12 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
               </div>
 
               {error ? (
-                <div className={styles.error} role="alert">
+                <div
+                  className={`${styles.error} ${
+                    phase === 'cancelled' ? styles.cancelled : ''
+                  }`}
+                  role={phase === 'cancelled' ? 'status' : 'alert'}
+                >
                   <div className={styles.errorHeader}>
                     <span className={styles.errorIcon} aria-hidden="true">!</span>
                     <div className={styles.errorTitle}>{error.message}</div>
@@ -668,8 +947,12 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           {phase === 'rendering' ? (
             <>
               <div className={styles.progressLabel}>
-                <span className={styles.stageText} aria-live="polite">{stage}</span>
-                <span className={styles.progressNum}>{Math.round(progress * 100)}%</span>
+                <span className={styles.stageText}>{stage}</span>
+                <span className={styles.progressNum}>
+                  {progressIndeterminate
+                    ? '処理中'
+                    : `${Math.round(progress * 100)}%`}
+                </span>
               </div>
               <div
                 className={styles.progressBar}
@@ -677,12 +960,24 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                 aria-label="動画の書き出し"
                 aria-valuemin={0}
                 aria-valuemax={100}
-                aria-valuenow={Math.round(progress * 100)}
-                aria-valuetext={`${stage} ${Math.round(progress * 100)}%`}
+                aria-valuenow={
+                  progressIndeterminate ? undefined : Math.round(progress * 100)
+                }
+                aria-valuetext={
+                  progressIndeterminate
+                    ? `${stage}。進捗を計算中`
+                    : `${stage} ${Math.round(progress * 100)}%`
+                }
               >
                 <div
-                  className={styles.progressFill}
-                  style={{ width: `${progress * 100}%` }}
+                  className={`${styles.progressFill} ${
+                    progressIndeterminate ? styles.progressIndeterminate : ''
+                  }`}
+                  style={{
+                    width: progressIndeterminate
+                      ? '35%'
+                      : `${progress * 100}%`,
+                  }}
                 />
               </div>
               <div className={styles.timerRow}>
@@ -758,7 +1053,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                 書き出し開始
               </button>
             </>
-          ) : phase === 'error' ? (
+          ) : phase === 'error' || phase === 'cancelled' ? (
             <>
               <button
                 type="button"
@@ -778,7 +1073,9 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                   ? '一時ファイルを削除中…'
                   : cleanupPending
                     ? '一時ファイルの削除を再試行'
-                    : '再試行'}
+                    : phase === 'cancelled'
+                      ? 'もう一度書き出す'
+                      : '再試行'}
               </button>
             </>
           ) : phase === 'done' ? (
@@ -792,6 +1089,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
               </span>
               <button
                 type="button"
+                ref={cancelButtonRef}
                 className={styles.btnCancel}
                 onClick={() => void handleCancelExport()}
                 disabled={cancelling}

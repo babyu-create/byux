@@ -75,6 +75,9 @@ export interface MediaAsset {
   path?: string;
   /** Opaque main-process registration used for chunked reads and streaming. */
   sourceToken?: string;
+  /** Opaque registration for a disk-backed compatibility proxy. The original
+   * sourceToken remains the final-export authority. */
+  previewSourceToken?: string;
   /** Preview uses a lightweight H.264 proxy while export keeps the original file. */
   previewProxy?: boolean;
 }

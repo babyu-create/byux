@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Sparkles, Download, CheckCircle2, AlertTriangle } from 'lucide-react';
+import type { NativeExportRequest } from '../../lib/nativeExporter';
 import styles from './UpdateBanner.module.css';
 
 type UpdaterEvent =
@@ -75,6 +76,51 @@ interface ProjectAPI {
 }
 
 interface ExportAPI {
+  getNativeCapabilities(): Promise<{
+    available: boolean;
+    backend?: 'native-ffmpeg';
+    error?: string;
+  }>;
+  startNative(
+    token: string,
+    request: NativeExportRequest,
+  ): Promise<{
+    ok: boolean;
+    complete?: boolean;
+    canceled?: boolean;
+    cleanupPending?: boolean;
+    path?: string;
+    size?: number;
+    duration?: number;
+    code?: string;
+    error?: string;
+    details?: string[];
+  }>;
+  onNativeEvent(
+    cb: (event: {
+      token: string;
+      sequence: number;
+      phase:
+        | 'preflight'
+        | 'preparing'
+        | 'encoding'
+        | 'finalizing'
+        | 'cancelling'
+        | 'cancelled'
+        | 'failed'
+        | 'cleanup-error'
+        | 'done';
+      stage: string;
+      overallProgress: number;
+      processedSeconds?: number;
+      totalSeconds?: number;
+      speed?: number | null;
+      etaSec?: number | null;
+      fps?: number | null;
+      totalBytes?: number | null;
+      error?: { code: string; message: string; details?: string[] };
+    }) => void,
+  ): () => void;
   chooseOutput(payload: {
     suggestedName: string;
     estimatedBytes: number;
@@ -134,6 +180,15 @@ interface FCEGlobal {
     size: number;
     kind: 'video' | 'audio';
   }) => Promise<{ token: string; url: string; size: number } | null>;
+  /** Create/reuse a disk-backed H.264 preview without loading the source into renderer memory. */
+  createPreviewProxy?: (sourceToken: string) => Promise<{
+    ok: boolean;
+    token?: string;
+    url?: string;
+    size?: number;
+    cached?: boolean;
+    error?: string;
+  }>;
   /** Bounded source read used only by explicit heavyweight operations. */
   readMediaFileChunk?: (
     token: string,
