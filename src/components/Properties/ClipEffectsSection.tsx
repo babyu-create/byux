@@ -45,6 +45,8 @@ export function ClipEffectsSection({ clip }: ClipEffectsSectionProps) {
                 max={3}
                 step={0.1}
                 value={fadeIn.duration ?? 0.4}
+                aria-label="フェードインの長さ"
+                aria-valuetext={`${(fadeIn.duration ?? 0.4).toFixed(1)}秒`}
                 onChange={(e) =>
                   updateEffect(clip.id, 'fade-in', {
                     duration: parseFloat(e.target.value),
@@ -133,6 +135,8 @@ export function ClipEffectsSection({ clip }: ClipEffectsSectionProps) {
                 max={3}
                 step={0.1}
                 value={fadeOut.duration ?? 0.4}
+                aria-label="フェードアウトの長さ"
+                aria-valuetext={`${(fadeOut.duration ?? 0.4).toFixed(1)}秒`}
                 onChange={(e) =>
                   updateEffect(clip.id, 'fade-out', {
                     duration: parseFloat(e.target.value),

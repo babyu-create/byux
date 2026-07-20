@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Sparkles, Download, CheckCircle2 } from 'lucide-react';
+import { Sparkles, Download, CheckCircle2, AlertTriangle } from 'lucide-react';
+import type { NativeExportRequest } from '../../lib/nativeExporter';
 import styles from './UpdateBanner.module.css';
 
 type UpdaterEvent =
@@ -27,12 +28,16 @@ export interface RecentProject {
 interface ProjectFileResult {
   ok: boolean;
   canceled?: boolean;
+  stale?: boolean;
   path?: string;
   text?: string;
   error?: string;
+  warning?: string;
+  sessionId?: string;
 }
 
 interface ProjectAPI {
+  newSession(detachOnFailure?: boolean): Promise<boolean>;
   openDialog(): Promise<ProjectFileResult>;
   save(payload: {
     text: string;
@@ -40,18 +45,82 @@ interface ProjectAPI {
     saveAs: boolean;
   }): Promise<ProjectFileResult>;
   confirmOpen(path: string): Promise<boolean>;
-  autosave(text: string): Promise<{ ok: boolean; error?: string }>;
+  autosave(text: string): Promise<{
+    ok: boolean;
+    stale?: boolean;
+    error?: string;
+    generation?: string;
+    sessionId?: string;
+  }>;
+  commitSave(
+    text: string,
+    autosaveGeneration: string | null,
+    sessionId: string,
+  ): Promise<boolean>;
   checkRecovery(): Promise<
     | { ok: true; recovered: false }
-    | { ok: true; recovered: true; text: string; path: string | null }
+    | {
+        ok: true;
+        recovered: true;
+        text: string;
+        path: string | null;
+        recoveryId: string;
+        generation: string | null;
+      }
     | { ok: false; error: string }
   >;
+  confirmRecovery(recoveryId: string): Promise<boolean>;
   listRecent(): Promise<RecentProject[]>;
   openRecent(path: string): Promise<ProjectFileResult>;
   removeRecent(path: string): Promise<boolean>;
 }
 
 interface ExportAPI {
+  getNativeCapabilities(): Promise<{
+    available: boolean;
+    backend?: 'native-ffmpeg';
+    error?: string;
+  }>;
+  startNative(
+    token: string,
+    request: NativeExportRequest,
+  ): Promise<{
+    ok: boolean;
+    complete?: boolean;
+    canceled?: boolean;
+    cleanupPending?: boolean;
+    path?: string;
+    size?: number;
+    duration?: number;
+    code?: string;
+    error?: string;
+    details?: string[];
+  }>;
+  onNativeEvent(
+    cb: (event: {
+      token: string;
+      sequence: number;
+      phase:
+        | 'preflight'
+        | 'preparing'
+        | 'encoding'
+        | 'finalizing'
+        | 'cancelling'
+        | 'cancelled'
+        | 'failed'
+        | 'cleanup-error'
+        | 'done';
+      stage: string;
+      overallProgress: number;
+      processedSeconds?: number;
+      totalSeconds?: number;
+      speed?: number | null;
+      etaSec?: number | null;
+      fps?: number | null;
+      totalBytes?: number | null;
+      error?: { code: string; message: string; details?: string[] };
+    }) => void,
+  ): () => void;
   chooseOutput(payload: {
     suggestedName: string;
     estimatedBytes: number;
@@ -60,6 +129,11 @@ interface ExportAPI {
     canceled?: boolean;
     token?: string;
     path?: string;
+    freeBytes?: number;
+    error?: string;
+  }>;
+  setSize(token: string, totalBytes: number): Promise<{
+    ok: boolean;
     freeBytes?: number;
     error?: string;
   }>;
@@ -75,7 +149,12 @@ interface ExportAPI {
     bytesWritten?: number;
     error?: string;
   }>;
-  abandon(token: string): Promise<boolean>;
+  abandon(token: string): Promise<{
+    ok: boolean;
+    abandoned: boolean;
+    committed: boolean;
+    path?: string;
+  } | false>;
   openFile(): Promise<boolean>;
   showInFolder(): Promise<boolean>;
 }
@@ -90,6 +169,8 @@ interface FCEGlobal {
   export?: ExportAPI;
   /** Tell the main process whether there are unsaved edits (see `close` handler in electron/main.cjs). */
   setDirty?: (dirty: boolean) => void;
+  onSaveBeforeClose?: (cb: (id: string) => void) => () => void;
+  completeSaveBeforeClose?: (id: string, success: boolean) => void;
   /** Real disk path of a File the user dropped/picked (empty string if none). */
   getPathForFile?: (file: File) => string;
   /** Register a saved source path and receive an opaque streaming handle. */
@@ -99,6 +180,15 @@ interface FCEGlobal {
     size: number;
     kind: 'video' | 'audio';
   }) => Promise<{ token: string; url: string; size: number } | null>;
+  /** Create/reuse a disk-backed H.264 preview without loading the source into renderer memory. */
+  createPreviewProxy?: (sourceToken: string) => Promise<{
+    ok: boolean;
+    token?: string;
+    url?: string;
+    size?: number;
+    cached?: boolean;
+    error?: string;
+  }>;
   /** Bounded source read used only by explicit heavyweight operations. */
   readMediaFileChunk?: (
     token: string,
@@ -130,7 +220,6 @@ export function UpdateBanner() {
 
   if (dismissed || !event) return null;
   if (event.status === 'up-to-date' || event.status === 'checking') return null;
-  if (event.status === 'error') return null; // silent on errors
 
   const handleInstall = () => {
     window.fce?.updater?.installAndRestart();
@@ -141,6 +230,33 @@ export function UpdateBanner() {
   const handleDownload = () => {
     window.fce?.updater?.download();
   };
+
+  if (event.status === 'error') {
+    return (
+      <div className={styles.banner} data-state="error" role="alert">
+        <span className={styles.icon}>
+          <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
+        </span>
+        <span className={styles.text}>更新を確認できませんでした。通信状態を確認してください。</span>
+        <div className={styles.actions}>
+          <button
+            type="button"
+            className={styles.btnSecondary}
+            onClick={() => setDismissed(true)}
+          >
+            閉じる
+          </button>
+          <button
+            type="button"
+            className={styles.btnPrimary}
+            onClick={() => void window.fce?.updater?.check()}
+          >
+            再試行
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (event.status === 'available') {
     return (
@@ -177,7 +293,14 @@ export function UpdateBanner() {
         <span className={styles.text}>
           ダウンロード中... <strong>{percent}%</strong>
         </span>
-        <div className={styles.progressBar}>
+        <div
+          className={styles.progressBar}
+          role="progressbar"
+          aria-label="アップデートのダウンロード"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+        >
           <div className={styles.progressFill} style={{ width: `${percent}%` }} />
         </div>
       </div>
@@ -197,7 +320,7 @@ export function UpdateBanner() {
             className={styles.btnSecondary}
             onClick={() => setDismissed(true)}
           >
-            次回起動時
+            あとで
           </button>
           <button
             type="button"

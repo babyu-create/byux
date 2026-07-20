@@ -193,8 +193,57 @@ export async function readMediaAssetBytes(asset: MediaAsset): Promise<Uint8Array
 /** Materialize a re-linked asset as a File for browser APIs such as Web Audio. */
 export async function mediaAssetToFile(asset: MediaAsset): Promise<File> {
   if (asset.file) return asset.file;
-  const bytes = await readMediaAssetBytes(asset);
-  return new File([bytes], asset.name, { type: asset.mimeType });
+  const response = await fetch(asset.url);
+  if (!response.ok) throw new Error(`素材を読み込めません: ${asset.name}`);
+  const blob = await response.blob();
+  if (blob.size !== asset.size) {
+    throw new Error(`素材の読み込みが途中で失敗しました: ${asset.name}`);
+  }
+  // Keep the browser-managed Blob backing rather than allocating a second
+  // multi-GB Uint8Array in the renderer.
+  return new File([blob], asset.name, { type: asset.mimeType });
+}
+
+/** Probe a main-process streamed preview URL without materialising the proxy as
+ * a renderer File/Blob. Used by the native long-form compatibility pipeline. */
+export function probeVideoUrlMetadata(url: string): Promise<MediaProbeResult> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    const cleanup = () => {
+      // Clearing the handlers first is important: calling load() after
+      // removing src can itself emit `error`, which otherwise re-enters
+      // cleanup and may loop on some Chromium versions.
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      video.removeAttribute('src');
+      video.load();
+    };
+    video.preload = 'metadata';
+    video.crossOrigin = 'anonymous';
+    video.onloadedmetadata = () => {
+      const result = {
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      };
+      cleanup();
+      if (
+        !Number.isFinite(result.duration) ||
+        result.duration <= 0 ||
+        result.width <= 0 ||
+        result.height <= 0
+      ) {
+        reject(new Error('プレビュー用動画の情報を読み取れませんでした'));
+        return;
+      }
+      resolve(result);
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error('プレビュー用動画を読み込めませんでした'));
+    };
+    video.src = url;
+  });
 }
 
 export function formatDuration(seconds: number): string {

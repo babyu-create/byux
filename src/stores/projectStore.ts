@@ -12,6 +12,8 @@ import {
   nextClipOnTrack,
   prevClipEndOnTrack,
   resolveClipPosition,
+  sourceTimeAtTimelineTime,
+  timelineTimeAtSourceTime,
 } from '../lib/timeline';
 
 const DEFAULT_TRACKS: Track[] = [
@@ -68,6 +70,9 @@ interface ProjectStoreState {
     durationMs: number;
   } | null;
 
+  setName: (name: string) => void;
+  resetProject: () => void;
+
   addClipFromAsset: (
     assetId: string,
     trackId: string,
@@ -80,6 +85,8 @@ interface ProjectStoreState {
   splitClipAt: (clipId: string, atTime: number) => void;
   removeClip: (clipId: string) => void;
   removeSelectedClips: () => void;
+  /** Remove every timeline/reference object owned by a media asset. */
+  removeAssetReferences: (assetId: string) => void;
   selectClip: (clipId: string, additive?: boolean) => void;
   clearSelection: () => void;
   setPlayhead: (time: number) => void;
@@ -202,6 +209,7 @@ type DocState = Pick<
   | 'name' | 'aspectRatio' | 'fps' | 'resolution'
   | 'tracks' | 'clips' | 'markers' | 'ioRanges'
   | 'preRollSec' | 'postRollSec' | 'audioDucking'
+  | 'hudPreset' | 'verticalReframe'
 >;
 
 function partializeDoc(s: ProjectStoreState): DocState {
@@ -217,6 +225,8 @@ function partializeDoc(s: ProjectStoreState): DocState {
     preRollSec: s.preRollSec,
     postRollSec: s.postRollSec,
     audioDucking: s.audioDucking,
+    hudPreset: s.hudPreset,
+    verticalReframe: s.verticalReframe,
   };
 }
 
@@ -235,7 +245,9 @@ function docEqual(a: DocState, b: DocState): boolean {
     a.ioRanges === b.ioRanges &&
     a.preRollSec === b.preRollSec &&
     a.postRollSec === b.postRollSec &&
-    a.audioDucking === b.audioDucking
+    a.audioDucking === b.audioDucking &&
+    a.hudPreset === b.hudPreset &&
+    a.verticalReframe === b.verticalReframe
   );
 }
 
@@ -257,12 +269,30 @@ function assetsFingerprint(assets: MediaAsset[]): string {
 // Coalesce rapid edits (clip/slider drags fire ~60/s) into a single history
 // entry by debouncing when temporal records. 150ms groups per-frame drags
 // while staying well under human undo-reaction time.
-function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): (...args: A) => void {
+interface CancelableDebounce<A extends unknown[]> {
+  (...args: A): void;
+  cancel(): void;
+}
+
+let cancelPendingHistory = (): void => {};
+
+function debounce<A extends unknown[]>(
+  fn: (...args: A) => void,
+  ms: number,
+): CancelableDebounce<A> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  return (...args: A) => {
+  const debounced = (...args: A) => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), ms);
+    timer = setTimeout(() => {
+      timer = undefined;
+      fn(...args);
+    }, ms);
   };
+  debounced.cancel = () => {
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+  };
+  return debounced;
 }
 
 export const useProjectStore = create<ProjectStoreState>()(
@@ -295,10 +325,46 @@ export const useProjectStore = create<ProjectStoreState>()(
   savedDocument: null,
   savedAssetsFingerprint: '[]',
 
+  setName: (name) => set({ name: name.slice(0, 120) }),
+  resetProject: () =>
+    set({
+      name: 'untitled',
+      aspectRatio: '16:9',
+      fps: 60,
+      resolution: '1080p',
+      tracks: DEFAULT_TRACKS.map((track) => ({ ...track })),
+      clips: [],
+      markers: [],
+      ioRanges: [],
+      audioDucking: undefined,
+      hudPreset: 'valorant',
+      verticalReframe: 0,
+      selectedClipIds: [],
+      selectedMarkerId: null,
+      selectedRangeId: null,
+      pendingIn: null,
+      playhead: 0,
+      isPlaying: false,
+      preRollSec: 3,
+      postRollSec: 1,
+      expectedAssets: [],
+    }),
+
   addClipFromAsset: (assetId, trackId, durationSec, atTime) => {
     if (durationSec <= 0) return null;
-    const id = crypto.randomUUID();
     const state = get();
+    const track = state.tracks.find((candidate) => candidate.id === trackId);
+    if (!track || track.locked) return null;
+    const asset = useMediaStore
+      .getState()
+      .assets.find((candidate) => candidate.id === assetId);
+    if (!asset) return null;
+    const compatible =
+      asset.kind === 'audio'
+        ? track.kind === 'audio'
+        : track.kind === 'video' || track.kind === 'overlay';
+    if (!compatible) return null;
+    const id = crypto.randomUUID();
     const sameTrackClips = state.clips.filter((c) => c.trackId === trackId);
     const preferred =
       atTime !== undefined
@@ -415,9 +481,8 @@ export const useProjectStore = create<ProjectStoreState>()(
       if (!clip) return state;
       const track = state.tracks.find((t) => t.id === clip.trackId);
       if (track?.locked) return state;
-      const speed = clip.speed ?? 1;
-      const localOffset = atTime - clip.start; // timeline-time
-      const sourceTime = clip.trimStart + localOffset * speed; // source-time
+      const localOffset = atTime - clip.start;
+      const sourceTime = sourceTimeAtTimelineTime(clip, atTime);
       if (
         localOffset <= MIN_CLIP_DURATION ||
         sourceTime >= clip.trimEnd - MIN_CLIP_DURATION
@@ -468,6 +533,35 @@ export const useProjectStore = create<ProjectStoreState>()(
       return {
         clips: state.clips.filter((c) => !deletableIds.has(c.id)),
         selectedClipIds: state.selectedClipIds.filter((id) => !deletableIds.has(id)),
+      };
+    });
+  },
+
+  removeAssetReferences: (assetId) => {
+    set((state) => {
+      const removedClipIds = new Set(
+        state.clips.filter((clip) => clip.assetId === assetId).map((clip) => clip.id),
+      );
+      const removedMarkerIds = new Set(
+        state.markers.filter((marker) => marker.assetId === assetId).map((marker) => marker.id),
+      );
+      const removedRangeIds = new Set(
+        state.ioRanges.filter((range) => range.assetId === assetId).map((range) => range.id),
+      );
+      return {
+        clips: state.clips.filter((clip) => clip.assetId !== assetId),
+        markers: state.markers.filter((marker) => marker.assetId !== assetId),
+        ioRanges: state.ioRanges.filter((range) => range.assetId !== assetId),
+        selectedClipIds: state.selectedClipIds.filter((id) => !removedClipIds.has(id)),
+        selectedMarkerId:
+          state.selectedMarkerId && removedMarkerIds.has(state.selectedMarkerId)
+            ? null
+            : state.selectedMarkerId,
+        selectedRangeId:
+          state.selectedRangeId && removedRangeIds.has(state.selectedRangeId)
+            ? null
+            : state.selectedRangeId,
+        pendingIn: state.pendingIn?.assetId === assetId ? null : state.pendingIn,
       };
     });
   },
@@ -588,12 +682,21 @@ export const useProjectStore = create<ProjectStoreState>()(
 
   autoClipFromMarkers: (assetId, options) => {
     const state = get();
+    const assetDuration = useMediaStore
+      .getState()
+      .assets.find((asset) => asset.id === assetId)?.duration;
+    if (!assetDuration || !Number.isFinite(assetDuration)) return 0;
     const markers = state.markers
       .filter((m) => m.assetId === assetId)
       .sort((a, b) => a.time - b.time);
     if (markers.length === 0) return 0;
 
-    const videoTrack = state.tracks.find((t) => t.kind === 'video');
+    const videoTrack = state.tracks.find(
+      (track) =>
+        track.kind === 'video' &&
+        !track.hidden &&
+        !track.locked,
+    );
     if (!videoTrack) return 0;
     const videoTrackId = videoTrack.id;
 
@@ -614,8 +717,8 @@ export const useProjectStore = create<ProjectStoreState>()(
 
     const newClips: Clip[] = [];
     for (const m of markers) {
-      const trimStart = Math.max(0, m.time - options.preRoll);
-      const trimEnd = m.time + options.postRoll;
+      const trimStart = Math.min(assetDuration, Math.max(0, m.time - options.preRoll));
+      const trimEnd = Math.min(assetDuration, m.time + options.postRoll);
       if (trimEnd <= trimStart + 0.05) continue;
       const id = crypto.randomUUID();
       const dur = trimEnd - trimStart;
@@ -631,6 +734,10 @@ export const useProjectStore = create<ProjectStoreState>()(
       cursor += dur;
     }
 
+    // A zero-length pre/post roll (or markers at a clamped boundary) can
+    // legitimately produce no valid clips. Do not let a "0 created" result
+    // erase the user's source clips.
+    if (newClips.length === 0) return 0;
     set({
       clips: [...baseClips, ...newClips],
       selectedClipIds: newClips.map((c) => c.id),
@@ -722,9 +829,7 @@ export const useProjectStore = create<ProjectStoreState>()(
     // Speed-adjust the timeline→source mapping. A 2× clip covers twice
     // the source time per timeline second; omitting this caused IO
     // ranges to land off by (1 - 1/speed) on any time-warped clip.
-    const clipSpeed = activeClip.speed ?? 1;
-    const sourceTime =
-      activeClip.trimStart + (state.playhead - activeClip.start) * clipSpeed;
+    const sourceTime = sourceTimeAtTimelineTime(activeClip, state.playhead);
     // Resolve the destination track id from the active clip itself so
     // multi-video-track projects place the new clip on the correct lane.
     const videoTrackId = activeClip.trackId;
@@ -762,7 +867,12 @@ export const useProjectStore = create<ProjectStoreState>()(
       .filter((r) => r.assetId === assetId)
       .sort((a, b) => a.inTime - b.inTime);
     if (ranges.length === 0) return 0;
-    const videoTrack = state.tracks.find((t) => t.kind === 'video');
+    const videoTrack = state.tracks.find(
+      (track) =>
+        track.kind === 'video' &&
+        !track.hidden &&
+        !track.locked,
+    );
     if (!videoTrack) return 0;
     const videoTrackId = videoTrack.id;
 
@@ -794,6 +904,10 @@ export const useProjectStore = create<ProjectStoreState>()(
       });
       cursor += dur;
     }
+    // Keep both the source clip and ranges when every candidate was too short.
+    // The operation must be transactional: either clips are created, or the
+    // project remains unchanged.
+    if (newClips.length === 0) return 0;
     set({
       clips: [...baseClips, ...newClips],
       ioRanges: state.ioRanges.filter((r) => r.assetId !== assetId),
@@ -860,10 +974,25 @@ export const useProjectStore = create<ProjectStoreState>()(
       if (!target) return state;
       const track = state.tracks.find((t) => t.id === target.trackId);
       if (track?.locked) return state;
+      const oldDuration = clipDuration(target);
+      const updatedTarget = { ...target, speed: clamped };
+      const delta = clipDuration(updatedTarget) - oldDuration;
+      const oldEnd = target.start + oldDuration;
       return {
-        clips: state.clips.map((c) =>
-          c.id === clipId ? { ...c, speed: clamped } : c,
-        ),
+        // Ripple later clips on the same track by the duration delta. This
+        // preserves gaps and prevents a slower clip from silently overlapping
+        // its neighbour (preview/export otherwise disagree on which wins).
+        clips: state.clips.map((c) => {
+          if (c.id === clipId) return updatedTarget;
+          if (
+            c.trackId === target.trackId &&
+            c.start >= oldEnd - 1e-6 &&
+            Math.abs(delta) > 1e-9
+          ) {
+            return { ...c, start: Math.max(0, c.start + delta) };
+          }
+          return c;
+        }),
       };
     });
   },
@@ -1078,6 +1207,8 @@ export const useProjectStore = create<ProjectStoreState>()(
       postRollSec: file.postRollSec,
       // Absent in old files → undefined (no ducking). Backward compatible.
       audioDucking: file.audioDucking,
+      hudPreset: file.hudPreset ?? 'valorant',
+      verticalReframe: file.verticalReframe ?? 0,
       selectedClipIds: [],
       selectedMarkerId: null,
       selectedRangeId: null,
@@ -1130,9 +1261,7 @@ export const useProjectStore = create<ProjectStoreState>()(
     });
     if (!activeClip) return;
     // Speed-adjust the timeline→source mapping (timeline 1s = source `speed`s).
-    const clipSpeed = activeClip.speed ?? 1;
-    const localTime =
-      activeClip.trimStart + (state.playhead - activeClip.start) * clipSpeed;
+    const localTime = sourceTimeAtTimelineTime(activeClip, state.playhead);
     const sourceMarkers = state.markers
       .filter((m) => m.assetId === activeClip.assetId)
       .sort((a, b) => a.time - b.time);
@@ -1145,8 +1274,7 @@ export const useProjectStore = create<ProjectStoreState>()(
     }
     if (!target) return;
     // Reverse mapping: source seconds → timeline seconds via /speed.
-    const newPlayhead =
-      activeClip.start + (target.time - activeClip.trimStart) / clipSpeed;
+    const newPlayhead = timelineTimeAtSourceTime(activeClip, target.time);
     set({ playhead: Math.max(0, newPlayhead), selectedMarkerId: target.id });
   },
     }),
@@ -1154,7 +1282,11 @@ export const useProjectStore = create<ProjectStoreState>()(
       partialize: partializeDoc,
       equality: docEqual,
       limit: 100,
-      handleSet: (handleSet) => debounce(handleSet, 150),
+      handleSet: (handleSet) => {
+        const pending = debounce(handleSet, 150);
+        cancelPendingHistory = pending.cancel;
+        return pending;
+      },
     },
   ),
 );
@@ -1175,7 +1307,10 @@ export const undo = (): void => useProjectStore.temporal.getState().undo();
 /** Re-apply the last undone edit. */
 export const redo = (): void => useProjectStore.temporal.getState().redo();
 /** Clear undo/redo history (e.g. after loading a project). */
-export const clearHistory = (): void => useProjectStore.temporal.getState().clear();
+export const clearHistory = (): void => {
+  cancelPendingHistory();
+  useProjectStore.temporal.getState().clear();
+};
 
 /** Reactive: is there anything to undo? */
 export const useCanUndo = (): boolean =>
@@ -1189,18 +1324,42 @@ export const useCanRedo = (): boolean =>
 // History recording is debounced and can branch after undo, so its array
 // length is neither immediate nor a unique identity for the current document.
 
-/** Call after a successful save (or load) to mark the current state as clean. */
-export const markProjectSaved = (): void => {
+export interface ProjectSavedBaseline {
+  document: DocState;
+  assetsFingerprint: string;
+}
+
+/** Capture the exact state that is about to be serialized for an async save. */
+export const captureProjectSavedBaseline = (): ProjectSavedBaseline => ({
+  document: partializeDoc(useProjectStore.getState()),
+  assetsFingerprint: assetsFingerprint(useMediaStore.getState().assets),
+});
+
+/**
+ * Mark a successful save/load as the clean baseline.
+ *
+ * Async native saves must pass the baseline captured before the IPC call.
+ * Otherwise edits made while the save dialog/disk write is in progress would
+ * be incorrectly marked as saved even though they were not in the written JSON.
+ */
+export const markProjectSaved = (
+  baseline: ProjectSavedBaseline = captureProjectSavedBaseline(),
+): void => {
   useProjectStore.setState({
-    savedDocument: partializeDoc(useProjectStore.getState()),
-    savedAssetsFingerprint: assetsFingerprint(useMediaStore.getState().assets),
+    savedDocument: baseline.document,
+    savedAssetsFingerprint: baseline.assetsFingerprint,
   });
+};
+
+/** Force the current document to require an explicit save (recovery/fail-safe paths). */
+export const markProjectUnsaved = (): void => {
+  useProjectStore.setState({ savedDocument: null });
 };
 
 /** Reactive: are there unsaved edits since the last save/load? */
 export const useIsDirty = (): boolean => {
   const documentDirty = useProjectStore((s) =>
-    s.savedDocument === null ? false : !docEqual(partializeDoc(s), s.savedDocument),
+    s.savedDocument === null ? true : !docEqual(partializeDoc(s), s.savedDocument),
   );
   const savedAssetsFingerprint = useProjectStore((s) => s.savedAssetsFingerprint);
   const currentAssetsFingerprint = useMediaStore((s) => assetsFingerprint(s.assets));
@@ -1211,7 +1370,7 @@ export const useIsDirty = (): boolean => {
 export const isProjectDirty = (): boolean => {
   const state = useProjectStore.getState();
   const documentDirty =
-    state.savedDocument !== null &&
+    state.savedDocument === null ||
     !docEqual(partializeDoc(state), state.savedDocument);
   return (
     documentDirty ||

@@ -3,12 +3,11 @@ import { Target } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { formatTimecode } from '../../lib/media';
-import { clipDuration } from '../../lib/timeline';
 import {
-  PREF_SKIP_AUTO_CLIP_CONFIRM,
-  getBoolPref,
-  setBoolPref,
-} from '../../lib/preferences';
+  clipDuration,
+  sourceTimeAtTimelineTime,
+  timelineTimeAtSourceTime,
+} from '../../lib/timeline';
 import { ConfirmDialog } from '../Common/ConfirmDialog';
 import type { MediaAsset } from '../../lib/types';
 import styles from './KillMarkerSection.module.css';
@@ -46,28 +45,36 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
 
   const jumpToMarker = (markerId: string, time: number) => {
     selectMarker(markerId);
-    // Find a clip on the video track that contains this asset and seek to it.
-    const videoTrackId = tracks.find((t) => t.kind === 'video')?.id;
+    // Find a clip on any visible video track that contains this asset.
+    const visibleVideoTrackIds = new Set(
+      tracks
+        .filter((track) => track.kind === 'video' && !track.hidden)
+        .map((track) => track.id),
+    );
     const targetClip = clips
       .filter(
         (c) =>
-          c.trackId === videoTrackId &&
+          visibleVideoTrackIds.has(c.trackId) &&
           c.assetId === asset.id &&
           time >= c.trimStart - 1e-6 &&
           time <= c.trimEnd + 1e-6,
       )
       .sort((a, b) => a.start - b.start)[0];
     if (targetClip) {
-      setPlayhead(targetClip.start + (time - targetClip.trimStart));
+      setPlayhead(timelineTimeAtSourceTime(targetClip, time));
     }
   };
 
   const handleAddAtPlayhead = () => {
     // Determine source time from playhead by inverting the active clip mapping.
-    const videoTrackId = tracks.find((t) => t.kind === 'video')?.id;
-    if (!videoTrackId) return;
+    const visibleVideoTrackIds = new Set(
+      tracks
+        .filter((track) => track.kind === 'video' && !track.hidden)
+        .map((track) => track.id),
+    );
+    if (visibleVideoTrackIds.size === 0) return;
     const activeClip = clips.find((c) => {
-      if (c.trackId !== videoTrackId) return false;
+      if (!visibleVideoTrackIds.has(c.trackId)) return false;
       if (c.assetId !== asset.id) return false;
       const end = c.start + clipDuration(c);
       return playhead >= c.start - 1e-6 && playhead < end - 1e-6;
@@ -77,19 +84,26 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
       // Convert timeline time → source time: multiply the timeline offset by the
       // clip's playback speed (a 2× clip covers 2 source-seconds per timeline-
       // second). Mirrors extractCurrentRange / jumpToAdjacentMarker in the store.
-      sourceTime = activeClip.trimStart + (playhead - activeClip.start) * (activeClip.speed ?? 1);
+      sourceTime = sourceTimeAtTimelineTime(activeClip, playhead);
     }
     addMarker(asset.id, sourceTime);
   };
 
   const beginAutoClip = () => {
     if (sortedMarkers.length === 0) return;
-    const skip = getBoolPref(PREF_SKIP_AUTO_CLIP_CONFIRM, false);
-    if (skip) {
-      runAutoClip();
-    } else {
-      setConfirmOpen(true);
+    const videoTrack = useProjectStore
+      .getState()
+      .tracks.find(
+        (track) =>
+          track.kind === 'video' &&
+          !track.hidden &&
+          !track.locked,
+      );
+    if (!videoTrack) {
+      setResultMessage('表示中の映像トラックのロックを解除してください');
+      return;
     }
+    setConfirmOpen(true);
   };
 
   const runAutoClip = () => {
@@ -107,8 +121,7 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
     window.setTimeout(() => setResultMessage(null), 2400);
   };
 
-  const handleConfirm = (rememberSkip: boolean) => {
-    if (rememberSkip) setBoolPref(PREF_SKIP_AUTO_CLIP_CONFIRM, true);
+  const handleConfirm = () => {
     setConfirmOpen(false);
     runAutoClip();
   };
@@ -132,10 +145,17 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
             <div
               key={m.id}
               className={`${styles.row} ${selectedMarkerId === m.id ? styles.selected : ''}`}
-              onClick={() => jumpToMarker(m.id, m.time)}
             >
-              <span className={styles.idx}>{idx + 1}</span>
-              <span className={styles.time}>{formatTimecode(m.time)}</span>
+              <button
+                type="button"
+                className={styles.rowSelect}
+                onClick={() => jumpToMarker(m.id, m.time)}
+                aria-pressed={selectedMarkerId === m.id}
+                aria-label={`マーカー${idx + 1}、${formatTimecode(m.time)}へ移動`}
+              >
+                <span className={styles.idx}>{idx + 1}</span>
+                <span className={styles.time}>{formatTimecode(m.time)}</span>
+              </button>
               <button
                 type="button"
                 className={styles.removeBtn}
@@ -201,7 +221,6 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
           message={`元クリップ (${asset.name}) を削除して、${sortedMarkers.length}本のキルクリップに置き換えます。よろしいですか？`}
           confirmLabel="生成する"
           cancelLabel="キャンセル"
-          rememberLabel="次回以降この確認を表示しない"
           variant="destructive"
           onConfirm={handleConfirm}
           onCancel={() => setConfirmOpen(false)}
@@ -231,6 +250,8 @@ function RollSlider({ label, value, onChange, min, max }: RollSliderProps) {
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
         className={styles.rollSlider}
+        aria-label={label}
+        aria-valuetext={`${value.toFixed(1)}秒`}
       />
       <span className={styles.rollValue}>{value.toFixed(1)}s</span>
     </div>

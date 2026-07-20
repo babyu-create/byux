@@ -2,9 +2,9 @@
   "name": "highlight-maker",
   "productName": "Byux",
   "private": true,
-  "version": "1.0.17",
+  "version": "1.0.20",
   "license": "MIT",
-  "description": "FPSキル集編集に特化したシンプルな動画エディタ",
+  "description": "迷わず使えて、長い動画も軽く扱えるデスクトップ動画エディタ",
   "homepage": "https://github.com/babyu-create/byux",
   "repository": {
     "type": "git",
@@ -67,6 +67,7 @@
     "eslint": "^10.2.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
+    "ffmpeg-static": "^5.3.0",
     "globals": "^17.5.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
@@ -84,6 +85,20 @@
       "dist/**/*",
       "electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/ffmpeg-static",
+        "to": "ffmpeg",
+        "filter": [
+          "ffmpeg",
+          "ffmpeg.exe",
+          "ffmpeg.exe.LICENSE",
+          "ffmpeg.exe.README",
+          "LICENSE",
+          "README.md"
+        ]
+      }
     ],
     "directories": {
       "output": "release",

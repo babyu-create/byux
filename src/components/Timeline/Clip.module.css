@@ -17,6 +17,11 @@
   contain: layout style;
 }
 
+.clip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* Driven by JS state (.dragging), not CSS :active — :active fires for ANY
    mouse button, which would show a "grabbing" cursor on a right-click too. */
 .dragging {
@@ -72,6 +77,12 @@
 
 .handleEnd {
   background: linear-gradient(to left, rgba(0, 0, 0, 0.18), transparent);
+}
+
+.handleStart:focus-visible,
+.handleEnd:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -1px;
 }
 
 .handleStart::before,

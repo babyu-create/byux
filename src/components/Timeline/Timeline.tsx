@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useProjectStore, useTimelineDuration } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
-import { clipDuration, timeToPx } from '../../lib/timeline';
+import { clipDuration, sourceTimeAtTimelineTime, timeToPx } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
 import { matchAction } from '../../lib/keybindings';
 import type { MediaAsset } from '../../lib/types';
@@ -11,6 +11,10 @@ import { TrackHeader } from './TrackHeader';
 import { Playhead } from './Playhead';
 import { SnapGuide } from './SnapGuide';
 import { TimelineToolbar } from './TimelineToolbar';
+import {
+  removeSelectedWithFeedback,
+  splitSelectedWithFeedback,
+} from './timelineCommands';
 import { TimelineScrollProvider } from '../../hooks/useTimelineAutoScroll';
 import styles from './Timeline.module.css';
 
@@ -38,8 +42,6 @@ export function Timeline() {
   // This prevents all of Timeline from re-rendering on every scrub frame.
   const zoom = useProjectStore((s) => s.zoom);
   const clearSelection = useProjectStore((s) => s.clearSelection);
-  const removeSelectedClips = useProjectStore((s) => s.removeSelectedClips);
-  const splitSelected = useProjectStore((s) => s.splitSelectedAtPlayhead);
   const zoomIn = useProjectStore((s) => s.zoomIn);
   const zoomOut = useProjectStore((s) => s.zoomOut);
 
@@ -64,14 +66,27 @@ export function Timeline() {
   const trackAreaRef = useRef<HTMLDivElement>(null);
 
   // Stable callbacks so the keydown effect doesn't re-register on every render
-  const stableRemoveSelected = useCallback(() => removeSelectedClips(), [removeSelectedClips]);
-  const stableSplitSelected = useCallback(() => splitSelected(), [splitSelected]);
+  const stableRemoveSelected = useCallback(
+    () => removeSelectedWithFeedback(),
+    [],
+  );
+  const stableSplitSelected = useCallback(
+    () => splitSelectedWithFeedback(),
+    [],
+  );
   const stableZoomIn = useCallback(() => zoomIn(), [zoomIn]);
   const stableZoomOut = useCallback(() => zoomOut(), [zoomOut]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      const target = e.target instanceof Element ? e.target : null;
+      const isInsideClip = Boolean(target?.closest('[data-timeline-clip="true"]'));
+      if (
+        target?.closest('input, textarea, select, [contenteditable="true"]') ||
+        (!isInsideClip &&
+          target?.closest('button, [role="button"], [role="slider"], [role="menuitem"]'))
+      ) {
         return;
       }
       const action = matchAction(e);
@@ -80,11 +95,15 @@ export function Timeline() {
 
       // Helpers
       const findVideoActiveClip = () => {
-        const trackId = state.tracks.find((t) => t.kind === 'video')?.id;
-        if (!trackId) return null;
+        const visibleVideoTrackIds = new Set(
+          state.tracks
+            .filter((track) => track.kind === 'video' && !track.hidden)
+            .map((track) => track.id),
+        );
+        if (visibleVideoTrackIds.size === 0) return null;
         return (
           state.clips.find((c) => {
-            if (c.trackId !== trackId) return false;
+            if (!visibleVideoTrackIds.has(c.trackId)) return false;
             const end = c.start + clipDuration(c);
             return state.playhead >= c.start - 1e-6 && state.playhead < end - 1e-6;
           }) ?? null
@@ -94,7 +113,20 @@ export function Timeline() {
       switch (action) {
         case 'playback.toggle':
           e.preventDefault();
-          state.togglePlay();
+          if (
+            state.clips.some((clip) =>
+              state.tracks.some(
+                (track) =>
+                  track.id === clip.trackId &&
+                  (track.kind === 'video' || track.kind === 'overlay') &&
+                  !track.hidden,
+              ),
+            )
+          ) {
+            state.togglePlay();
+          } else {
+            state.showMessage('info', '動画をタイムラインに追加すると再生できます');
+          }
           return;
         case 'clip.split':
           if (state.selectedClipIds.length > 0) {
@@ -139,7 +171,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           state.addKillMarker(ac.assetId, sourceTime);
           state.showMessage('success', `キルマーカー @ ${formatTimecode(sourceTime)}`);
           return;
@@ -151,7 +183,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           const removed = state.removeNearestMarker(ac.assetId, sourceTime, 1.0);
           state.showMessage(
             removed ? 'success' : 'info',
@@ -174,7 +206,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           state.setIoIn(ac.assetId, sourceTime);
           state.showMessage('success', `開始 IN @ ${formatTimecode(sourceTime)}`);
           return;
@@ -186,7 +218,7 @@ export function Timeline() {
             state.showMessage('error', 'クリップの上に再生ヘッドを置いてください');
             return;
           }
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           const wasPending = !!state.pendingIn;
           const id = state.setIoOut(ac.assetId, sourceTime);
           if (wasPending && id) {
@@ -205,7 +237,7 @@ export function Timeline() {
           e.preventDefault();
           const ac = findVideoActiveClip();
           if (!ac) return;
-          const sourceTime = ac.trimStart + (state.playhead - ac.start) * (ac.speed ?? 1);
+          const sourceTime = sourceTimeAtTimelineTime(ac, state.playhead);
           const removed = state.removeNearestRange(ac.assetId, sourceTime);
           state.showMessage(
             removed ? 'success' : 'info',

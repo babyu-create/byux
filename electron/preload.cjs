@@ -1,9 +1,14 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const updaterListeners = new Set();
+const nativeExportListeners = new Set();
 
 ipcRenderer.on('updater', (_event, payload) => {
   for (const cb of updaterListeners) cb(payload);
+});
+
+ipcRenderer.on('export:native-event', (_event, payload) => {
+  for (const cb of nativeExportListeners) cb(payload);
 });
 
 // Read via sync IPC rather than `require('../package.json')` — the sandboxed
@@ -21,11 +26,32 @@ contextBridge.exposeInMainWorld('fce', {
   setDirty(dirty) {
     ipcRenderer.send('app:dirty', Boolean(dirty));
   },
+  onSaveBeforeClose(cb) {
+    const listener = (_event, payload) => cb(payload?.id);
+    ipcRenderer.on('app:save-before-close', listener);
+    return () => ipcRenderer.removeListener('app:save-before-close', listener);
+  },
+  completeSaveBeforeClose(id, success) {
+    ipcRenderer.send('app:save-before-close-result', {
+      id,
+      success: Boolean(success),
+    });
+  },
   getPathForFile(file) {
-    return webUtils.getPathForFile(file);
+    const filePath = webUtils.getPathForFile(file);
+    if (!filePath) return '';
+    const approved = ipcRenderer.sendSync('media:authorize-file-sync', {
+      path: filePath,
+      name: file?.name,
+      size: file?.size,
+    });
+    return approved === true ? filePath : '';
   },
   registerMediaFile(ref) {
     return ipcRenderer.invoke('media:register-file', ref);
+  },
+  createPreviewProxy(sourceToken) {
+    return ipcRenderer.invoke('media:create-preview-proxy', sourceToken);
   },
   readMediaFileChunk(token, offset, length) {
     return ipcRenderer.invoke('media:read-chunk', token, offset, length);
@@ -34,6 +60,11 @@ contextBridge.exposeInMainWorld('fce', {
     return ipcRenderer.invoke('media:release-file', token);
   },
   project: {
+    newSession(detachOnFailure = false) {
+      return ipcRenderer.invoke('project:new-session', {
+        detachOnFailure: Boolean(detachOnFailure),
+      });
+    },
     openDialog() {
       return ipcRenderer.invoke('project:open-dialog');
     },
@@ -46,8 +77,18 @@ contextBridge.exposeInMainWorld('fce', {
     autosave(text) {
       return ipcRenderer.invoke('project:autosave', { text });
     },
+    commitSave(savedText, autosaveGeneration, sessionId) {
+      return ipcRenderer.invoke('project:commit-save', {
+        savedText,
+        autosaveGeneration,
+        sessionId,
+      });
+    },
     checkRecovery() {
       return ipcRenderer.invoke('project:check-recovery');
+    },
+    confirmRecovery(recoveryId) {
+      return ipcRenderer.invoke('project:confirm-recovery', recoveryId);
     },
     listRecent() {
       return ipcRenderer.invoke('project:list-recent');
@@ -60,8 +101,21 @@ contextBridge.exposeInMainWorld('fce', {
     },
   },
   export: {
+    getNativeCapabilities() {
+      return ipcRenderer.invoke('export:native-capabilities');
+    },
+    startNative(token, request) {
+      return ipcRenderer.invoke('export:start-native', token, request);
+    },
+    onNativeEvent(cb) {
+      nativeExportListeners.add(cb);
+      return () => nativeExportListeners.delete(cb);
+    },
     chooseOutput(payload) {
       return ipcRenderer.invoke('export:choose-output', payload);
+    },
+    setSize(token, totalBytes) {
+      return ipcRenderer.invoke('export:set-size', token, totalBytes);
     },
     writeChunk(token, offset, chunk, final) {
       return ipcRenderer.invoke('export:write-chunk', token, offset, chunk, final);

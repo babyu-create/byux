@@ -12,6 +12,7 @@
 // No dependency on the React store or the DOM — this is pure mapping logic so it
 // can be unit-tested and reused identically by both render paths (like
 // clipTransform / colorGrade / speedRamp / transitions).
+import { timelineTimeAtSourceTime } from './timeline';
 
 /**
  * Project-level BGM auto-ducking setting. All numeric fields are authored in
@@ -207,6 +208,7 @@ export interface DuckSegment {
   trimStart: number;
   trimEnd: number;
   speed?: number;
+  speedRamp?: import('./speedRamp').SpeedRamp;
   /** Output-timeline start (seconds). */
   start: number;
 }
@@ -216,13 +218,20 @@ export function buildDuckPoints(
   segments: readonly DuckSegment[],
 ): number[] {
   const points: number[] = [];
+  const markersByAsset = new Map<string, DuckSourceMarker[]>();
+  for (const marker of markers) {
+    if (!Number.isFinite(marker.time)) continue;
+    const existing = markersByAsset.get(marker.assetId);
+    if (existing) existing.push(marker);
+    else markersByAsset.set(marker.assetId, [marker]);
+  }
   for (const seg of segments) {
-    const speed = seg.speed && seg.speed > 0 ? seg.speed : 1;
-    for (const m of markers) {
-      if (m.assetId !== seg.assetId) continue;
-      if (!Number.isFinite(m.time)) continue;
+    for (const m of markersByAsset.get(seg.assetId) ?? []) {
       if (m.time < seg.trimStart - 1e-6 || m.time > seg.trimEnd + 1e-6) continue;
-      const outT = seg.start + (m.time - seg.trimStart) / speed;
+      const outT = timelineTimeAtSourceTime(
+        { ...seg, start: seg.start },
+        m.time,
+      );
       if (Number.isFinite(outT) && outT >= 0) points.push(outT);
     }
   }

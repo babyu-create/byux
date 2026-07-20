@@ -36,6 +36,9 @@
 .banner[data-state='downloaded'] {
   border-color: var(--success);
 }
+.banner[data-state='error'] {
+  border-color: var(--danger);
+}
 
 .icon {
   font-size: 20px;
@@ -112,4 +115,14 @@
 .btnSecondary:hover {
   background: var(--bg-panel);
   color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .banner {
+    animation: none;
+  }
+
+  .progressFill {
+    transition: none;
+  }
 }

@@ -17,18 +17,19 @@
   /* Text */
   --text: #1d1d1f;
   --text-dim: #6e6e73;
-  --text-muted: #a1a1a6;
+  --text-muted: #66666c;
   --text-inverse: #ffffff;
 
   /* Accent (brand azure — matches the app icon #01ADFD) */
-  --accent: #0490d8;
-  --accent-hover: #0379b8;
+  --accent: #0077b6;
+  --accent-hover: #00659b;
   --accent-soft: rgba(10, 174, 253, 0.12);
 
   /* Semantic */
-  --success: #34c759;
-  --warning: #ff9500;
-  --info: #5b9dff;
+  --success: #16823b;
+  --warning: #995a00;
+  --info: #1264c0;
+  --danger: #b42318;
 
   /* Clip colors per track */
   --clip-video: #5b9dff;
@@ -84,12 +85,13 @@
 
   --text: #ededed;
   --text-dim: #a2a2a2;
-  --text-muted: #6c6c6c;
+  --text-muted: #929292;
   --text-inverse: #0a0a0a;
 
   --accent: #0aaefd;
   --accent-hover: #3fc0ff;
   --accent-soft: rgba(10, 174, 253, 0.18);
+  --danger: #ff6b62;
 
   --clip-video: #5b9dff;
   --clip-video-bg: rgba(91, 157, 255, 0.22);
@@ -125,7 +127,7 @@
 
   --text: #f4eaff;
   --text-dim: #b8a8d8;
-  --text-muted: #7a6a98;
+  --text-muted: #9686b2;
   --text-inverse: #0a0014;
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.6);
@@ -215,4 +217,13 @@
 
 @media (prefers-reduced-motion: reduce) {
   :root[data-rgb-cycle] { animation: none; }
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

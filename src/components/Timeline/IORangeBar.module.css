@@ -21,6 +21,11 @@
   border-bottom-style: solid;
 }
 
+.root:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
 .bracketLeft,
 .bracketRight {
   position: absolute;

@@ -1,6 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import { useMediaStore, useSelectedAsset } from '../../stores/mediaStore';
-import { useProjectStore, useTimelineDuration } from '../../stores/projectStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { clipDuration } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
 import type { Clip, MediaAsset } from '../../lib/types';
@@ -67,6 +73,74 @@ const HUD_PRESET_TITLES: Record<HudPreset, string> = {
 };
 const HUD_PRESET_ORDER: HudPreset[] = ['valorant', 'cs2', 'apex', 'none'];
 
+interface PreviewGainGraph {
+  source: MediaElementAudioSourceNode;
+  gain: GainNode;
+  cleanupTimer: number | null;
+}
+
+let previewAudioContext: AudioContext | null = null;
+const previewGainGraphs = new WeakMap<HTMLMediaElement, PreviewGainGraph>();
+
+/**
+ * Route media through Web Audio so the editor's 0–200% range is audible in
+ * preview. HTMLMediaElement.volume itself stops at 100%.
+ */
+function useMediaElementGain(
+  ref: RefObject<HTMLMediaElement | null>,
+  gainValue: number,
+  muted: boolean,
+  isPlaying: boolean,
+) {
+  useEffect(() => {
+    const media = ref.current;
+    if (!media) return;
+    let graph: PreviewGainGraph | null = null;
+    try {
+      previewAudioContext ??= new window.AudioContext();
+      graph = previewGainGraphs.get(media) ?? null;
+      if (!graph) {
+        const source = previewAudioContext.createMediaElementSource(media);
+        const gain = previewAudioContext.createGain();
+        source.connect(gain).connect(previewAudioContext.destination);
+        graph = { source, gain, cleanupTimer: null };
+        previewGainGraphs.set(media, graph);
+      }
+      if (graph.cleanupTimer !== null) {
+        window.clearTimeout(graph.cleanupTimer);
+        graph.cleanupTimer = null;
+      }
+      media.volume = 1;
+      media.muted = false;
+      graph.gain.gain.setValueAtTime(
+        muted ? 0 : Math.max(0, Math.min(2, gainValue)),
+        previewAudioContext.currentTime,
+      );
+      if (isPlaying && previewAudioContext.state === 'suspended') {
+        void previewAudioContext.resume().catch(() => {});
+      }
+    } catch {
+      media.volume = Math.max(0, Math.min(1, gainValue));
+      media.muted = muted;
+    }
+
+    return () => {
+      if (!graph) return;
+      graph.gain.gain.value = 0;
+      graph.cleanupTimer = window.setTimeout(() => {
+        // StrictMode immediately reconnects a still-mounted element. Release
+        // nodes only after a real DOM removal.
+        if (!media.isConnected) {
+          graph?.source.disconnect();
+          graph?.gain.disconnect();
+          previewGainGraphs.delete(media);
+        }
+        if (graph) graph.cleanupTimer = null;
+      }, 0);
+    };
+  }, [gainValue, isPlaying, muted, ref]);
+}
+
 interface PreviewAudioLayerProps {
   clip: Clip;
   asset: MediaAsset;
@@ -85,27 +159,38 @@ function PreviewAudioLayer({
   gain,
 }: PreviewAudioLayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const rampSampler = useMemo(() => rampSamplerForClip(clip), [clip]);
+  const volume = clip.volume ?? 1;
+  useMediaElementGain(
+    audioRef,
+    volume * gain,
+    trackMuted || (clip.muted ?? false) || volume === 0,
+    isPlaying,
+  );
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
     const speed = clip.speed ?? 1;
-    const target = clip.trimStart + (playhead - clip.start) * speed;
+    const localTime = playhead - clip.start;
+    const target = rampSampler
+      ? rampSampler.sourceTimeAtLocalTime(localTime)
+      : clip.trimStart + localTime * speed;
     const clamped = Math.max(0, Math.min(asset.duration, target));
     const drift = Math.abs(audio.currentTime - clamped);
     if (drift > (isPlaying ? 0.35 : 1 / 30)) {
       audio.currentTime = clamped;
     }
-    audio.playbackRate = Math.max(0.0625, Math.min(4, speed));
-    const volume = clip.volume ?? 1;
-    audio.volume = Math.max(0, Math.min(1, volume * gain));
-    audio.muted = trackMuted || (clip.muted ?? false) || volume === 0;
+    const instantaneousSpeed = rampSampler
+      ? rampSampler.speedFactorAtLocalTime(localTime)
+      : speed;
+    audio.playbackRate = Math.max(0.0625, Math.min(4, instantaneousSpeed));
     if (isPlaying) {
       audio.play().catch(() => {});
     } else {
       audio.pause();
     }
-  }, [asset.duration, clip, gain, isPlaying, playhead, trackMuted]);
+  }, [asset.duration, clip, gain, isPlaying, playhead, rampSampler, trackMuted]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -123,6 +208,157 @@ function PreviewAudioLayer({
   );
 }
 
+interface PreviewVisualLayerProps {
+  clip: Clip;
+  asset: MediaAsset;
+  playhead: number;
+  isPlaying: boolean;
+  trackMuted: boolean;
+  aspectRatio: '16:9' | '9:16';
+  verticalReframe: number;
+  hudPreset: HudPreset;
+  onTogglePlay: () => void;
+}
+
+/**
+ * A synchronized upper video/overlay lane. Keeping each visible lane as its
+ * own media element makes imported multi-track projects match native export
+ * instead of rendering layers that the preview never showed.
+ */
+function PreviewVisualLayer({
+  clip,
+  asset,
+  playhead,
+  isPlaying,
+  trackMuted,
+  aspectRatio,
+  verticalReframe,
+  hudPreset,
+  onTogglePlay,
+}: PreviewVisualLayerProps) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const rampSampler = useMemo(() => rampSamplerForClip(clip), [clip]);
+  const volume = clip.volume ?? 1;
+  useMediaElementGain(
+    videoRef,
+    volume,
+    trackMuted || (clip.muted ?? false) || volume === 0,
+    isPlaying,
+  );
+  const localTime = playhead - clip.start;
+  const instantaneousSpeed = rampSampler
+    ? rampSampler.speedFactorAtLocalTime(localTime)
+    : (clip.speed ?? 1);
+  const sampled = sampleClipTransform(clip.transform, localTime);
+  const transition = transitionModulationAt(
+    clip.transitionIn,
+    clip.transitionOut,
+    localTime,
+    clipDuration(clip),
+  );
+  let effectOpacity = 1;
+  const fadeIn = clip.effects.find((effect) => effect.type === 'fade-in');
+  const fadeOut = clip.effects.find((effect) => effect.type === 'fade-out');
+  if (fadeIn) {
+    const duration = Math.max(0.05, fadeIn.duration ?? 0.4);
+    effectOpacity *= Math.max(0, Math.min(1, localTime / duration));
+  }
+  if (fadeOut) {
+    const duration = Math.max(0.05, fadeOut.duration ?? 0.4);
+    const remaining = clipDuration(clip) - localTime;
+    effectOpacity *= Math.max(0, Math.min(1, remaining / duration));
+  }
+  const composed = {
+    x: sampled.x + transition.dx,
+    y: sampled.y + transition.dy,
+    scale: sampled.scale * transition.scale,
+    rotation: sampled.rotation,
+    opacity: sampled.opacity * transition.opacity * effectOpacity,
+  };
+  const filter = colorGradeFilter(clip.colorGrade);
+  const motionBlur = clip.effects.find(
+    (effect) => effect.type === 'motion-blur',
+  );
+  const blurStrength = motionBlur
+    ? shapeStrength(
+        Math.max(0, Math.min(100, motionBlur.intensity ?? 40)) / 100,
+      ) * Math.max(0.5, Math.min(2, clip.speed ?? 1))
+    : 0;
+  const isVertical = aspectRatio === '9:16';
+  const reframePosition =
+    `${(((verticalReframe + 1) / 2) * 100).toFixed(1)}% 50%`;
+  const videoStyle: React.CSSProperties | undefined = isVertical
+    ? { objectFit: 'cover', objectPosition: reframePosition }
+    : clip.stretchToFill
+      ? { objectFit: 'fill' }
+      : undefined;
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const target = rampSampler
+      ? rampSampler.sourceTimeAtLocalTime(localTime)
+      : clip.trimStart + localTime * (clip.speed ?? 1);
+    const clamped = Math.max(0, Math.min(asset.duration, target));
+    if (Math.abs(video.currentTime - clamped) > (isPlaying ? 0.35 : 1 / 60)) {
+      video.currentTime = clamped;
+    }
+    video.playbackRate = Math.max(
+      0.0625,
+      Math.min(4, instantaneousSpeed),
+    );
+    if (isPlaying) {
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
+  }, [
+    asset.duration,
+    clip,
+    instantaneousSpeed,
+    isPlaying,
+    localTime,
+    rampSampler,
+    trackMuted,
+  ]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    return () => video?.pause();
+  }, []);
+
+  return (
+    <div
+      className={styles.footageLayer}
+      style={{
+        transform: transformToCss(composed),
+        opacity: Math.max(0, Math.min(1, composed.opacity)),
+        ...(filter === 'none' ? null : { filter }),
+      }}
+    >
+      <video
+        ref={videoRef}
+        src={asset.url}
+        crossOrigin="anonymous"
+        className={styles.video}
+        style={videoStyle}
+        playsInline
+        onClick={onTogglePlay}
+      />
+      <MotionBlurCanvas
+        videoRef={videoRef}
+        isPlaying={isPlaying}
+        active={blurStrength > 0}
+        strength={blurStrength}
+        hudPreset={hudPreset}
+        hudMaskStrength={hudPreset === 'none' ? 0 : 1}
+        aspect={isVertical ? 9 / 16 : 16 / 9}
+        coverPosition={isVertical ? reframePosition : undefined}
+      />
+    </div>
+  );
+}
+
 export function Preview() {
   const fallbackAsset = useSelectedAsset();
   const assets = useMediaStore((s) => s.assets);
@@ -131,28 +367,60 @@ export function Preview() {
   const playhead = useProjectStore((s) => s.playhead);
   const setPlayhead = useProjectStore((s) => s.setPlayhead);
   const isPlaying = useProjectStore((s) => s.isPlaying);
-  const setIsPlaying = useProjectStore((s) => s.setIsPlaying);
   const togglePlay = useProjectStore((s) => s.togglePlay);
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
   const verticalReframe = useProjectStore((s) => s.verticalReframe);
   const setVerticalReframe = useProjectStore((s) => s.setVerticalReframe);
   const markers = useProjectStore((s) => s.markers);
   const audioDucking = useProjectStore((s) => s.audioDucking);
-  const totalDuration = useTimelineDuration();
-
   const videoTrack = useMemo(
-    () => tracks.find((t) => t.kind === 'video') ?? null,
-    [tracks],
+    () =>
+      tracks.find(
+        (track) =>
+          track.kind === 'video' &&
+          !track.hidden &&
+          clips.some((clip) => clip.trackId === track.id),
+      ) ??
+      null,
+    [clips, tracks],
   );
   const videoTrackId = videoTrack?.id ?? null;
-  const videoTrackHidden = videoTrack?.hidden ?? false;
+  const videoTrackHidden =
+    !videoTrack &&
+    tracks.some((track) => track.kind === 'video' && track.hidden);
   const videoTrackMuted = videoTrack?.muted ?? false;
 
   const audioTracks = useMemo(
-    () => tracks.filter((track) => track.kind === 'audio'),
+    () => tracks.filter((track) => track.kind === 'audio' && !track.hidden),
     [tracks],
   );
-  const bgmTrackId = audioTracks[0]?.id ?? null;
+  const visibleVisualTrackIds = useMemo(
+    () =>
+      new Set(
+        tracks
+          .filter(
+            (track) =>
+              !track.hidden &&
+              (track.kind === 'video' || track.kind === 'overlay'),
+          )
+          .map((track) => track.id),
+      ),
+    [tracks],
+  );
+  const visualDuration = useMemo(
+    () =>
+      clips
+        .filter((clip) => visibleVisualTrackIds.has(clip.trackId))
+        .reduce(
+          (end, clip) => Math.max(end, clip.start + clipDuration(clip)),
+          0,
+        ),
+    [clips, visibleVisualTrackIds],
+  );
+  const bgmTrackId = useMemo(
+    () => tracks.find((track) => track.kind === 'audio')?.id ?? null,
+    [tracks],
+  );
 
   const activeClip = useMemo<Clip | null>(() => {
     if (!videoTrackId) return null;
@@ -176,6 +444,41 @@ export function Preview() {
   const activeAsset = activeClip ? (assetMap[activeClip.assetId] ?? null) : null;
   const showFallback = clips.length === 0 && fallbackAsset?.kind === 'video';
   const displayAsset: MediaAsset | null = activeAsset ?? (showFallback ? fallbackAsset : null);
+
+  const activeUpperVisualLayers = useMemo(() => {
+    const visualTracks = tracks.filter(
+      (track) =>
+        !track.hidden &&
+        (track.kind === 'video' || track.kind === 'overlay') &&
+        track.id !== videoTrackId,
+    );
+    return visualTracks.flatMap((track) => {
+      const trackClips = clips
+        .filter((clip) => clip.trackId === track.id)
+        .sort((a, b) => a.start - b.start);
+      return trackClips.flatMap((clip, index) => {
+        const end = clip.start + clipDuration(clip);
+        const asset = assetMap[clip.assetId];
+        if (
+          playhead < clip.start - 1e-6 ||
+          playhead >= end - 1e-6 ||
+          !asset ||
+          asset.kind !== 'video'
+        ) {
+          return [];
+        }
+        return [{
+          track,
+          clip,
+          asset,
+          context: {
+            n: String(index + 1),
+            total: String(trackClips.length),
+          },
+        }];
+      });
+    });
+  }, [assetMap, clips, playhead, tracks, videoTrackId]);
 
   // One active clip per audio lane can play concurrently (BGM + SE + ...).
   const activeAudioLayers = useMemo(() => {
@@ -208,6 +511,7 @@ export function Preview() {
         trimStart: c.trimStart,
         trimEnd: c.trimEnd,
         speed: c.speed,
+        speedRamp: c.speedRamp,
         start: c.start,
       }));
     return buildDuckPoints(markers, segments);
@@ -240,8 +544,7 @@ export function Preview() {
   );
   // Instantaneous playback speed at the playhead — equals clipSpeed for a
   // constant clip, or the ramped factor (× base speed) at this moment. Drives
-  // the speed badge and the motion-blur strength scaling so blur tracks the
-  // live speed (the export does the same per frame).
+  // playback and the speed badge.
   const instSpeed = useMemo(() => {
     if (!activeClip) return 1;
     if (!activeRampSampler) return clipSpeed;
@@ -279,11 +582,12 @@ export function Preview() {
   const motionBlurStrength = useMemo(() => {
     if (!motionBlur) return 0;
     const intensity = Math.max(0, Math.min(100, motionBlur.intensity ?? 40));
-    // Scale by the INSTANTANEOUS speed so a slow-mo→fast ramp visibly ramps the
-    // blur with it (the export bakes the same per-frame scaling).
-    const speedFactor = Math.max(0.5, Math.min(2, instSpeed));
+    // FFmpeg's temporal blend naturally spans more source motion as a ramp
+    // accelerates. Keep its authored tap weights stable across the clip and
+    // match that behavior here; the detected motion vector still grows.
+    const speedFactor = Math.max(0.5, Math.min(2, clipSpeed));
     return shapeStrength(intensity / 100) * speedFactor * previewBlurBoost;
-  }, [motionBlur, instSpeed, previewBlurBoost]);
+  }, [clipSpeed, motionBlur, previewBlurBoost]);
 
   // Build template context (e.g. {n}/{total} for kill counter)
   const overlayContext = useMemo<Record<string, string>>(() => {
@@ -367,6 +671,15 @@ export function Preview() {
   }, [activeClip?.colorGrade]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const mainVolume = activeClip?.volume ?? 1;
+  useMediaElementGain(
+    videoRef,
+    mainVolume,
+    videoTrackMuted ||
+      (activeClip?.muted ?? false) ||
+      mainVolume === 0,
+    isPlaying,
+  );
   const playingRef = useRef(isPlaying);
 
   useEffect(() => {
@@ -412,20 +725,47 @@ export function Preview() {
     }
   }, [playhead, activeClip, activeRampSampler, displayAsset, isPlaying]);
 
-  // Auto-pause when no clip available at playhead while playing.
+  // Preserve authored black gaps and upper-only intervals. When there is no
+  // base <video> to drive the clock, wall time advances the same continuous
+  // timeline that native export renders.
   useEffect(() => {
-    if (isPlaying && clips.length > 0 && !activeClip) {
-      // Seek forward to next clip if any
-      const nextClipStart = clips
-        .filter((c) => c.trackId === videoTrackId && c.start > playhead + 1e-6)
-        .sort((a, b) => a.start - b.start)[0]?.start;
-      if (nextClipStart !== undefined) {
-        setPlayhead(nextClipStart);
-      } else {
-        setIsPlaying(false);
+    if (!isPlaying || activeClip) return;
+    let rafId = 0;
+    let previous = performance.now();
+    const step = (now: number) => {
+      const elapsed = Math.max(0, Math.min(0.1, (now - previous) / 1000));
+      previous = now;
+      const state = useProjectStore.getState();
+      const visibleTrackIds = new Set(
+        state.tracks
+          .filter(
+            (track) =>
+              !track.hidden &&
+              (track.kind === 'video' || track.kind === 'overlay'),
+          )
+          .map((track) => track.id),
+      );
+      const visualEnd = state.clips
+        .filter((clip) => visibleTrackIds.has(clip.trackId))
+        .reduce(
+          (end, clip) => Math.max(end, clip.start + clipDuration(clip)),
+          0,
+        );
+      if (visualEnd <= 0) {
+        state.setIsPlaying(false);
+        return;
       }
-    }
-  }, [isPlaying, activeClip, clips, videoTrackId, playhead, setPlayhead, setIsPlaying]);
+      const next = Math.min(visualEnd, state.playhead + elapsed);
+      state.setPlayhead(next);
+      if (next >= visualEnd - 1e-6) {
+        state.setIsPlaying(false);
+        return;
+      }
+      rafId = requestAnimationFrame(step);
+    };
+    rafId = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(rafId);
+  }, [activeClip, isPlaying]);
 
   // Drive playback. Video element is the source of truth; playhead follows
   // its currentTime each animation frame, ensuring zero drift between the
@@ -449,16 +789,32 @@ export function Preview() {
       // a project reload that briefly clears tracks, leaving playback
       // pointed at a track that no longer exists.
       const liveVideoTrackId =
-        state.tracks.find((t) => t.kind === 'video')?.id ?? null;
+        state.tracks.find(
+          (track) =>
+            track.kind === 'video' &&
+            !track.hidden &&
+            state.clips.some((clip) => clip.trackId === track.id),
+        )?.id ?? null;
       if (!liveVideoTrackId) {
         state.setIsPlaying(false);
         return;
       }
 
-      const totalDur = state.clips.reduce(
-        (m, c) => Math.max(m, c.start + clipDuration(c)),
-        0,
+      const liveVisibleVisualIds = new Set(
+        state.tracks
+          .filter(
+            (track) =>
+              !track.hidden &&
+              (track.kind === 'video' || track.kind === 'overlay'),
+          )
+          .map((track) => track.id),
       );
+      const totalDur = state.clips
+        .filter((clip) => liveVisibleVisualIds.has(clip.trackId))
+        .reduce(
+          (m, c) => Math.max(m, c.start + clipDuration(c)),
+          0,
+        );
       if (totalDur === 0) {
         state.setIsPlaying(false);
         return;
@@ -481,22 +837,15 @@ export function Preview() {
           ? makeRampSampler(current.speedRamp, speed, current.trimStart, current.trimEnd)
           : null;
         if (localTime >= current.trimEnd - 1e-3) {
-          // Reached the end of this clip — advance to the next clip on the
-          // same track, or stop playback if none.
-          const next = state.clips
-            .filter(
-              (c) =>
-                c.trackId === liveVideoTrackId &&
-                c.start > current.start + 1e-6,
-            )
-            .sort((a, b) => a.start - b.start)[0];
-          if (next) {
-            state.setPlayhead(next.start);
-          } else {
-            state.setPlayhead(current.start + clipDuration(current));
+          // Hand the continuous clock to the gap/upper-only RAF. This keeps
+          // black gaps instead of jumping directly to the next base clip.
+          const end = current.start + clipDuration(current);
+          state.setPlayhead(end);
+          v.pause();
+          if (end >= totalDur - 1e-6) {
             state.setIsPlaying(false);
-            return;
           }
+          return;
         } else if (sampler) {
           // Ramped: map the playing video's SOURCE time → timeline-local time,
           // and set the instantaneous playback rate for the next frames.
@@ -513,18 +862,8 @@ export function Preview() {
           );
         }
       } else {
-        // Not in any clip — try to jump forward to the next one.
-        const next = state.clips
-          .filter(
-            (c) => c.trackId === liveVideoTrackId && c.start > state.playhead + 1e-6,
-          )
-          .sort((a, b) => a.start - b.start)[0];
-        if (next) {
-          state.setPlayhead(next.start);
-        } else {
-          state.setIsPlaying(false);
-          return;
-        }
+        // The wall-clock effect owns authored gaps.
+        return;
       }
 
       rafId = requestAnimationFrame(step);
@@ -534,7 +873,7 @@ export function Preview() {
       cancelAnimationFrame(rafId);
       video.pause();
     };
-  }, [isPlaying, videoTrackId]);
+  }, [activeClip?.id, isPlaying, videoTrackId]);
 
   // When the active asset changes mid-play, jump the video to the right local time.
   useEffect(() => {
@@ -563,26 +902,27 @@ export function Preview() {
     video.playbackRate = Math.max(0.0625, Math.min(4, instSpeed));
   }, [instSpeed, activeClip?.id]);
 
-  // Apply per-clip + per-track volume to the video element (game audio).
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    const clipMuted = activeClip?.muted ?? false;
-    const v = activeClip?.volume ?? 1;
-    video.volume = Math.max(0, Math.min(1, v));
-    video.muted = videoTrackMuted || clipMuted || v === 0;
-  }, [activeClip?.volume, activeClip?.muted, videoTrackMuted, activeClip?.id]);
-
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     setPlayhead(parseFloat(e.target.value));
   };
 
   const skip = (delta: number) => {
     const state = useProjectStore.getState();
-    const totalDur = state.clips.reduce(
-      (m, c) => Math.max(m, c.start + clipDuration(c)),
-      0,
+    const visibleIds = new Set(
+      state.tracks
+        .filter(
+          (track) =>
+            !track.hidden &&
+            (track.kind === 'video' || track.kind === 'overlay'),
+        )
+        .map((track) => track.id),
     );
+    const totalDur = state.clips
+      .filter((clip) => visibleIds.has(clip.trackId))
+      .reduce(
+        (m, c) => Math.max(m, c.start + clipDuration(c)),
+        0,
+      );
     setPlayhead(Math.max(0, Math.min(totalDur || displayAsset?.duration || 0, playhead + delta)));
   };
 
@@ -590,7 +930,11 @@ export function Preview() {
     useProjectStore.setState({ aspectRatio: next });
   };
 
-  const totalForDisplay = totalDuration > 0 ? totalDuration : (displayAsset?.duration ?? 0);
+  const totalForDisplay =
+    visualDuration > 0 ? visualDuration : (displayAsset?.duration ?? 0);
+  const canPlayTimeline = clips.some((clip) =>
+    visibleVisualTrackIds.has(clip.trackId),
+  );
   const scrubMax = totalForDisplay || 0;
   const scrubValue = Math.min(playhead, scrubMax);
 
@@ -602,7 +946,7 @@ export function Preview() {
             <Clapperboard size={44} strokeWidth={1.4} aria-hidden="true" />
           </div>
           <div className={styles.emptyText}>左パネルから動画を追加してください</div>
-          <div className={styles.emptyHint}>VALORANT等のFPS録画ファイル (.mp4) に対応</div>
+          <div className={styles.emptyHint}>MP4 / MOV / AVI / MKV などに対応</div>
         </div>
       </div>
     );
@@ -610,7 +954,7 @@ export function Preview() {
 
   const showVideo = !!displayAsset && !videoTrackHidden;
   const inGap = clips.length > 0 && !activeClip;
-  const isHidden = videoTrackHidden && !!displayAsset;
+  const isHidden = videoTrackHidden;
 
   return (
     <div className={styles.root}>
@@ -620,6 +964,7 @@ export function Preview() {
             type="button"
             className={`${styles.aspectBtn} ${aspectRatio === '16:9' ? styles.aspectActive : ''}`}
             onClick={() => setAspect('16:9')}
+            aria-pressed={aspectRatio === '16:9'}
           >
             16:9
           </button>
@@ -627,6 +972,7 @@ export function Preview() {
             type="button"
             className={`${styles.aspectBtn} ${aspectRatio === '9:16' ? styles.aspectActive : ''}`}
             onClick={() => setAspect('9:16')}
+            aria-pressed={aspectRatio === '9:16'}
           >
             9:16
           </button>
@@ -725,75 +1071,44 @@ export function Preview() {
       <div className={styles.stage}>
         <div className={styles.frame} data-aspect={aspectRatio}>
           {showVideo ? (
-            <>
-              <div
-                className={styles.footageLayer}
-                style={
-                  footageTransform || footageFilter
-                    ? {
-                        ...(footageTransform
-                          ? {
-                              transform: footageTransform.transform,
-                              opacity: footageTransform.opacity,
-                            }
-                          : null),
-                        ...(footageFilter ? { filter: footageFilter } : null),
-                      }
-                    : undefined
-                }
-              >
-                <video
-                  key={displayAsset?.id}
-                  ref={videoRef}
-                  src={displayAsset?.url}
-                  crossOrigin="anonymous"
-                  className={styles.video}
-                  style={videoStyle}
-                  playsInline
-                  muted={videoTrackMuted}
-                  onClick={togglePlay}
-                />
-                <MotionBlurCanvas
-                  videoRef={videoRef}
-                  isPlaying={isPlaying}
-                  active={motionBlur !== null && motionBlurStrength > 0}
-                  strength={motionBlurStrength}
-                  hudPreset={hudPreset}
-                  hudMaskStrength={hudPreset === 'none' ? 0 : 1}
-                  aspect={aspectRatio === '9:16' ? 9 / 16 : 16 / 9}
-                  coverPosition={isVertical ? reframePosition : undefined}
-                />
-              </div>
-              {fadeOpacity > 0 ? (
-                <div
-                  className={styles.fadeOverlay}
-                  style={{ opacity: fadeOpacity }}
-                  aria-hidden="true"
-                />
-              ) : null}
-              {activeRampSampler ? (
-                <div className={styles.speedBadge} aria-hidden="true">
-                  {`${instSpeed.toFixed(1)}×`}
-                </div>
-              ) : clipSpeed !== 1 ? (
-                <div className={styles.speedBadge} aria-hidden="true">
-                  {clipSpeed === 0.25
-                    ? '¼×'
-                    : clipSpeed === 0.5
-                      ? '½×'
-                      : clipSpeed === 0.75
-                        ? '¾×'
-                        : `${clipSpeed}×`}
-                </div>
-              ) : null}
-              {activeClip?.overlays && activeClip.overlays.length > 0 ? (
-                <OverlayLayer
-                  overlays={activeClip.overlays}
-                  contextValues={overlayContext}
-                  localTime={playhead - activeClip.start}
-                />
-              ) : null}
-            </>
+            <div
+              className={styles.footageLayer}
+              style={
+                footageTransform || footageFilter
+                  ? {
+                      ...(footageTransform
+                        ? {
+                            transform: footageTransform.transform,
+                            opacity: footageTransform.opacity,
+                          }
+                        : null),
+                      ...(footageFilter ? { filter: footageFilter } : null),
+                    }
+                  : undefined
+              }
+            >
+              <video
+                key={displayAsset?.id}
+                ref={videoRef}
+                src={displayAsset?.url}
+                crossOrigin="anonymous"
+                className={styles.video}
+                style={videoStyle}
+                playsInline
+                muted={videoTrackMuted}
+                onClick={togglePlay}
+              />
+              <MotionBlurCanvas
+                videoRef={videoRef}
+                isPlaying={isPlaying}
+                active={motionBlur !== null && motionBlurStrength > 0}
+                strength={motionBlurStrength}
+                hudPreset={hudPreset}
+                hudMaskStrength={hudPreset === 'none' ? 0 : 1}
+                aspect={aspectRatio === '9:16' ? 9 / 16 : 16 / 9}
+                coverPosition={isVertical ? reframePosition : undefined}
+              />
+            </div>
           ) : (
             <div className={styles.gap}>
               {isHidden ? (
@@ -810,6 +1125,59 @@ export function Preview() {
                 </>
               ) : null}
             </div>
+          )}
+          {showVideo && fadeOpacity > 0 ? (
+            <div
+              className={styles.fadeOverlay}
+              style={{ opacity: fadeOpacity }}
+              aria-hidden="true"
+            />
+          ) : null}
+          {activeUpperVisualLayers.map(({ track, clip, asset }) => (
+            <PreviewVisualLayer
+              key={`${track.id}:${clip.id}`}
+              clip={clip}
+              asset={asset}
+              playhead={playhead}
+              isPlaying={isPlaying}
+              trackMuted={track.muted}
+              aspectRatio={aspectRatio}
+              verticalReframe={verticalReframe}
+              hudPreset={hudPreset}
+              onTogglePlay={togglePlay}
+            />
+          ))}
+          {showVideo && activeRampSampler ? (
+            <div className={styles.speedBadge} aria-hidden="true">
+              {`${instSpeed.toFixed(1)}×`}
+            </div>
+          ) : showVideo && clipSpeed !== 1 ? (
+            <div className={styles.speedBadge} aria-hidden="true">
+              {clipSpeed === 0.25
+                ? '¼×'
+                : clipSpeed === 0.5
+                  ? '½×'
+                  : clipSpeed === 0.75
+                    ? '¾×'
+                    : `${clipSpeed}×`}
+            </div>
+          ) : null}
+          {showVideo && activeClip?.overlays && activeClip.overlays.length > 0 ? (
+            <OverlayLayer
+              overlays={activeClip.overlays}
+              contextValues={overlayContext}
+              localTime={playhead - activeClip.start}
+            />
+          ) : null}
+          {activeUpperVisualLayers.map(({ track, clip, context }) =>
+            clip.overlays && clip.overlays.length > 0 ? (
+              <OverlayLayer
+                key={`overlay:${track.id}:${clip.id}`}
+                overlays={clip.overlays}
+                contextValues={context}
+                localTime={playhead - clip.start}
+              />
+            ) : null,
           )}
         </div>
       </div>
@@ -836,8 +1204,12 @@ export function Preview() {
             className={styles.playBtn}
             onClick={togglePlay}
             aria-label={isPlaying ? '一時停止' : '再生'}
-            title={isPlaying ? '一時停止 (Space)' : '再生 (Space)'}
-            disabled={totalForDisplay === 0}
+            title={
+              canPlayTimeline
+                ? (isPlaying ? '一時停止 (Space)' : '再生 (Space)')
+                : 'タイムラインに動画を追加すると再生できます'
+            }
+            disabled={!canPlayTimeline}
           >
             {isPlaying ? (
               <Pause size={20} strokeWidth={0} fill="currentColor" aria-hidden="true" />

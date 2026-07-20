@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   clearHistory,
+  captureProjectSavedBaseline,
   isProjectDirty,
   markProjectSaved,
+  markProjectUnsaved,
   useProjectStore,
 } from './projectStore';
 import { useMediaStore } from './mediaStore';
@@ -60,6 +62,23 @@ describe('project dirty tracking', () => {
     expect(isProjectDirty()).toBe(false);
 
     useMediaStore.setState({ assets: [] });
+    expect(isProjectDirty()).toBe(true);
+  });
+
+  it('keeps edits made while an async save is in flight dirty', () => {
+    useProjectStore.setState({ name: 'sent-to-disk' });
+    const baseline = captureProjectSavedBaseline();
+
+    useProjectStore.setState({ name: 'edited-during-save' });
+    markProjectSaved(baseline);
+
+    expect(isProjectDirty()).toBe(true);
+    expect(useProjectStore.getState().savedDocument?.name).toBe('sent-to-disk');
+  });
+
+  it('can force a recovered or fail-safe document to require explicit save', () => {
+    expect(isProjectDirty()).toBe(false);
+    markProjectUnsaved();
     expect(isProjectDirty()).toBe(true);
   });
 });

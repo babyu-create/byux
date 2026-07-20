@@ -11,6 +11,7 @@ import type {
   Track,
 } from './types';
 import type { AudioDucking } from './audioDucking';
+import type { HudPreset } from './motionBlurCore';
 
 export interface ProjectAssetRef {
   id: string;
@@ -42,6 +43,10 @@ export interface ProjectFile {
   createdAt: string;
   /** Optional project-level BGM auto-ducking (Phase P5). Absent in old files. */
   audioDucking?: AudioDucking;
+  /** Preview/export HUD protection. Absent in old files → valorant. */
+  hudPreset?: HudPreset;
+  /** Horizontal crop position for vertical video. Absent in old files → 0. */
+  verticalReframe?: number;
 }
 
 export interface SerialiseInput {
@@ -55,9 +60,11 @@ export interface SerialiseInput {
   ioRanges: IORange[];
   preRollSec: number;
   postRollSec: number;
-  assets: MediaAsset[];
+  assets: Array<MediaAsset | ProjectAssetRef>;
   /** Optional project-level BGM auto-ducking (Phase P5). */
   audioDucking?: AudioDucking;
+  hudPreset: HudPreset;
+  verticalReframe: number;
 }
 
 export function serialiseProject(input: SerialiseInput): ProjectFile {
@@ -77,6 +84,8 @@ export function serialiseProject(input: SerialiseInput): ProjectFile {
     // Only persist ducking when present (keeps old files byte-identical and the
     // field genuinely optional / backward compatible).
     ...(input.audioDucking ? { audioDucking: input.audioDucking } : null),
+    hudPreset: input.hudPreset,
+    verticalReframe: input.verticalReframe,
     assets: input.assets.map((a) => ({
       id: a.id,
       name: a.name,
@@ -307,6 +316,10 @@ const projectFileSchema = z.object({
   assets: z.array(assetRefSchema).max(10_000),
   createdAt: shortString,
   audioDucking: audioDuckingSchema.optional(),
+  hudPreset: z.enum(['valorant', 'cs2', 'apex', 'none']).optional(),
+  verticalReframe: finiteNumber
+    .refine((n) => n >= -1 && n <= 1, { message: '-1〜1の範囲が必要です' })
+    .optional(),
 }).superRefine((project, ctx) => {
   const reportDuplicates = (
     values: string[],
@@ -433,10 +446,20 @@ export function buildAssetIdMap(
 ): ApplyResult {
   const idMap: Record<string, string> = {};
   const missing: string[] = [];
+  const byPath = new Map(
+    currentAssets
+      .filter((asset): asset is MediaAsset & { path: string } => !!asset.path)
+      .map((asset) => [asset.path, asset]),
+  );
+  const byIdentity = new Map<string, MediaAsset | null>();
+  for (const asset of currentAssets) {
+    const key = `${asset.name}\u0000${asset.size}`;
+    byIdentity.set(key, byIdentity.has(key) ? null : asset);
+  }
   for (const pa of projectAssets) {
-    const match = currentAssets.find(
-      (a) => a.name === pa.name && a.size === pa.size,
-    );
+    const match =
+      (pa.path ? byPath.get(pa.path) : undefined) ??
+      byIdentity.get(`${pa.name}\u0000${pa.size}`);
     if (match) {
       idMap[pa.id] = match.id;
     } else {

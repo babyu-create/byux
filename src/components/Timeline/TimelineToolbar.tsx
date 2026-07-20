@@ -2,6 +2,10 @@ import { Scissors, Trash2, Magnet, ZoomIn, ZoomOut } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { formatTimecode } from '../../lib/media';
+import {
+  removeSelectedWithFeedback,
+  splitSelectedWithFeedback,
+} from './timelineCommands';
 import styles from './TimelineToolbar.module.css';
 
 export function TimelineToolbar() {
@@ -11,8 +15,6 @@ export function TimelineToolbar() {
   const setZoom = useProjectStore((s) => s.setZoom);
   const playhead = useProjectStore((s) => s.playhead);
   const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
-  const splitSelected = useProjectStore((s) => s.splitSelectedAtPlayhead);
-  const removeSelected = useProjectStore((s) => s.removeSelectedClips);
   const snapEnabled = useProjectStore((s) => s.snapEnabled);
   const toggleSnap = useProjectStore((s) => s.toggleSnap);
   const pendingIn = useProjectStore((s) => s.pendingIn);
@@ -56,9 +58,10 @@ export function TimelineToolbar() {
         <button
           type="button"
           className={styles.actionBtn}
-          onClick={splitSelected}
+          onClick={splitSelectedWithFeedback}
           disabled={!hasSelection}
           title="選択クリップを分割 (J)"
+          aria-label={`選択クリップを分割（${selectedClipIds.length}本選択中）`}
         >
           <Scissors size={14} strokeWidth={2} aria-hidden="true" />
           <span>分割</span>
@@ -66,9 +69,10 @@ export function TimelineToolbar() {
         <button
           type="button"
           className={styles.actionBtn}
-          onClick={removeSelected}
+          onClick={removeSelectedWithFeedback}
           disabled={!hasSelection}
           title="選択クリップを削除 (Delete)"
+          aria-label={`選択クリップを削除（${selectedClipIds.length}本選択中）`}
         >
           <Trash2 size={14} strokeWidth={2} aria-hidden="true" />
           <span>削除</span>
@@ -77,7 +81,8 @@ export function TimelineToolbar() {
           type="button"
           className={`${styles.actionBtn} ${snapEnabled ? styles.actionActive : ''}`}
           onClick={toggleSnap}
-          title="スナップ ON/OFF"
+          title={`スナップ ${snapEnabled ? 'ON' : 'OFF'}`}
+          aria-pressed={snapEnabled}
         >
           <Magnet size={14} strokeWidth={2} aria-hidden="true" />
           <span>スナップ</span>
@@ -95,6 +100,8 @@ export function TimelineToolbar() {
           step={0.1}
           value={Math.log2(zoom)}
           onChange={(e) => setZoom(2 ** parseFloat(e.target.value))}
+          aria-label="タイムラインのズーム"
+          aria-valuetext={`${Math.round(zoom * 100)}%`}
           className={styles.zoomSlider}
         />
         <button type="button" className={styles.zoomBtn} onClick={zoomIn} title="ズームイン (+)" aria-label="ズームイン">

@@ -2,11 +2,6 @@ import { useMemo, useState } from 'react';
 import { Scissors } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { formatTimecode } from '../../lib/media';
-import {
-  PREF_SKIP_AUTO_CLIP_CONFIRM,
-  getBoolPref,
-  setBoolPref,
-} from '../../lib/preferences';
 import { ConfirmDialog } from '../Common/ConfirmDialog';
 import type { MediaAsset } from '../../lib/types';
 import styles from './KillMarkerSection.module.css';
@@ -36,11 +31,19 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
 
   const beginCut = () => {
     if (ranges.length === 0) return;
-    if (getBoolPref(PREF_SKIP_AUTO_CLIP_CONFIRM, false)) {
-      runCut();
-    } else {
-      setConfirmOpen(true);
+    const videoTrack = useProjectStore
+      .getState()
+      .tracks.find(
+        (track) =>
+          track.kind === 'video' &&
+          !track.hidden &&
+          !track.locked,
+      );
+    if (!videoTrack) {
+      setResultMessage('表示中の映像トラックのロックを解除してください');
+      return;
     }
+    setConfirmOpen(true);
   };
 
   const runCut = () => {
@@ -53,8 +56,7 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
     window.setTimeout(() => setResultMessage(null), 2400);
   };
 
-  const handleConfirm = (rememberSkip: boolean) => {
-    if (rememberSkip) setBoolPref(PREF_SKIP_AUTO_CLIP_CONFIRM, true);
+  const handleConfirm = () => {
     setConfirmOpen(false);
     runCut();
   };
@@ -79,12 +81,19 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
               <div
                 key={r.id}
                 className={`${styles.row} ${selectedRangeId === r.id ? styles.selected : ''}`}
-                onClick={() => selectRange(r.id)}
               >
-                <span className={styles.idx}>{idx + 1}</span>
-                <span className={styles.time}>
-                  {formatTimecode(r.inTime)} – {formatTimecode(r.outTime)}
-                </span>
+                <button
+                  type="button"
+                  className={styles.rowSelect}
+                  onClick={() => selectRange(r.id)}
+                  aria-pressed={selectedRangeId === r.id}
+                  aria-label={`レンジ${idx + 1}、${formatTimecode(r.inTime)}から${formatTimecode(r.outTime)}`}
+                >
+                  <span className={styles.idx}>{idx + 1}</span>
+                  <span className={styles.time}>
+                    {formatTimecode(r.inTime)} – {formatTimecode(r.outTime)}
+                  </span>
+                </button>
                 <button
                   type="button"
                   className={styles.removeBtn}
@@ -137,7 +146,6 @@ export function IORangeSection({ asset }: IORangeSectionProps) {
           message={`元クリップ (${asset.name}) を削除して、${ranges.length}本のレンジクリップに置き換えます。よろしいですか？`}
           confirmLabel="生成する"
           cancelLabel="キャンセル"
-          rememberLabel="次回以降この確認を表示しない"
           variant="destructive"
           onConfirm={handleConfirm}
           onCancel={() => setConfirmOpen(false)}

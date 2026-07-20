@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
+import { AccessibleDialog } from './AccessibleDialog';
 import styles from './ConfirmDialog.module.css';
 
 interface ConfirmDialogProps {
@@ -23,13 +24,20 @@ export function ConfirmDialog({
   variant = 'default',
 }: ConfirmDialogProps) {
   const [rememberSkip, setRememberSkip] = useState(false);
+  const titleId = useId();
+  const descriptionId = useId();
 
   return (
-    <div className={styles.backdrop} role="dialog" aria-modal="true">
-      <div className={styles.modal}>
-        <div className={styles.header}>{title}</div>
+    <AccessibleDialog
+      backdropClassName={styles.backdrop}
+      dialogClassName={styles.modal}
+      titleId={titleId}
+      descriptionId={descriptionId}
+      onClose={onCancel}
+    >
+        <div id={titleId} className={styles.header}>{title}</div>
         <div className={styles.body}>
-          <p>{message}</p>
+          <p id={descriptionId}>{message}</p>
         </div>
         {rememberLabel ? (
           <label className={styles.rememberRow}>
@@ -42,19 +50,23 @@ export function ConfirmDialog({
           </label>
         ) : null}
         <div className={styles.footer}>
-          <button type="button" className={styles.btnCancel} onClick={onCancel}>
+          <button
+            type="button"
+            className={styles.btnCancel}
+            onClick={onCancel}
+            data-dialog-initial-focus={variant === 'destructive' ? '' : undefined}
+          >
             {cancelLabel}
           </button>
           <button
             type="button"
             className={`${styles.btnConfirm} ${variant === 'destructive' ? styles.destructive : ''}`}
             onClick={() => onConfirm(rememberSkip)}
-            autoFocus
+            data-dialog-initial-focus={variant === 'default' ? '' : undefined}
           >
             {confirmLabel}
           </button>
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 }

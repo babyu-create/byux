@@ -182,6 +182,20 @@ describe('buildDuckPoints', () => {
     expect(buildDuckPoints(markers, segs)).toEqual([2]);
   });
 
+  it('uses nonlinear source mapping for a speed-ramped clip', () => {
+    const markers: DuckSourceMarker[] = [{ assetId: 'a1', time: 4 }];
+    const segs = [segOf({
+      trimStart: 0,
+      trimEnd: 8,
+      speed: 1,
+      speedRamp: { from: 0.5, to: 2, easing: 'easeIn' },
+    })];
+    const [point] = buildDuckPoints(markers, segs);
+
+    expect(point).toBeGreaterThan(4);
+    expect(point).toBeLessThan(8);
+  });
+
   it('drops markers outside the segment trim range', () => {
     const markers: DuckSourceMarker[] = [
       { assetId: 'a1', time: 1 },

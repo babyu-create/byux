@@ -70,6 +70,7 @@ export function ClipSpeedSection({ clip }: ClipSpeedSectionProps) {
             type="button"
             className={`${styles.presetBtn} ${speed === s ? styles.active : ''}`}
             onClick={() => setSpeed(clip.id, s)}
+            aria-pressed={speed === s}
           >
             {s === 0.25
               ? '¼×'
@@ -91,6 +92,8 @@ export function ClipSpeedSection({ clip }: ClipSpeedSectionProps) {
           value={speed}
           onChange={(e) => setSpeed(clip.id, parseFloat(e.target.value))}
           className={styles.slider}
+          aria-label="クリップ再生速度"
+          aria-valuetext={`${speed.toFixed(2)}倍`}
         />
       </div>
 

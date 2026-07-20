@@ -27,7 +27,9 @@ export const LAYOUT_BOUNDS = {
   leftWidth: { min: 180, max: 520 },
   rightWidth: { min: 200, max: 560 },
   timelineHeight: { min: 160, max: 600 },
-  propertiesHeight: { min: 160, max: 9999 },
+  // 80px still leaves a useful section header + first controls on the
+  // supported 980x640 window, where the entire workspace can be ~260px tall.
+  propertiesHeight: { min: 80, max: 9999 },
 } as const;
 
 /** Increment when the layout schema changes in a breaking way. Stored data

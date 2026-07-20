@@ -1,4 +1,6 @@
 // Audio decoding + waveform + onset (beat) detection helpers.
+import type { Clip } from './types';
+import { timelineTimeAtSourceTime } from './timeline';
 
 export interface WaveformData {
   peaks: Float32Array;
@@ -39,17 +41,23 @@ export async function computeWaveform(
   peaksPerSecond = 50,
 ): Promise<WaveformData> {
   const buffer = await decodeFile(file);
-  const channel = buffer.getChannelData(0);
+  const channels = Array.from(
+    { length: buffer.numberOfChannels },
+    (_, index) => buffer.getChannelData(index),
+  );
+  const sampleLength = channels[0]?.length ?? 0;
   const totalPeaks = Math.max(1, Math.floor(buffer.duration * peaksPerSecond));
-  const samplesPerPeak = Math.max(1, Math.floor(channel.length / totalPeaks));
+  const samplesPerPeak = Math.max(1, Math.floor(sampleLength / totalPeaks));
   const peaks = new Float32Array(totalPeaks);
   for (let i = 0; i < totalPeaks; i++) {
     let max = 0;
     const start = i * samplesPerPeak;
-    const end = Math.min(channel.length, start + samplesPerPeak);
+    const end = Math.min(sampleLength, start + samplesPerPeak);
     for (let j = start; j < end; j++) {
-      const v = Math.abs(channel[j]);
-      if (v > max) max = v;
+      for (const channel of channels) {
+        const value = Math.abs(channel[j]);
+        if (value > max) max = value;
+      }
     }
     peaks[i] = max;
   }
@@ -75,19 +83,25 @@ export async function detectBeats(
   const windowSec = options.windowSec ?? 0.05;
 
   const buffer = await decodeFile(file);
-  const channel = buffer.getChannelData(0);
+  const channels = Array.from(
+    { length: buffer.numberOfChannels },
+    (_, index) => buffer.getChannelData(index),
+  );
+  const sampleLength = channels[0]?.length ?? 0;
   const sr = buffer.sampleRate;
   const windowSize = Math.max(1, Math.floor(sr * windowSec));
-  const windowCount = Math.floor(channel.length / windowSize);
+  const windowCount = Math.floor(sampleLength / windowSize);
   const energies = new Float32Array(windowCount);
   for (let w = 0; w < windowCount; w++) {
     let sum = 0;
     const base = w * windowSize;
     for (let i = 0; i < windowSize; i++) {
-      const s = channel[base + i];
-      sum += s * s;
+      for (const channel of channels) {
+        const sample = channel[base + i];
+        sum += sample * sample;
+      }
     }
-    energies[w] = sum / windowSize;
+    energies[w] = sum / (windowSize * Math.max(1, channels.length));
   }
 
   const lookback = Math.max(4, Math.floor(1 / windowSec));
@@ -117,13 +131,12 @@ export async function detectBeats(
 /** Convert beats from source-time to timeline-time given a clip's mapping. */
 export function beatsToTimeline(
   sourceBeats: number[],
-  clip: { start: number; trimStart: number; trimEnd: number; speed?: number },
+  clip: Pick<Clip, 'start' | 'trimStart' | 'trimEnd' | 'speed' | 'speedRamp'>,
 ): number[] {
-  const speed = clip.speed ?? 1;
   const result: number[] = [];
   for (const b of sourceBeats) {
     if (b < clip.trimStart - 1e-6 || b > clip.trimEnd + 1e-6) continue;
-    result.push(clip.start + (b - clip.trimStart) / speed);
+    result.push(timelineTimeAtSourceTime(clip, b));
   }
   return result;
 }

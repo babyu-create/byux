@@ -35,6 +35,7 @@ export const TrackHeader = memo(function TrackHeader({ track }: TrackHeaderProps
       title={track.label}
     >
       <span className={styles.dot} aria-hidden="true" />
+      <span className={styles.label}>{track.label}</span>
       <div className={styles.controls}>
         <button
           type="button"

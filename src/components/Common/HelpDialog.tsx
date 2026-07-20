@@ -6,6 +6,7 @@ import {
   getBindings,
   subscribeBindings,
 } from '../../lib/keybindings';
+import { AccessibleDialog } from './AccessibleDialog';
 import styles from './HelpDialog.module.css';
 
 interface HelpDialogProps {
@@ -19,9 +20,26 @@ interface StaticEntry {
 
 const STATIC_GROUPS: { title: string; items: StaticEntry[] }[] = [
   {
+    title: '基本操作',
+    items: [
+      { keys: ['＋'], label: '素材をタイムラインの末尾へ追加' },
+      { keys: ['クリック'], label: 'クリップを選択' },
+      { keys: ['Shift', 'クリック'], label: '複数クリップを選択' },
+      { keys: ['端をドラッグ'], label: 'クリップの開始・終了をトリミング' },
+      { keys: ['Shift', 'ドラッグ'], label: 'スナップを一時的に無効化' },
+      { keys: ['Esc'], label: 'ドラッグ中の移動・トリミングを取り消す' },
+      { keys: ['Alt', '← / →'], label: '選択クリップを0.1秒ずつ移動' },
+      { keys: ['Shift', 'Alt', '← / →'], label: '選択クリップを1秒ずつ移動' },
+      { keys: ['右クリック'], label: '音量・速度・分割などのメニューを表示' },
+    ],
+  },
+  {
     title: 'プロジェクト',
     items: [
       { keys: ['Ctrl', 'S'], label: 'プロジェクト保存' },
+      { keys: ['Ctrl', 'Shift', 'S'], label: '別名で保存' },
+      { keys: ['Ctrl', 'Z'], label: '元に戻す' },
+      { keys: ['Ctrl', 'Y'], label: 'やり直す' },
       { keys: ['?'], label: 'このヘルプを表示' },
     ],
   },
@@ -67,12 +85,20 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
     filteredStatic.reduce((n, g) => n + g.items.length, 0);
 
   return (
-    <div className={styles.backdrop} role="dialog" aria-modal="true" onClick={onClose}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <AccessibleDialog
+      backdropClassName={styles.backdrop}
+      dialogClassName={styles.modal}
+      titleId="help-dialog-title"
+      onClose={onClose}
+    >
         <div className={styles.header}>
-          <span className={styles.title} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <span
+            id="help-dialog-title"
+            className={styles.title}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+          >
             <Keyboard size={16} strokeWidth={2} aria-hidden="true" />
-            ショートカット
+            ヘルプ / ショートカット
           </span>
           <button
             type="button"
@@ -88,11 +114,12 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
           <input
             type="text"
             className={styles.searchInput}
-            placeholder="検索 (例: 再生 / Space / フェード)"
+            placeholder="検索 (例: 再生 / トリミング / Space)"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             aria-label="ショートカットを検索"
             autoFocus
+            data-dialog-initial-focus
           />
           {query ? (
             <button
@@ -156,7 +183,6 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
             </section>
           ))}
         </div>
-      </div>
-    </div>
+    </AccessibleDialog>
   );
 }
