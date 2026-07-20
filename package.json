@@ -29,11 +29,11 @@
     "electron:dev": "concurrently -k \"npm:dev\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
     "electron:start": "electron .",
     "package": "npm run build && electron-builder",
-    "package:win": "npm run build && electron-builder --win",
+    "package:win": "npm run build && electron-builder --win --config.electronDist=node_modules/electron/dist",
     "package:linux": "npm run build && electron-builder --linux",
     "package:mac": "npm run build && electron-builder --mac",
     "package:all": "npm run build && electron-builder --win --linux --mac",
-    "release:win": "npm run build && electron-builder --win --publish always",
+    "release:win": "npm run build && electron-builder --win --config.electronDist=node_modules/electron/dist --publish always",
     "release:linux": "npm run build && electron-builder --linux --publish always",
     "release:mac": "npm run build && electron-builder --mac --publish always",
     "release": "npm run build && electron-builder --publish always"
@@ -81,6 +81,7 @@
   "build": {
     "appId": "com.fceditor.app",
     "productName": "Byux",
+    "afterPack": "scripts/after-pack.cjs",
     "files": [
       "dist/**/*",
       "electron/**/*",
