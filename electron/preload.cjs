@@ -90,6 +90,12 @@ contextBridge.exposeInMainWorld('fce', {
   createPreviewProxy(sourceToken) {
     return ipcRenderer.invoke('media:create-preview-proxy', sourceToken);
   },
+  generateMediaWaveform(sourceToken) {
+    return ipcRenderer.invoke('media:generate-waveform', sourceToken);
+  },
+  cancelMediaWaveform(sourceToken) {
+    return ipcRenderer.invoke('media:cancel-waveform', sourceToken);
+  },
   readMediaFileChunk(token, offset, length) {
     return ipcRenderer.invoke('media:read-chunk', token, offset, length);
   },

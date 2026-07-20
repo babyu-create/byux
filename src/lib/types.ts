@@ -72,6 +72,8 @@ export interface MediaAsset {
   beats?: number[];
   /** Cached waveform peaks (max amplitude per bin) for rendering. */
   waveform?: { peaks: Float32Array; peaksPerSecond: number };
+  /** Runtime-only analysis state. Not persisted in project files. */
+  waveformStatus?: 'loading' | 'ready' | 'unavailable';
   /** Absolute disk path (Electron only) — lets a reloaded project re-read the
    *  source file automatically instead of asking the user to re-add it. */
   path?: string;
@@ -110,6 +112,10 @@ export type NativeMediaRegistrationResult =
         | 'REGISTRATION_FAILED'
         | 'INVALID_KIND';
     };
+
+export type NativeWaveformResult =
+  | { ok: true; peaks: Float32Array; peaksPerSecond: number }
+  | { ok: false; error: string; canceled?: boolean };
 
 export type ClipEffectType = 'fade-in' | 'fade-out' | 'motion-blur';
 

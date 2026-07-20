@@ -1,5 +1,11 @@
-import { Volume1, Volume2, VolumeX } from 'lucide-react';
+import { useMemo } from 'react';
+import { Sparkles, Volume1, Volume2, VolumeX } from 'lucide-react';
+import { useMediaStore } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
+import {
+  gainToDecibels,
+  recommendPeakVolume,
+} from '../../lib/audioLevels';
 import type { Clip } from '../../lib/types';
 import styles from './ClipVolumeSection.module.css';
 
@@ -10,9 +16,32 @@ interface ClipVolumeSectionProps {
 export function ClipVolumeSection({ clip }: ClipVolumeSectionProps) {
   const setVolume = useProjectStore((s) => s.setClipVolume);
   const toggleMuted = useProjectStore((s) => s.toggleClipMuted);
+  const asset = useMediaStore((state) =>
+    state.assets.find((candidate) => candidate.id === clip.assetId),
+  );
   const volume = clip.volume ?? 1;
   const muted = clip.muted ?? false;
   const percent = Math.round(volume * 100);
+  const waveform = asset?.waveform;
+  const recommendation = useMemo(
+    () =>
+      waveform
+        ? recommendPeakVolume(waveform, clip.trimStart, clip.trimEnd)
+        : null,
+    [waveform, clip.trimEnd, clip.trimStart],
+  );
+  const currentPeakDb = recommendation
+    ? gainToDecibels(recommendation.sourcePeak * volume)
+    : null;
+  const peakHint = recommendation
+    ? `現在 ${currentPeakDb?.toFixed(1) ?? '−∞'} dBFS · 推奨 ${Math.round(recommendation.volume * 100)}%${recommendation.capped ? '（上限）' : ''}`
+    : asset?.waveformStatus === 'loading'
+      ? '音声ピークを解析中…'
+      : asset?.waveformStatus === 'unavailable'
+        ? 'この素材の音声ピークを解析できません'
+        : asset?.waveform
+          ? '選択範囲は無音です'
+          : '音声解析を利用できません';
 
   return (
     <div className={styles.root}>
@@ -70,6 +99,26 @@ export function ClipVolumeSection({ clip }: ClipVolumeSectionProps) {
             {v === 0 ? '0' : `${Math.round(v * 100)}`}
           </button>
         ))}
+      </div>
+
+      <div className={styles.peakTool}>
+        <button
+          type="button"
+          className={styles.normalizeBtn}
+          onClick={() => {
+            if (recommendation) setVolume(clip.id, recommendation.volume);
+          }}
+          disabled={!recommendation}
+          aria-label="クリップのピークをマイナス1dBに整える"
+          title="選択範囲の最大ピークを基準に音量を設定"
+        >
+          <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
+          ピークを -1 dB に整える
+        </button>
+        <p className={styles.peakHint}>{peakHint}</p>
+        <p className={styles.peakNote}>
+          クリッピングを避ける目安です。聴感上の音量統一（LUFS）ではありません。
+        </p>
       </div>
     </div>
   );

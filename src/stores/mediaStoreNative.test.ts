@@ -77,6 +77,47 @@ describe('mediaStore native source registration', () => {
     expect(created[0].file).toBeUndefined()
   })
 
+  it('analyzes the audio stream inside a native video for volume tools', async () => {
+    const peaks = new Float32Array([0.2, 0.9, 0.4])
+    const generateMediaWaveform = vi.fn().mockResolvedValue({
+      ok: true,
+      peaks,
+      peaksPerSecond: 20,
+    })
+    installFceApi({ generateMediaWaveform })
+    mediaMocks.probeVideoUrlMetadata.mockResolvedValue({
+      duration: 140,
+      width: 1920,
+      height: 1080,
+    })
+
+    await useMediaStore.getState().addNativeSources([SOURCE])
+
+    await vi.waitFor(() => {
+      expect(useMediaStore.getState().assets[0]).toMatchObject({
+        waveform: { peaks, peaksPerSecond: 20 },
+        waveformStatus: 'ready',
+      })
+    })
+    expect(generateMediaWaveform).toHaveBeenCalledWith(SOURCE.token)
+  })
+
+  it('marks waveform analysis unavailable when the native bridge rejects', async () => {
+    const generateMediaWaveform = vi.fn().mockRejectedValue(new Error('IPC closed'))
+    installFceApi({ generateMediaWaveform })
+    mediaMocks.probeVideoUrlMetadata.mockResolvedValue({
+      duration: 140,
+      width: 1920,
+      height: 1080,
+    })
+
+    await useMediaStore.getState().addNativeSources([SOURCE])
+
+    await vi.waitFor(() => {
+      expect(useMediaStore.getState().assets[0]?.waveformStatus).toBe('unavailable')
+    })
+  })
+
   it('releases a native registration when metadata probing fails', async () => {
     const releaseMediaFile = vi.fn().mockResolvedValue(true)
     installFceApi({ releaseMediaFile })
@@ -185,6 +226,71 @@ describe('mediaStore native source registration', () => {
       previewSourceToken: 'audio-proxy-token',
       previewProxy: true,
     })
+  })
+
+  it('streams a native audio waveform into the imported asset', async () => {
+    const source: NativeMediaSource = {
+      path: 'C:\\Audio\\soundtrack.wav',
+      name: 'soundtrack.wav',
+      size: 50_000_000,
+      kind: 'audio',
+      token: 'waveform-source-token',
+      url: 'fce-media://asset/waveform-source-token',
+    }
+    const peaks = new Float32Array([0.1, 0.8, 0.3])
+    const generateMediaWaveform = vi.fn().mockResolvedValue({
+      ok: true,
+      peaks,
+      peaksPerSecond: 20,
+    })
+    installFceApi({ generateMediaWaveform })
+    mediaMocks.probeAudioUrlMetadata.mockResolvedValue({ duration: 180 })
+
+    const [asset] = await useMediaStore.getState().addNativeSources([source])
+
+    await vi.waitFor(() => {
+      expect(useMediaStore.getState().assets[0]?.waveform).toEqual({
+        peaks,
+        peaksPerSecond: 20,
+      })
+    })
+    expect(generateMediaWaveform).toHaveBeenCalledWith(source.token)
+    expect(asset.waveform).toBeUndefined()
+  })
+
+  it('cancels an in-flight waveform and ignores its late result after clearing', async () => {
+    const source: NativeMediaSource = {
+      path: 'C:\\Audio\\long-session.wav',
+      name: 'long-session.wav',
+      size: 4_000_000_000,
+      kind: 'audio',
+      token: 'long-waveform-token',
+      url: 'fce-media://asset/long-waveform-token',
+    }
+    let resolveWaveform:
+      | ((value: { ok: true; peaks: Float32Array; peaksPerSecond: number }) => void)
+      | undefined
+    const generateMediaWaveform = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveWaveform = resolve
+        }),
+    )
+    const cancelMediaWaveform = vi.fn().mockResolvedValue(true)
+    installFceApi({ generateMediaWaveform, cancelMediaWaveform })
+    mediaMocks.probeAudioUrlMetadata.mockResolvedValue({ duration: 7_200 })
+
+    await useMediaStore.getState().addNativeSources([source])
+    useMediaStore.getState().clearAssets()
+    resolveWaveform?.({
+      ok: true,
+      peaks: new Float32Array([1]),
+      peaksPerSecond: 20,
+    })
+    await Promise.resolve()
+
+    expect(cancelMediaWaveform).toHaveBeenCalledWith(source.token)
+    expect(useMediaStore.getState().assets).toEqual([])
   })
 
   it('uses the same compatibility path for a disk-backed WMA drag', async () => {

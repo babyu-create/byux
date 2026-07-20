@@ -39,6 +39,11 @@ const {
   mediaExtensionMatchesKind,
   mediaKindForPath,
 } = require('./mediaFormats.cjs');
+const {
+  WAVEFORM_PEAKS_PER_SECOND,
+  createWaveformMetadataAccumulator,
+  buildWaveformFfmpegArgs,
+} = require('./nativeWaveform.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -642,6 +647,7 @@ const MAX_NATIVE_OVERLAY_DIMENSION = 8_192;
 const MAX_NATIVE_OVERLAY_DECODED_BYTES = 512 * 1024 * 1024;
 const pendingExports = new Map();
 const pendingProxyJobs = new Map();
+const pendingWaveformJobs = new Map();
 let lastExportPath = null;
 let ffmpegCapabilityPromise = null;
 let exportJournalOperation = Promise.resolve();
@@ -902,6 +908,7 @@ function abandonAllExports() {
   return Promise.all([
     ...[...pendingExports.keys()].map((token) => abandonExport(token)),
     ...[...pendingProxyJobs.keys()].map((token) => abandonProxyJob(token)),
+    ...[...pendingWaveformJobs.keys()].map((token) => abandonWaveformJob(token)),
   ]);
 }
 
@@ -1909,6 +1916,153 @@ ipcMain.handle('media:register-file', async (event, ref) => {
   }
 });
 
+function releaseWaveformSourceLease(job) {
+  if (job.sourceLeaseReleased) return;
+  job.sourceLeaseReleased = true;
+  releaseRegisteredMediaLease(job.sourceToken);
+}
+
+function waitForWaveformChild(job, accumulator) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(result);
+    };
+    job.child.stdout.on('data', (chunk) => {
+      if (job.runtimeError) return;
+      try {
+        accumulator.push(chunk);
+      } catch (error) {
+        job.runtimeError = error;
+        void terminateProcess(job.child).catch(() => {});
+      }
+    });
+    job.child.stderr.on('data', (chunk) => {
+      job.stderrTail = appendTail(job.stderrTail, chunk);
+    });
+    job.child.once('error', (error) => finish(error));
+    job.child.once('close', (code, signal) => finish(null, { code, signal }));
+  });
+}
+
+async function abandonWaveformJob(token) {
+  const job = pendingWaveformJobs.get(token);
+  if (!job) return false;
+  if (job.cleanupPromise) return job.cleanupPromise;
+  job.cancelled = true;
+  const cleanupPromise = (async () => {
+    await terminateProcess(job.child);
+    job.child = null;
+    await job.operation.catch(() => {});
+    releaseWaveformSourceLease(job);
+    if (pendingWaveformJobs.get(token) === job) pendingWaveformJobs.delete(token);
+    return true;
+  })();
+  job.cleanupPromise = cleanupPromise;
+  try {
+    return await cleanupPromise;
+  } catch (error) {
+    if (job.cleanupPromise === cleanupPromise) job.cleanupPromise = null;
+    throw error;
+  }
+}
+
+ipcMain.handle('media:generate-waveform', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') {
+    return { ok: false, error: '安全でない画面からの操作を拒否しました' };
+  }
+  const source = registeredMedia.get(sourceToken);
+  if (!source || (source.kind !== 'audio' && source.kind !== 'video')) {
+    return { ok: false, error: '素材を確認できません' };
+  }
+
+  const token = crypto.randomUUID();
+  const job = {
+    token,
+    sourceToken,
+    child: null,
+    operation: Promise.resolve(),
+    cleanupPromise: null,
+    cancelled: false,
+    sourceLeaseReleased: false,
+    runtimeError: null,
+    stderrTail: '',
+  };
+  source.leases = (source.leases ?? 0) + 1;
+  pendingWaveformJobs.set(token, job);
+
+  try {
+    await ensureNativeFfmpeg();
+    const [realPath, stat] = await Promise.all([
+      fs.realpath(source.path),
+      fs.stat(source.path),
+    ]);
+    if (
+      !stat.isFile() ||
+      realPath !== source.path ||
+      stat.size !== source.size ||
+      (source.dev !== undefined && stat.dev !== source.dev) ||
+      (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+      Math.abs(stat.mtimeMs - source.mtimeMs) > 1 ||
+      isDangerousWindowsDevicePath(realPath)
+    ) {
+      throw new Error('素材が読み込み後に変更されました');
+    }
+    if (job.cancelled) throw new Error('波形生成を中止しました');
+
+    const accumulator = createWaveformMetadataAccumulator();
+    const child = spawn(
+      ffmpegBinaryPath(),
+      buildWaveformFfmpegArgs(source.path),
+      {
+        shell: false,
+        windowsHide: true,
+        detached: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: minimalEnvironment(),
+      },
+    );
+    job.child = child;
+    const operation = waitForWaveformChild(job, accumulator);
+    job.operation = operation.then(() => undefined, () => undefined);
+    const result = await operation;
+    job.child = null;
+    if (job.runtimeError) throw job.runtimeError;
+    if (job.cancelled) throw new Error('波形生成を中止しました');
+    if (result.code !== 0) {
+      throw new Error(`波形生成に失敗しました (FFmpeg: ${String(result.code)})`);
+    }
+    const peaks = accumulator.finish();
+    if (peaks.length === 0) {
+      throw new Error('音声ストリームが見つかりません');
+    }
+    return {
+      ok: true,
+      peaks,
+      peaksPerSecond: WAVEFORM_PEAKS_PER_SECOND,
+    };
+  } catch (error) {
+    let message = error instanceof Error ? error.message : String(error);
+    message = message.replaceAll(source.path, '[素材]').slice(0, 500);
+    return { ok: false, error: message, canceled: job.cancelled };
+  } finally {
+    if (pendingWaveformJobs.get(token) === job) pendingWaveformJobs.delete(token);
+    releaseWaveformSourceLease(job);
+  }
+});
+
+ipcMain.handle('media:cancel-waveform', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') return false;
+  const jobs = [...pendingWaveformJobs.values()].filter(
+    (job) => job.sourceToken === sourceToken,
+  );
+  await Promise.all(jobs.map((job) => abandonWaveformJob(job.token)));
+  return jobs.length > 0;
+});
+
 ipcMain.handle('media:read-chunk', async (event, token, offset, length) => {
   if (!isTrustedIpcEvent(event)) return null;
   const source = typeof token === 'string' ? registeredMedia.get(token) : null;
@@ -2777,6 +2931,9 @@ process.on('exit', () => {
     try { entry.child?.kill('SIGKILL'); } catch { /* process already gone */ }
   }
   for (const job of pendingProxyJobs.values()) {
+    try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
+  }
+  for (const job of pendingWaveformJobs.values()) {
     try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
   }
 });

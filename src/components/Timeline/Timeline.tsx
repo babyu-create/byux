@@ -319,7 +319,12 @@ export function Timeline() {
           <TrackHeaderList trackIds={trackIds} />
         </div>
 
-        <div className={styles.scroll} ref={scrollRef} onScroll={syncFromTimeline}>
+        <div
+          className={styles.scroll}
+          ref={scrollRef}
+          onScroll={syncFromTimeline}
+          data-timeline-scroll="true"
+        >
           <div
             className={styles.scrollInner}
             style={{

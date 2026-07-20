@@ -4,6 +4,7 @@ import type { NativeExportRequest } from '../../lib/nativeExporter';
 import type {
   NativeMediaRegistrationResult,
   NativeMediaSelectionResult,
+  NativeWaveformResult,
 } from '../../lib/types';
 import styles from './UpdateBanner.module.css';
 
@@ -203,6 +204,9 @@ interface FCEGlobal {
     cached?: boolean;
     error?: string;
   }>;
+  /** Generate compact peaks in the main process without decoding the whole source in renderer memory. */
+  generateMediaWaveform?: (sourceToken: string) => Promise<NativeWaveformResult>;
+  cancelMediaWaveform?: (sourceToken: string) => Promise<boolean>;
   /** Bounded source read used only by explicit heavyweight operations. */
   readMediaFileChunk?: (
     token: string,

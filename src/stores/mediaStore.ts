@@ -129,6 +129,13 @@ async function assetFromNativeSource(
 }
 
 function releaseAssetMediaTokens(asset: MediaAsset): void {
+  if (asset.sourceToken) {
+    try {
+      void window.fce?.cancelMediaWaveform?.(asset.sourceToken).catch(() => {});
+    } catch {
+      // A tearing-down preload bridge may throw synchronously.
+    }
+  }
   const releaseMediaFile = window.fce?.releaseMediaFile;
   if (!releaseMediaFile) return;
   // Source and preview registrations normally differ, but de-duplicate
@@ -150,6 +157,13 @@ function releaseAssetMediaTokens(asset: MediaAsset): void {
 }
 
 async function releaseAssetMediaTokensNow(asset: MediaAsset): Promise<void> {
+  if (asset.sourceToken) {
+    try {
+      await window.fce?.cancelMediaWaveform?.(asset.sourceToken);
+    } catch {
+      // The job also stops when the renderer or main process exits.
+    }
+  }
   const releaseMediaFile = window.fce?.releaseMediaFile;
   if (!releaseMediaFile) return;
   const tokens = new Set(
@@ -192,6 +206,103 @@ async function releaseNativeSources(sources: NativeMediaSource[]): Promise<void>
 }
 
 let mediaImportGeneration = 0;
+
+function scheduleAssetWaveform(asset: MediaAsset): void {
+  const sourceToken = asset.sourceToken;
+  const generateNativeWaveform = window.fce?.generateMediaWaveform;
+  if (sourceToken && generateNativeWaveform) {
+    useMediaStore.setState((state) => ({
+      assets: state.assets.map((candidate) =>
+        candidate.id === asset.id
+          ? { ...candidate, waveformStatus: 'loading' }
+          : candidate,
+      ),
+    }));
+    void generateNativeWaveform(sourceToken)
+      .then((result) => {
+        const current = useMediaStore
+          .getState()
+          .assets.find((candidate) => candidate.id === asset.id);
+        if (!current || current.sourceToken !== sourceToken) return;
+        if (!result.ok) {
+          useMediaStore.setState((state) => ({
+            assets: state.assets.map((candidate) =>
+              candidate.id === asset.id
+                ? { ...candidate, waveformStatus: 'unavailable' }
+                : candidate,
+            ),
+          }));
+          return;
+        }
+        useMediaStore.getState().setAssetWaveform(asset.id, {
+          peaks: result.peaks,
+          peaksPerSecond: result.peaksPerSecond,
+        });
+      })
+      .catch(() => {
+        const current = useMediaStore
+          .getState()
+          .assets.find((candidate) => candidate.id === asset.id);
+        if (current?.sourceToken === sourceToken) {
+          useMediaStore.setState((state) => ({
+            assets: state.assets.map((candidate) =>
+              candidate.id === asset.id
+                ? { ...candidate, waveformStatus: 'unavailable' }
+                : candidate,
+            ),
+          }));
+        }
+        // Waveforms improve editing but a failed analysis must not remove an
+        // otherwise playable source from the project.
+      });
+    return;
+  }
+
+  if (asset.kind !== 'audio' || !asset.file) {
+    useMediaStore.setState((state) => ({
+      assets: state.assets.map((candidate) =>
+        candidate.id === asset.id
+          ? { ...candidate, waveformStatus: 'unavailable' }
+          : candidate,
+      ),
+    }));
+    return;
+  }
+  useMediaStore.setState((state) => ({
+    assets: state.assets.map((candidate) =>
+      candidate.id === asset.id
+        ? { ...candidate, waveformStatus: 'loading' }
+        : candidate,
+    ),
+  }));
+  void computeWaveform(asset.file)
+    .then((waveform) => {
+      const current = useMediaStore
+        .getState()
+        .assets.find((candidate) => candidate.id === asset.id);
+      if (!current || current.file !== asset.file) return;
+      useMediaStore.getState().setAssetWaveform(asset.id, {
+        peaks: waveform.peaks,
+        peaksPerSecond: waveform.peaksPerSecond,
+      });
+    })
+    .catch(() => {
+      const current = useMediaStore
+        .getState()
+        .assets.find((candidate) => candidate.id === asset.id);
+      if (current?.file === asset.file) {
+        useMediaStore.setState((state) => ({
+          assets: state.assets.map((candidate) =>
+            candidate.id === asset.id
+              ? { ...candidate, waveformStatus: 'unavailable' }
+              : candidate,
+          ),
+        }));
+      }
+      // A corrupt/unsupported audio stream should not become an unhandled
+      // rejection after the import itself has already completed.
+    });
+}
 
 export const useMediaStore = create<MediaStoreState>((set, get) => ({
   assets: [],
@@ -380,20 +491,9 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
       };
     });
 
-    // Background: compute waveforms for any new audio assets.
-    for (const a of newAssets) {
-      if (a.kind !== 'audio' || !a.file) continue;
-      void computeWaveform(a.file).then((wf) => {
-        if (importGeneration !== mediaImportGeneration) return;
-        useMediaStore.getState().setAssetWaveform(a.id, {
-          peaks: wf.peaks,
-          peaksPerSecond: wf.peaksPerSecond,
-        });
-      }).catch(() => {
-        // A corrupt/unsupported audio stream should not become an unhandled
-        // rejection after the import itself has already completed.
-      });
-    }
+    // Background: disk-backed audio (including video soundtracks) is streamed
+    // through FFmpeg so long sources never become one giant AudioBuffer.
+    for (const asset of newAssets) scheduleAssetWaveform(asset);
 
     return newAssets;
   },
@@ -454,6 +554,7 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
       importStatus: null,
       importError: errors.length > 0 ? errors.join(' / ') : null,
     }));
+    for (const asset of newAssets) scheduleAssetWaveform(asset);
     return newAssets;
   },
 
@@ -475,6 +576,7 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
       assets: [...state.assets, asset],
       selectedAssetId: state.selectedAssetId ?? asset.id,
     }));
+    scheduleAssetWaveform(asset);
     return asset;
   },
 
@@ -517,7 +619,9 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
 
   setAssetWaveform: (id, waveform) =>
     set((state) => ({
-      assets: state.assets.map((a) => (a.id === id ? { ...a, waveform } : a)),
+      assets: state.assets.map((a) =>
+        a.id === id ? { ...a, waveform, waveformStatus: 'ready' } : a,
+      ),
     })),
 }));
 
