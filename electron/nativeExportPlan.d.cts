@@ -21,6 +21,7 @@ export function buildNativeExportPlan(
   sourceByAssetId: Map<string, { path: string; hasAudio: boolean }>,
   overlayPathByClipId: Map<string, string>,
   outputPath: string,
+  videoEncoder?: 'libx264' | 'h264_nvenc' | 'h264_qsv' | 'h264_amf',
 ): {
   args: string[];
   filterGraph: string;
@@ -28,6 +29,7 @@ export function buildNativeExportPlan(
   width: number;
   height: number;
   fps: number;
+  videoEncoder: string;
 };
 
 export function parseProgressText(

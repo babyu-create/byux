@@ -28,10 +28,17 @@ const {
   minimalEnvironment,
   probeInputHasAudio,
   resolveFfmpegBinary,
+  runCaptured,
   terminateProcess,
   validateOutput,
   verifyFfmpegBinary,
 } = require('./nativeFfmpeg.cjs');
+const {
+  HARDWARE_VIDEO_ENCODERS,
+  buildHardwareProbeArgs,
+  encoderLabel,
+  isHardwareEncoderFailure,
+} = require('./hardwareEncoding.cjs');
 const { renameWithRetry, syncFileForCommit } = require('./nativeFs.cjs');
 const {
   VIDEO_EXTENSIONS,
@@ -650,6 +657,7 @@ const pendingProxyJobs = new Map();
 const pendingWaveformJobs = new Map();
 let lastExportPath = null;
 let ffmpegCapabilityPromise = null;
+const hardwareEncoderProbeCache = new Map();
 let exportJournalOperation = Promise.resolve();
 
 function exportJournalPath() {
@@ -784,6 +792,61 @@ function ensureNativeFfmpeg() {
     });
   }
   return ffmpegCapabilityPromise;
+}
+
+const HARDWARE_PROBE_CACHE_MS = 5 * 60 * 1000;
+
+async function findHardwareVideoEncoder(binaryPath, width, height, fps, entry) {
+  const key = `${width}x${height}@${fps}`;
+  const cached = hardwareEncoderProbeCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const promise = (async () => {
+    for (const encoder of HARDWARE_VIDEO_ENCODERS) {
+      if (entry?.cancelled) throw new Error('書き出しが中止されました');
+      try {
+        let probeChild = null;
+        const result = await runCaptured(
+          binaryPath,
+          buildHardwareProbeArgs(encoder.id, width, height, fps),
+          {
+            timeoutMs: 12_000,
+            onSpawn(child) {
+              probeChild = child;
+              if (entry) entry.child = child;
+            },
+          },
+        );
+        if (entry?.child === probeChild) entry.child = null;
+        if (entry?.cancelled) throw new Error('書き出しが中止されました');
+        if (result.code === 0) return encoder;
+      } catch (error) {
+        if (entry?.cancelled) throw error;
+        if (entry) entry.child = null;
+        // A missing driver, unsupported adapter, or timed-out device is an
+        // ordinary capability miss. Continue to the next vendor backend.
+      }
+    }
+    return null;
+  })();
+  hardwareEncoderProbeCache.set(key, {
+    expiresAt: Date.now() + HARDWARE_PROBE_CACHE_MS,
+    promise,
+  });
+  void promise.catch(() => {
+    if (hardwareEncoderProbeCache.get(key)?.promise === promise) {
+      hardwareEncoderProbeCache.delete(key);
+    }
+  });
+  return promise;
+}
+
+function nativeEncodingPreference(request) {
+  const preference = request?.encodingPreference ?? 'auto';
+  if (preference !== 'auto' && preference !== 'software') {
+    throw new NativeExportPlanError('INVALID_OPTIONS', '書き出し高速化設定が不正です');
+  }
+  return preference;
 }
 
 function sendNativeExportEvent(token, payload) {
@@ -1311,6 +1374,35 @@ function waitForNativeChild(entry, child, totalDuration) {
   });
 }
 
+async function executeNativePlan(entry, binaryPath, plan, stage) {
+  entry.runtimeError = null;
+  sendNativeExportEvent(entry.token, {
+    phase: 'preparing',
+    stage,
+    overallProgress: entry.progress ?? 0,
+    totalSeconds: plan.totalDuration,
+    encoderLabel: encoderLabel(plan.videoEncoder),
+    hardwareEncoding: plan.videoEncoder !== 'libx264',
+  });
+  const child = spawn(binaryPath, plan.args, {
+    shell: false,
+    windowsHide: true,
+    detached: false,
+    cwd: entry.workDir,
+    stdio: ['ignore', 'ignore', 'pipe', 'pipe'],
+    env: minimalEnvironment(),
+  });
+  entry.child = child;
+  try {
+    const result = await waitForNativeChild(entry, child, plan.totalDuration);
+    if (entry.runtimeError) throw entry.runtimeError;
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+    return result;
+  } finally {
+    entry.child = null;
+  }
+}
+
 async function runNativeExport(token, entry, request) {
   let cleanupError = null;
   try {
@@ -1324,6 +1416,7 @@ async function runNativeExport(token, entry, request) {
     });
     await ensureNativeFfmpeg();
     if (entry.cancelled) throw new Error('書き出しが中止されました');
+    const preference = nativeEncodingPreference(request);
 
     const binaryPath = ffmpegBinaryPath();
     const sourceByAssetId = await leaseNativeSources(request, binaryPath, entry);
@@ -1335,12 +1428,37 @@ async function runNativeExport(token, entry, request) {
     await persistExportJournal();
     if (entry.cancelled) throw new Error('書き出しが中止されました');
     const overlayPathByClipId = await writeNativeOverlayFiles(request, entry);
-    const plan = buildNativeExportPlan(
+    const softwarePlan = buildNativeExportPlan(
       request,
       sourceByAssetId,
       overlayPathByClipId,
       entry.temporaryPath,
     );
+    let hardwareEncoder = null;
+    if (preference === 'auto') {
+      sendNativeExportEvent(token, {
+        phase: 'preflight',
+        stage: 'このPCで使えるGPUエンコーダーを確認しています',
+        overallProgress: 0,
+      });
+      hardwareEncoder = await findHardwareVideoEncoder(
+        binaryPath,
+        softwarePlan.width,
+        softwarePlan.height,
+        softwarePlan.fps,
+        entry,
+      );
+      if (entry.cancelled) throw new Error('書き出しが中止されました');
+    }
+    let plan = hardwareEncoder
+      ? buildNativeExportPlan(
+          request,
+          sourceByAssetId,
+          overlayPathByClipId,
+          entry.temporaryPath,
+          hardwareEncoder.id,
+        )
+      : softwarePlan;
     await fs.writeFile(path.join(entry.workDir, 'filter-complex.txt'), plan.filterGraph, {
       encoding: 'utf8',
       flag: 'wx',
@@ -1350,25 +1468,30 @@ async function runNativeExport(token, entry, request) {
 
     entry.state = 'encoding';
     entry.started = true;
-    sendNativeExportEvent(token, {
-      phase: 'preparing',
-      stage: 'ネイティブFFmpegを起動しています',
-      overallProgress: 0,
-      totalSeconds: plan.totalDuration,
-    });
-    const child = spawn(binaryPath, plan.args, {
-      shell: false,
-      windowsHide: true,
-      detached: false,
-      cwd: entry.workDir,
-      stdio: ['ignore', 'ignore', 'pipe', 'pipe'],
-      env: minimalEnvironment(),
-    });
-    entry.child = child;
-    const result = await waitForNativeChild(entry, child, plan.totalDuration);
-    entry.child = null;
-    if (entry.runtimeError) throw entry.runtimeError;
-    if (entry.cancelled) throw new Error('書き出しが中止されました');
+    let result = await executeNativePlan(
+      entry,
+      binaryPath,
+      plan,
+      hardwareEncoder
+        ? `GPU高速書き出しを開始しています（${hardwareEncoder.label}）`
+        : 'CPU書き出しを開始しています',
+    );
+    if (
+      result.code !== 0 &&
+      hardwareEncoder &&
+      isHardwareEncoderFailure(entry.stderrTail ?? '', hardwareEncoder.id)
+    ) {
+      await fs.rm(entry.temporaryPath, { force: true });
+      if (entry.cancelled) throw new Error('書き出しが中止されました');
+      entry.stderrTail = '';
+      plan = softwarePlan;
+      result = await executeNativePlan(
+        entry,
+        binaryPath,
+        plan,
+        'GPUを利用できないためCPUで安全に再試行しています',
+      );
+    }
     if (result.code !== 0) {
       throw new Error(`FFmpegが終了コード ${String(result.code)} で停止しました`);
     }

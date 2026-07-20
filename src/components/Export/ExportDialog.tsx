@@ -251,6 +251,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const [resolution, setResolution] = useState<ProjectResolution>(projectResolution);
   const [fps, setFps] = useState<ProjectFps>(projectFps);
   const [quality, setQuality] = useState<ExportQualityPreset>('recommended');
+  const [useHardwareEncoding, setUseHardwareEncoding] = useState(true);
   const [motionBlur, setMotionBlur] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState(0);
@@ -492,6 +493,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             setStage(progressStage);
             setProgressIndeterminate(true);
           },
+          useHardwareEncoding ? 'auto' : 'software',
         );
         throwIfCancelled();
         releasePreparedNative = prepared.release;
@@ -506,6 +508,13 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           }
           latestSequence = event.sequence;
           setStage(event.stage);
+          if (event.encoderLabel) {
+            setCoreLabel(
+              event.hardwareEncoding
+                ? `GPU / ${event.encoderLabel}`
+                : event.encoderLabel,
+            );
+          }
           if (Number.isFinite(event.overallProgress)) {
             const nextProgress = Math.max(
               0,
@@ -772,7 +781,9 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             {coreLabel ? (
               <span
                 className={
-                  coreLabel.startsWith('MT') || coreLabel.startsWith('Native')
+                  coreLabel.startsWith('MT') ||
+                  coreLabel.startsWith('Native') ||
+                  coreLabel.startsWith('GPU')
                     ? styles.badgeMt
                     : styles.badgeSt
                 }
@@ -879,6 +890,29 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
                       {value}
                     </button>
                   ))}
+                </div>
+              </div>
+              <div className={styles.optionRow}>
+                <span className={styles.optionLabel}>書き出し処理</span>
+                <div className={styles.encodingGrid}>
+                  <button
+                    type="button"
+                    className={`${styles.qualityBtn} ${useHardwareEncoding ? styles.qualityActive : ''}`}
+                    onClick={() => setUseHardwareEncoding(true)}
+                    aria-pressed={useHardwareEncoding}
+                  >
+                    <strong>GPU自動（おすすめ）</strong>
+                    <small>使えるGPUを実測し、非対応ならCPUへ自動切替</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.qualityBtn} ${!useHardwareEncoding ? styles.qualityActive : ''}`}
+                    onClick={() => setUseHardwareEncoding(false)}
+                    aria-pressed={!useHardwareEncoding}
+                  >
+                    <strong>CPUのみ</strong>
+                    <small>速度より互換性を優先</small>
+                  </button>
                 </div>
               </div>
               {resolution === '2160p' || fps === 120 ? (

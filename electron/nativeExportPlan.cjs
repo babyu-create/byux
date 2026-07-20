@@ -7,6 +7,8 @@
 // generated in the main process, so renderer input can never smuggle a second
 // output, a network protocol, or a `movie=` file read into FFmpeg.
 
+const { buildVideoEncodingArgs } = require('./hardwareEncoding.cjs');
+
 const MAX_CLIPS = 10_000;
 const MAX_TRACKS = 100;
 const MAX_ASSETS = 2_000;
@@ -979,7 +981,13 @@ function buildOverlayParts(base, input, output, index, start, end, intro) {
   return [fade, `${base}${faded}overlay=${x}:${y}:${enable}${output}`];
 }
 
-function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, outputPath) {
+function buildNativeExportPlan(
+  request,
+  sourceByAssetId,
+  overlayPathByClipId,
+  outputPath,
+  videoEncoder = 'libx264',
+) {
   if (!request || request.version !== 1) {
     throw new NativeExportPlanError('INVALID_VERSION', '書き出しデータの形式が不正です');
   }
@@ -1023,6 +1031,12 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     throw new NativeExportPlanError('INVALID_OPTIONS', 'フレームレートが不正です');
   }
   const encoding = encodingSettings(options.quality);
+  let videoEncodingArgs;
+  try {
+    videoEncodingArgs = buildVideoEncodingArgs(videoEncoder, options.quality);
+  } catch {
+    throw new NativeExportPlanError('INVALID_OPTIONS', '動画エンコーダー設定が不正です');
+  }
   const reframe = finite(options.verticalReframe ?? 0, '縦動画の位置', -1, 1);
   if (options.motionBlur !== undefined && typeof options.motionBlur !== 'boolean') {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'モーションブラー設定が不正です');
@@ -1487,12 +1501,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     videoOutputLabel,
     '-map',
     audioOutputLabel,
-    '-c:v',
-    'libx264',
-    '-preset',
-    encoding.preset,
-    '-crf',
-    String(encoding.crf),
+    ...videoEncodingArgs,
     '-pix_fmt',
     'yuv420p',
     '-c:a',
@@ -1526,6 +1535,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     width,
     height,
     fps,
+    videoEncoder,
   };
 }
 

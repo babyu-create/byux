@@ -10,6 +10,20 @@ export function resolveFfmpegBinary(
 
 export function minimalEnvironment(): Record<string, string>;
 export function appendTail(current: string, chunk: Uint8Array, maxBytes?: number): string;
+export function runCaptured(
+  binaryPath: string,
+  args: string[],
+  options?: {
+    timeoutMs?: number;
+    cwd?: string;
+    onSpawn?: (child: ChildProcess) => void;
+  },
+): Promise<{
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}>;
 export function verifyFfmpegBinary(binaryPath: string): Promise<boolean>;
 export function probeInputHasAudio(binaryPath: string, sourcePath: string): Promise<boolean>;
 export function validateOutput(

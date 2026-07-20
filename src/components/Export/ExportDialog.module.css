@@ -322,6 +322,12 @@
   word-break: break-word;
 }
 
+.encodingGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
 .cancelled {
   background: var(--bg-panel);
   border-color: var(--border);

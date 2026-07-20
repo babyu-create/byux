@@ -8,6 +8,7 @@ import { clipDuration } from './timeline';
 import type { Clip, KillMarker, MediaAsset, Track } from './types';
 
 export type NativeExportOptions = Omit<ExportOptions, 'signal' | 'onProgress'>;
+export type NativeEncodingPreference = 'auto' | 'software';
 
 export interface NativeExportAsset {
   id: string;
@@ -27,6 +28,7 @@ export interface NativeExportOverlay {
 
 export interface NativeExportRequest {
   version: 1;
+  encodingPreference: NativeEncodingPreference;
   options: NativeExportOptions;
   clips: Clip[];
   tracks: Track[];
@@ -213,6 +215,7 @@ export async function prepareNativeExportRequest(
   input: ExportInput,
   options: ExportOptions,
   onProgress?: ExportOptions['onProgress'],
+  encodingPreference: NativeEncodingPreference = 'auto',
 ): Promise<{ request: NativeExportRequest; release(): Promise<void> }> {
   throwIfAborted(options.signal);
   const compatibility = getNativeExportCompatibility(input, options);
@@ -365,6 +368,7 @@ export async function prepareNativeExportRequest(
 
     const request: NativeExportRequest = {
       version: 1,
+      encodingPreference,
       options: serializableOptions(options),
       clips: cloneClips(input.clips),
       tracks: input.tracks.map((track) => ({ ...track })),

@@ -48,6 +48,7 @@ function runCaptured(binaryPath, args, options = {}) {
       cwd: options.cwd,
       env: minimalEnvironment(),
     });
+    if (typeof options.onSpawn === 'function') options.onSpawn(child);
     const finish = (error, result) => {
       if (settled) return;
       settled = true;

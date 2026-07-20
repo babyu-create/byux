@@ -320,6 +320,7 @@ describe('prepareNativeExportRequest', () => {
     );
 
     expect(prepared.request.version).toBe(1);
+    expect(prepared.request.encodingPreference).toBe('auto');
     expect(prepared.request.options).not.toHaveProperty('signal');
     expect(prepared.request.options).not.toHaveProperty('onProgress');
     expect(prepared.request.assets).toEqual([

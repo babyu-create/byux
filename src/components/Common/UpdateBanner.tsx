@@ -123,6 +123,8 @@ interface ExportAPI {
       etaSec?: number | null;
       fps?: number | null;
       totalBytes?: number | null;
+      encoderLabel?: string;
+      hardwareEncoding?: boolean;
       error?: { code: string; message: string; details?: string[] };
     }) => void,
   ): () => void;

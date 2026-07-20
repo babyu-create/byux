@@ -137,6 +137,31 @@ describe('nativeExportPlan', () => {
     expect(plan.args.at(-1)).toBe('C:\\output\\.movie.part');
   });
 
+  it('uses a main-process-selected hardware encoder without changing the graph', () => {
+    const source = new Map([
+      ['asset', { path: 'source.mp4', hasAudio: false }],
+    ]);
+    const software = buildNativeExportPlan(
+      request(),
+      source,
+      new Map(),
+      'software.part',
+    );
+    const hardware = buildNativeExportPlan(
+      request(),
+      source,
+      new Map(),
+      'hardware.part',
+      'h264_nvenc',
+    );
+
+    expect(software.videoEncoder).toBe('libx264');
+    expect(hardware.videoEncoder).toBe('h264_nvenc');
+    expect(hardware.args).toContain('h264_nvenc');
+    expect(hardware.args).not.toContain('libx264');
+    expect(hardware.filterGraph).toBe(software.filterGraph);
+  });
+
   it('skips an empty visible video lane when selecting the base lane', () => {
     const base = request();
     const plan = buildNativeExportPlan(
