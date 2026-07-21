@@ -3,6 +3,13 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const updaterListeners = new Set();
 const nativeExportListeners = new Set();
 
+function localNameFromPath(filePath, fallback) {
+  const normalized = String(filePath).replace(/[\\/]+$/, '');
+  const separator = Math.max(normalized.lastIndexOf('\\'), normalized.lastIndexOf('/'));
+  const name = normalized.slice(separator + 1);
+  return name || fallback;
+}
+
 function localMediaRef(file, kind) {
   if (kind !== undefined && kind !== 'video' && kind !== 'audio') {
     return { ok: false, code: 'INVALID_KIND' };
@@ -11,7 +18,7 @@ function localMediaRef(file, kind) {
   if (!filePath) return { ok: false, code: 'NOT_DISK_BACKED' };
   const ref = {
     path: filePath,
-    name: file?.name,
+    name: localNameFromPath(filePath, file?.name),
     size: file?.size,
     ...(kind ? { kind } : {}),
   };
@@ -79,7 +86,7 @@ contextBridge.exposeInMainWorld('fce', {
       source: {
         ...registered,
         path: local.ref.path,
-        name: local.ref.name,
+        name: registered.name ?? local.ref.name,
         kind: registered.kind ?? local.ref.kind,
       },
     };

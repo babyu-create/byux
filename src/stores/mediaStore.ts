@@ -370,13 +370,6 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
           asset = needsNativeIdentification && registeredSource
             ? await assetFromNativeSource(registeredSource)
             : await fileToMediaAsset(file);
-          if (asset && registeredSource) {
-            asset = {
-              ...asset,
-              path: registeredSource.path,
-              sourceToken: registeredSource.token,
-            };
-          }
         } catch (probeError) {
           if (!kind) throw probeError;
           const { createPreviewProxy } = await import('../lib/exporter');
@@ -461,6 +454,14 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
               previewProxy: true,
             };
           }
+        }
+        if (asset && registeredSource) {
+          asset = {
+            ...asset,
+            name: registeredSource.name,
+            path: registeredSource.path,
+            sourceToken: registeredSource.token,
+          };
         }
         if (asset) {
           if (importGeneration !== mediaImportGeneration) {

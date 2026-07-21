@@ -332,6 +332,44 @@ describe('mediaStore native source registration', () => {
     })
   })
 
+  it('uses the canonical source name when a Windows drag reports File.name as a full path', async () => {
+    const file = new File(['video'], 'A:\\Valorant 2026.07.20 - 16.42.11.10.DVR.m2ts', {
+      type: 'video/mp2t',
+    })
+    const source: NativeMediaSource = {
+      path: file.name,
+      name: 'Valorant 2026.07.20 - 16.42.11.10.DVR.m2ts',
+      size: file.size,
+      kind: 'video',
+      token: 'full-path-drag-token',
+      url: 'fce-media://asset/full-path-drag-token',
+    }
+    const registerMediaFileFromFile = vi.fn().mockResolvedValue({ ok: true, source })
+    const createPreviewProxy = vi.fn().mockResolvedValue({
+      ok: true,
+      token: 'full-path-preview-token',
+      url: 'fce-media://asset/full-path-preview-token',
+      size: 100,
+      cached: false,
+    })
+    installFceApi({ registerMediaFileFromFile, createPreviewProxy })
+    mediaMocks.probeVideoUrlMetadata.mockResolvedValue({
+      duration: 120,
+      width: 1920,
+      height: 1080,
+    })
+
+    const created = await useMediaStore.getState().addFiles([file])
+
+    expect(registerMediaFileFromFile).toHaveBeenCalledWith(file, 'video')
+    expect(created[0]).toMatchObject({
+      name: source.name,
+      path: source.path,
+      sourceToken: source.token,
+      previewSourceToken: 'full-path-preview-token',
+    })
+  })
+
   it('discards an in-flight source when the project is cleared', async () => {
     let resolveMetadata:
       | ((value: { duration: number; width: number; height: number }) => void)

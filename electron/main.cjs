@@ -60,6 +60,7 @@ const {
 const { buildAssSubtitles } = require('./nativeSubtitles.cjs');
 const { encodeWaveformCache, decodeWaveformCache } = require('./waveformCache.cjs');
 const { sanitizeDiagnosticText, boundedProjectSummary, boundedCrashSummary } = require('./diagnostics.cjs');
+const { canonicalMediaName } = require('./mediaReference.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -2002,26 +2003,27 @@ const registeredMedia = new Map();
 const authorizedMediaRefs = new Map();
 const MAX_MEDIA_CHUNK_BYTES = 8 * 1024 * 1024;
 
-function mediaApprovalKey(filePath, name, size) {
+function mediaApprovalKey(filePath, size) {
   const normalized = path.resolve(filePath);
   const platformPath = process.platform === 'win32'
     ? normalized.toLowerCase()
     : normalized;
-  return `${platformPath}\u0000${name}\u0000${size}`;
+  return `${platformPath}\u0000${size}`;
 }
 
 function authorizeMediaRef(ref) {
+  const canonicalName = canonicalMediaName(ref?.path);
   if (
     !ref ||
     typeof ref.path !== 'string' ||
     !path.isAbsolute(ref.path) ||
+    !canonicalName ||
     typeof ref.name !== 'string' ||
     ref.name.length === 0 ||
-    ref.name.length > 1_024 ||
+    ref.name.length > 32_768 ||
     typeof ref.size !== 'number' ||
     !Number.isSafeInteger(ref.size) ||
-    ref.size < 0 ||
-    path.basename(ref.path).toLowerCase() !== ref.name.toLowerCase()
+    ref.size < 0
   ) {
     return false;
   }
@@ -2039,10 +2041,11 @@ function authorizeMediaRef(ref) {
   for (const [key, approval] of authorizedMediaRefs) {
     if (approval.sessionId !== documentSessionId) authorizedMediaRefs.delete(key);
   }
-  const key = mediaApprovalKey(ref.path, ref.name, ref.size);
+  const key = mediaApprovalKey(ref.path, ref.size);
   if (!authorizedMediaRefs.has(key) && authorizedMediaRefs.size >= 4_096) return false;
   authorizedMediaRefs.set(key, {
     sessionId: documentSessionId,
+    name: canonicalName,
   });
   return true;
 }
@@ -2065,12 +2068,12 @@ ipcMain.on('media:authorize-file-sync', (event, ref) => {
   try {
     const stat = fsStream.statSync(ref.path);
     if (!stat.isFile() || stat.size !== ref.size) {
-      authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.name, ref.size));
+      authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.size));
       return;
     }
     event.returnValue = true;
   } catch {
-    authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.name, ref.size));
+    authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.size));
   }
 });
 
@@ -2092,6 +2095,7 @@ function registerResolvedMedia(realPath, stat, kind, name) {
     url: `fce-media://asset/${token}`,
     size: stat.size,
     kind,
+    name,
   };
 }
 
@@ -2179,20 +2183,21 @@ ipcMain.handle('media:select-files', async (event, options) => {
 
 ipcMain.handle('media:register-file', async (event, ref) => {
   if (!isTrustedIpcEvent(event)) return null;
+  const canonicalName = canonicalMediaName(ref?.path);
   if (
     typeof ref !== 'object' ||
     ref === null ||
     typeof ref.path !== 'string' ||
+    !canonicalName ||
     typeof ref.name !== 'string' ||
     typeof ref.size !== 'number' ||
     !Number.isSafeInteger(ref.size) ||
     ref.size < 0 ||
-    (ref.kind !== undefined && ref.kind !== 'video' && ref.kind !== 'audio') ||
-    path.basename(ref.path).toLowerCase() !== ref.name.toLowerCase()
+    (ref.kind !== undefined && ref.kind !== 'video' && ref.kind !== 'audio')
   ) {
     return null;
   }
-  const approvalKey = mediaApprovalKey(ref.path, ref.name, ref.size);
+  const approvalKey = mediaApprovalKey(ref.path, ref.size);
   const approval = authorizedMediaRefs.get(approvalKey);
   if (
     !approval ||
@@ -2209,7 +2214,7 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     if (!stat.isFile() || stat.size !== ref.size) return null;
     const kind = await resolveMediaKind(realPath, ref.kind ?? null);
     if (!kind || (ref.kind && kind !== ref.kind)) return null;
-    return registerResolvedMedia(realPath, stat, kind, ref.name);
+    return registerResolvedMedia(realPath, stat, kind, approval.name ?? canonicalName);
   } catch {
     return null;
   }
