@@ -1,5 +1,5 @@
 import { useState, type MouseEvent } from 'react';
-import { Scissors, Trash2, Magnet, ZoomIn, ZoomOut, ListPlus } from 'lucide-react';
+import { Captions, Scissors, Trash2, Magnet, ZoomIn, ZoomOut, ListPlus } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { formatTimecode } from '../../lib/media';
@@ -10,9 +10,11 @@ import {
 import styles from './TimelineToolbar.module.css';
 import { ContextMenu } from '../Common/ContextMenu';
 import type { TrackKind } from '../../lib/types';
+import { SubtitleDialog } from './SubtitleDialog';
 
 export function TimelineToolbar() {
   const [trackMenu, setTrackMenu] = useState<{ x: number; y: number } | null>(null);
+  const [subtitleDialogOpen, setSubtitleDialogOpen] = useState(false);
   const zoom = useProjectStore((s) => s.zoom);
   const zoomIn = useProjectStore((s) => s.zoomIn);
   const zoomOut = useProjectStore((s) => s.zoomOut);
@@ -24,6 +26,7 @@ export function TimelineToolbar() {
   const addTrack = useProjectStore((s) => s.addTrack);
   const showMessage = useProjectStore((s) => s.showMessage);
   const pendingIn = useProjectStore((s) => s.pendingIn);
+  const subtitleCount = useProjectStore((s) => s.subtitles.length);
   const clearPendingIn = useProjectStore((s) => s.clearPendingIn);
   const assets = useMediaStore((s) => s.assets);
   const pendingAssetName = pendingIn
@@ -85,6 +88,16 @@ export function TimelineToolbar() {
         </button>
         <button
           type="button"
+          className={`${styles.actionBtn} ${subtitleCount > 0 ? styles.actionActive : ''}`}
+          onClick={() => setSubtitleDialogOpen(true)}
+          title="字幕（SRT / WebVTT）を読み込み・編集"
+          aria-label={`字幕を編集（${subtitleCount}件）`}
+        >
+          <Captions size={14} strokeWidth={2} aria-hidden="true" />
+          <span>字幕{subtitleCount > 0 ? ` ${subtitleCount}` : ''}</span>
+        </button>
+        <button
+          type="button"
           className={styles.actionBtn}
           onClick={splitSelectedWithFeedback}
           disabled={!hasSelection}
@@ -127,6 +140,9 @@ export function TimelineToolbar() {
             { label: '音声トラックを追加', onSelect: () => handleAddTrack('audio') },
           ]}
         />
+      ) : null}
+      {subtitleDialogOpen ? (
+        <SubtitleDialog onClose={() => setSubtitleDialogOpen(false)} />
       ) : null}
 
       <div className={styles.zoomGroup}>

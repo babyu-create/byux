@@ -6,6 +6,7 @@ import {
   gainToDecibels,
   recommendPeakVolume,
 } from '../../lib/audioLevels';
+import { recommendLoudnessVolume } from '../../lib/loudness';
 import type { Clip } from '../../lib/types';
 import styles from './ClipVolumeSection.module.css';
 
@@ -16,6 +17,7 @@ interface ClipVolumeSectionProps {
 export function ClipVolumeSection({ clip }: ClipVolumeSectionProps) {
   const setVolume = useProjectStore((s) => s.setClipVolume);
   const toggleMuted = useProjectStore((s) => s.toggleClipMuted);
+  const analyzeAssetLoudness = useMediaStore((state) => state.analyzeAssetLoudness);
   const asset = useMediaStore((state) =>
     state.assets.find((candidate) => candidate.id === clip.assetId),
   );
@@ -42,6 +44,18 @@ export function ClipVolumeSection({ clip }: ClipVolumeSectionProps) {
         : asset?.waveform
           ? '選択範囲は無音です'
           : '音声解析を利用できません';
+  const loudnessRecommendation = asset?.loudness
+    ? recommendLoudnessVolume(asset.loudness)
+    : null;
+  const loudnessHint = asset?.loudness
+    ? loudnessRecommendation
+      ? `素材 ${asset.loudness.integratedLufs.toFixed(1)} LUFS / ${asset.loudness.truePeakDbfs.toFixed(1)} dBTP · 適用後 ${loudnessRecommendation.predictedLufs.toFixed(1)} LUFS${loudnessRecommendation.limitedByPeak ? '（ピーク保護）' : loudnessRecommendation.limitedByVolumeRange ? '（200%上限）' : ''}`
+      : '解析結果から安全な音量を計算できません'
+    : asset?.loudnessStatus === 'loading'
+      ? '素材全体の聴感音量を解析中… 長い素材では時間がかかります'
+      : asset?.loudnessStatus === 'unavailable'
+        ? 'この素材の聴感音量を解析できません'
+        : '素材全体を解析し、配信動画向けの -14 LUFS を目安に整えます';
 
   return (
     <div className={styles.root}>
@@ -102,6 +116,31 @@ export function ClipVolumeSection({ clip }: ClipVolumeSectionProps) {
       </div>
 
       <div className={styles.peakTool}>
+        <button
+          type="button"
+          className={styles.normalizeBtn}
+          onClick={async () => {
+            if (!asset || asset.loudnessStatus === 'loading') return;
+            const analysis = asset.loudness ?? await analyzeAssetLoudness(asset.id);
+            const next = analysis ? recommendLoudnessVolume(analysis) : null;
+            if (next) setVolume(clip.id, next.volume);
+          }}
+          disabled={!asset || asset.loudnessStatus === 'loading'}
+          aria-label="クリップの聴感音量をマイナス14 LUFSに整える"
+          title="素材全体の聴感音量と真のピークを解析して安全な音量を設定"
+        >
+          <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
+          {asset?.loudnessStatus === 'loading'
+            ? 'LUFS を解析中…'
+            : asset?.loudness
+              ? '聴感音量を -14 LUFS に整える'
+              : '解析して -14 LUFS に整える'}
+        </button>
+        <p className={styles.peakHint} aria-live="polite">{loudnessHint}</p>
+        <p className={styles.peakNote}>
+          長尺でも低メモリで解析します。区間ごとの差が大きい素材は個別調整してください。
+        </p>
+        <div className={styles.toolDivider} aria-hidden="true" />
         <button
           type="button"
           className={styles.normalizeBtn}

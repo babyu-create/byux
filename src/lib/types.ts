@@ -9,6 +9,32 @@ export type TrackKind = 'video' | 'overlay' | 'audio';
 export type ProjectFps = 30 | 60 | 120;
 export type ProjectResolution = '720p' | '1080p' | '1440p' | '2160p';
 
+export interface SubtitleCue {
+  id: string;
+  /** Project timeline seconds. */
+  start: number;
+  end: number;
+  /** Plain text. Newlines are preserved; markup is never interpreted. */
+  text: string;
+}
+
+export interface SubtitleStyle {
+  fontSize: number;
+  color: string;
+  outlineColor: string;
+  background: string;
+  position: 'top' | 'center' | 'bottom';
+}
+
+export interface AudioProcessing {
+  /** Remove rumble below this frequency. 0 disables the high-pass filter. */
+  highPassHz?: number;
+  lowGainDb?: number;
+  midGainDb?: number;
+  highGainDb?: number;
+  compressor?: boolean;
+}
+
 /**
  * Animatable clip transform (Phase 0 keyframe engine). Each field is either a
  * constant or a sorted Keyframe[] (see lib/keyframes). Applied identically by
@@ -74,6 +100,9 @@ export interface MediaAsset {
   waveform?: { peaks: Float32Array; peaksPerSecond: number };
   /** Runtime-only analysis state. Not persisted in project files. */
   waveformStatus?: 'loading' | 'ready' | 'unavailable';
+  /** Runtime-only EBU R128 result. Source audio is streamed by native FFmpeg. */
+  loudness?: NativeLoudnessAnalysis;
+  loudnessStatus?: 'idle' | 'loading' | 'ready' | 'unavailable';
   /** Absolute disk path (Electron only) — lets a reloaded project re-read the
    *  source file automatically instead of asking the user to re-add it. */
   path?: string;
@@ -114,7 +143,17 @@ export type NativeMediaRegistrationResult =
     };
 
 export type NativeWaveformResult =
-  | { ok: true; peaks: Float32Array; peaksPerSecond: number }
+  | { ok: true; peaks: Float32Array; peaksPerSecond: number; cached?: boolean }
+  | { ok: false; error: string; canceled?: boolean };
+
+export interface NativeLoudnessAnalysis {
+  integratedLufs: number;
+  loudnessRange: number;
+  truePeakDbfs: number;
+}
+
+export type NativeLoudnessResult =
+  | ({ ok: true } & NativeLoudnessAnalysis)
   | { ok: false; error: string; canceled?: boolean };
 
 export type ClipEffectType = 'fade-in' | 'fade-out' | 'motion-blur';
@@ -207,6 +246,8 @@ export interface Clip {
   volume?: number;
   /** Whether the clip is individually muted regardless of volume. */
   muted?: boolean;
+  /** Lightweight clip EQ/dynamics, shared by preview and every export path. */
+  audioProcessing?: AudioProcessing;
   /**
    * Stretch the source to FILL the output frame, ignoring aspect ratio
    * (non-uniform scale). For VALORANT "stretched" gameplay recorded at a 4:3

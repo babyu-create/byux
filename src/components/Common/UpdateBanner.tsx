@@ -4,6 +4,7 @@ import type { NativeExportRequest } from '../../lib/nativeExporter';
 import type {
   NativeMediaRegistrationResult,
   NativeMediaSelectionResult,
+  NativeLoudnessResult,
   NativeWaveformResult,
 } from '../../lib/types';
 import styles from './UpdateBanner.module.css';
@@ -176,6 +177,13 @@ interface FCEGlobal {
   export?: ExportAPI;
   /** Tell the main process whether there are unsaved edits (see `close` handler in electron/main.cjs). */
   setDirty?: (dirty: boolean) => void;
+  saveDiagnostics?: (projectSummary: {
+    tracks: number;
+    clips: number;
+    assets: number;
+    subtitles: number;
+    durationSeconds: number;
+  }) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
   onSaveBeforeClose?: (cb: (id: string) => void) => () => void;
   completeSaveBeforeClose?: (id: string, success: boolean) => void;
   /** Real disk path of a File the user dropped/picked (empty string if none). */
@@ -183,7 +191,7 @@ interface FCEGlobal {
   /** Resolve and register a user-provided disk File before editing starts. */
   registerMediaFileFromFile?: (
     file: File,
-    kind: 'video' | 'audio',
+    kind?: 'video' | 'audio',
   ) => Promise<NativeMediaRegistrationResult>;
   /** Use Electron's native picker so the main process owns the selected paths. */
   selectMediaFiles?: (options?: {
@@ -209,6 +217,9 @@ interface FCEGlobal {
   /** Generate compact peaks in the main process without decoding the whole source in renderer memory. */
   generateMediaWaveform?: (sourceToken: string) => Promise<NativeWaveformResult>;
   cancelMediaWaveform?: (sourceToken: string) => Promise<boolean>;
+  /** Analyze EBU R128 loudness without transferring decoded audio to the renderer. */
+  analyzeMediaLoudness?: (sourceToken: string) => Promise<NativeLoudnessResult>;
+  cancelMediaLoudness?: (sourceToken: string) => Promise<boolean>;
   /** Bounded source read used only by explicit heavyweight operations. */
   readMediaFileChunk?: (
     token: string,

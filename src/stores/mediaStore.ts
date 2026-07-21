@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { MediaAsset } from '../lib/types';
+import type { MediaAsset, NativeLoudnessAnalysis } from '../lib/types';
 import {
   fileToMediaAsset,
   guessMimeType,
@@ -38,6 +38,7 @@ interface MediaStoreState {
   clearError: () => void;
   setAssetBeats: (id: string, beats: number[]) => void;
   setAssetWaveform: (id: string, waveform: { peaks: Float32Array; peaksPerSecond: number }) => void;
+  analyzeAssetLoudness: (id: string) => Promise<NativeLoudnessAnalysis | null>;
 }
 
 function nativeRegistrationError(
@@ -135,6 +136,11 @@ function releaseAssetMediaTokens(asset: MediaAsset): void {
     } catch {
       // A tearing-down preload bridge may throw synchronously.
     }
+    try {
+      void window.fce?.cancelMediaLoudness?.(asset.sourceToken).catch(() => {});
+    } catch {
+      // A tearing-down preload bridge may throw synchronously.
+    }
   }
   const releaseMediaFile = window.fce?.releaseMediaFile;
   if (!releaseMediaFile) return;
@@ -160,6 +166,11 @@ async function releaseAssetMediaTokensNow(asset: MediaAsset): Promise<void> {
   if (asset.sourceToken) {
     try {
       await window.fce?.cancelMediaWaveform?.(asset.sourceToken);
+    } catch {
+      // The job also stops when the renderer or main process exits.
+    }
+    try {
+      await window.fce?.cancelMediaLoudness?.(asset.sourceToken);
     } catch {
       // The job also stops when the renderer or main process exits.
     }
@@ -332,16 +343,18 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
       let registeredSource: NativeMediaSource | undefined;
       let keepRegisteredSource = false;
       try {
-        const kind = isVideoFile(file)
+        let kind: 'video' | 'audio' | null = isVideoFile(file)
           ? 'video'
           : isAudioFile(file)
             ? 'audio'
             : null;
         const registerFromFile = window.fce?.registerMediaFileFromFile;
-        if (window.fce?.isElectron && kind && registerFromFile) {
-          const result = await registerFromFile(file, kind);
+        const needsNativeIdentification = kind === null;
+        if (window.fce?.isElectron && registerFromFile) {
+          const result = await registerFromFile(file, kind ?? undefined);
           if (!result.ok) throw nativeRegistrationError(file.name, result);
           registeredSource = result.source;
+          kind = result.source.kind;
         }
 
         let asset: MediaAsset | null;
@@ -354,7 +367,9 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
           ) {
             throw new Error('互換プレビューを作成します');
           }
-          asset = await fileToMediaAsset(file);
+          asset = needsNativeIdentification && registeredSource
+            ? await assetFromNativeSource(registeredSource)
+            : await fileToMediaAsset(file);
           if (asset && registeredSource) {
             asset = {
               ...asset,
@@ -623,6 +638,71 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
         a.id === id ? { ...a, waveform, waveformStatus: 'ready' } : a,
       ),
     })),
+
+  analyzeAssetLoudness: async (id) => {
+    const asset = get().assets.find((candidate) => candidate.id === id);
+    if (!asset) return null;
+    if (asset.loudness) return asset.loudness;
+    const sourceToken = asset.sourceToken;
+    const analyze = window.fce?.analyzeMediaLoudness;
+    if (!sourceToken || !analyze) {
+      set((state) => ({
+        assets: state.assets.map((candidate) =>
+          candidate.id === id
+            ? { ...candidate, loudnessStatus: 'unavailable' }
+            : candidate,
+        ),
+      }));
+      return null;
+    }
+    set((state) => ({
+      assets: state.assets.map((candidate) =>
+        candidate.id === id
+          ? { ...candidate, loudnessStatus: 'loading' }
+          : candidate,
+      ),
+    }));
+    try {
+      const result = await analyze(sourceToken);
+      const current = get().assets.find((candidate) => candidate.id === id);
+      if (!current || current.sourceToken !== sourceToken) return null;
+      if (!result.ok) {
+        set((state) => ({
+          assets: state.assets.map((candidate) =>
+            candidate.id === id
+              ? { ...candidate, loudnessStatus: 'unavailable' }
+              : candidate,
+          ),
+        }));
+        return null;
+      }
+      const loudness: NativeLoudnessAnalysis = {
+        integratedLufs: result.integratedLufs,
+        loudnessRange: result.loudnessRange,
+        truePeakDbfs: result.truePeakDbfs,
+      };
+      set((state) => ({
+        assets: state.assets.map((candidate) =>
+          candidate.id === id
+            ? { ...candidate, loudness, loudnessStatus: 'ready' }
+            : candidate,
+        ),
+      }));
+      return loudness;
+    } catch {
+      const current = get().assets.find((candidate) => candidate.id === id);
+      if (current?.sourceToken === sourceToken) {
+        set((state) => ({
+          assets: state.assets.map((candidate) =>
+            candidate.id === id
+              ? { ...candidate, loudnessStatus: 'unavailable' }
+              : candidate,
+          ),
+        }));
+      }
+      return null;
+    }
+  },
 }));
 
 export const useSelectedAsset = (): MediaAsset | null => {

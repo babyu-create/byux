@@ -124,6 +124,44 @@ async function probeInputHasAudio(binaryPath, sourcePath) {
   return /Stream #\d+:\d+(?:\([^)]*\))?: Audio:/i.test(result.stderr);
 }
 
+function parseInputMediaStreams(stderr) {
+  const text = String(stderr);
+  const hasVideo = /Stream #\d+:\d+(?:\([^)]*\))?: Video:/i.test(text);
+  const hasAudio = /Stream #\d+:\d+(?:\([^)]*\))?: Audio:/i.test(text);
+  return {
+    hasVideo,
+    hasAudio,
+    kind: hasVideo ? 'video' : hasAudio ? 'audio' : null,
+  };
+}
+
+async function probeInputMediaKind(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'info',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+      '-map',
+      '0:v:0?',
+      '-map',
+      '0:a:0?',
+      '-t',
+      '0.001',
+      '-f',
+      'null',
+      '-',
+    ],
+    { timeoutMs: 30_000 },
+  );
+  return parseInputMediaStreams(result.stderr).kind;
+}
+
 function parseDuration(stderr) {
   const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
   if (!match) return null;
@@ -286,7 +324,9 @@ module.exports = {
   MAX_CAPTURE_BYTES,
   appendTail,
   minimalEnvironment,
+  parseInputMediaStreams,
   probeInputHasAudio,
+  probeInputMediaKind,
   resolveFfmpegBinary,
   runCaptured,
   terminateProcess,

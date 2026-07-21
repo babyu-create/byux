@@ -5,7 +5,7 @@ import {
 } from './exporter';
 import { rasterizeOverlays } from './overlayRaster';
 import { clipDuration } from './timeline';
-import type { Clip, KillMarker, MediaAsset, Track } from './types';
+import type { Clip, KillMarker, MediaAsset, SubtitleCue, SubtitleStyle, Track } from './types';
 
 export type NativeExportOptions = Omit<ExportOptions, 'signal' | 'onProgress'>;
 export type NativeEncodingPreference = 'auto' | 'software';
@@ -33,6 +33,8 @@ export interface NativeExportRequest {
   clips: Clip[];
   tracks: Track[];
   markers: KillMarker[];
+  subtitles: SubtitleCue[];
+  subtitleStyle?: SubtitleStyle;
   assets: NativeExportAsset[];
   overlays: NativeExportOverlay[];
 }
@@ -373,6 +375,8 @@ export async function prepareNativeExportRequest(
       clips: cloneClips(input.clips),
       tracks: input.tracks.map((track) => ({ ...track })),
       markers: (input.markers ?? []).map((marker) => ({ ...marker })),
+      subtitles: (input.subtitles ?? []).map((cue) => ({ ...cue })),
+      subtitleStyle: input.subtitleStyle ? { ...input.subtitleStyle } : undefined,
       assets: requestAssets,
       overlays,
     };

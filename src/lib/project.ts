@@ -10,6 +10,8 @@ import type {
   MediaAsset,
   ProjectFps,
   ProjectResolution,
+  SubtitleCue,
+  SubtitleStyle,
   Track,
 } from './types';
 import type { AudioDucking } from './audioDucking';
@@ -38,6 +40,8 @@ export interface ProjectFile {
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];
+  subtitles?: SubtitleCue[];
+  subtitleStyle?: SubtitleStyle;
   ioRanges: IORange[];
   preRollSec: number;
   postRollSec: number;
@@ -59,6 +63,8 @@ export interface SerialiseInput {
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];
+  subtitles?: SubtitleCue[];
+  subtitleStyle?: SubtitleStyle;
   ioRanges: IORange[];
   preRollSec: number;
   postRollSec: number;
@@ -80,6 +86,8 @@ export function serialiseProject(input: SerialiseInput): ProjectFile {
     tracks: input.tracks,
     clips: input.clips,
     markers: input.markers,
+    ...(input.subtitles ? { subtitles: input.subtitles } : null),
+    ...(input.subtitleStyle ? { subtitleStyle: input.subtitleStyle } : null),
     ioRanges: input.ioRanges,
     preRollSec: input.preRollSec,
     postRollSec: input.postRollSec,
@@ -227,6 +235,16 @@ const audioDuckingSchema = z.object({
   release: finiteNumber,
 });
 
+const audioProcessingSchema = z.object({
+  highPassHz: finiteNumber.refine((n) => n === 0 || (n >= 40 && n <= 300), {
+    message: 'ハイパスは0または40〜300Hzが必要です',
+  }).optional(),
+  lowGainDb: finiteNumber.refine((n) => n >= -12 && n <= 12).optional(),
+  midGainDb: finiteNumber.refine((n) => n >= -12 && n <= 12).optional(),
+  highGainDb: finiteNumber.refine((n) => n >= -12 && n <= 12).optional(),
+  compressor: z.boolean().optional(),
+});
+
 const clipSchema = z.object({
   id: idString,
   trackId: idString,
@@ -242,6 +260,7 @@ const clipSchema = z.object({
     message: '0〜2の範囲が必要です',
   }).optional(),
   muted: z.boolean().optional(),
+  audioProcessing: audioProcessingSchema.optional(),
   stretchToFill: z.boolean().optional(),
   transform: clipTransformSchema.optional(),
   colorGrade: colorGradeSchema.optional(),
@@ -273,6 +292,27 @@ const markerSchema = z.object({
   assetId: idString,
   time: finiteNumber,
   label: shortString.optional(),
+});
+
+const subtitleCueSchema = z.object({
+  id: idString,
+  start: nonNegativeNumber,
+  end: positiveNumber,
+  text: z.string().min(1).max(2_000, '字幕が長すぎます'),
+}).superRefine((cue, ctx) => {
+  if (cue.end <= cue.start) {
+    ctx.addIssue({ code: 'custom', path: ['end'], message: '字幕の終了は開始より後である必要があります' });
+  }
+});
+
+const subtitleStyleSchema = z.object({
+  fontSize: finiteNumber.refine((n) => n >= 2 && n <= 12, {
+    message: '字幕サイズは2〜12の範囲が必要です',
+  }),
+  color: z.string().max(64),
+  outlineColor: z.string().max(64),
+  background: z.string().max(64),
+  position: z.enum(['top', 'center', 'bottom']),
 });
 
 const ioRangeSchema = z.object({
@@ -312,6 +352,8 @@ const projectFileSchema = z.object({
   tracks: z.array(trackSchema).max(100),
   clips: z.array(clipSchema).max(10_000),
   markers: z.array(markerSchema).max(100_000),
+  subtitles: z.array(subtitleCueSchema).max(10_000).optional(),
+  subtitleStyle: subtitleStyleSchema.optional(),
   ioRanges: z.array(ioRangeSchema).max(100_000),
   preRollSec: nonNegativeNumber.refine((n) => n <= 60, { message: '60秒以下が必要です' }),
   postRollSec: nonNegativeNumber.refine((n) => n <= 60, { message: '60秒以下が必要です' }),
@@ -325,7 +367,7 @@ const projectFileSchema = z.object({
 }).superRefine((project, ctx) => {
   const reportDuplicates = (
     values: string[],
-    path: 'tracks' | 'clips' | 'markers' | 'ioRanges' | 'assets',
+    path: 'tracks' | 'clips' | 'markers' | 'subtitles' | 'ioRanges' | 'assets',
   ) => {
     const seen = new Set<string>();
     values.forEach((id, index) => {
@@ -338,6 +380,7 @@ const projectFileSchema = z.object({
   reportDuplicates(project.tracks.map((item) => item.id), 'tracks');
   reportDuplicates(project.clips.map((item) => item.id), 'clips');
   reportDuplicates(project.markers.map((item) => item.id), 'markers');
+  reportDuplicates((project.subtitles ?? []).map((item) => item.id), 'subtitles');
   reportDuplicates(project.ioRanges.map((item) => item.id), 'ioRanges');
   reportDuplicates(project.assets.map((item) => item.id), 'assets');
 

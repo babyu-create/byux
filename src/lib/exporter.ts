@@ -20,6 +20,8 @@ import type {
   MediaAsset,
   ProjectFps,
   ProjectResolution,
+  SubtitleCue,
+  SubtitleStyle,
   Track,
 } from './types';
 import {
@@ -52,6 +54,7 @@ import {
   introForClipOverlays,
   type ClipOverlayIntro,
 } from './overlayText';
+import { ffmpegAudioProcessingFilters } from './audioProcessing';
 
 export type ExportQualityPreset = 'recommended' | 'high' | 'compact';
 
@@ -125,6 +128,8 @@ export interface ExportInput {
    * ducking even if the setting is on (nothing to duck around).
    */
   markers?: KillMarker[];
+  subtitles?: SubtitleCue[];
+  subtitleStyle?: SubtitleStyle;
 }
 
 // ---------------------------------------------------------------------------
@@ -552,6 +557,7 @@ function buildClipFilters(spec: ClipFilterSpec): string {
     aFilters.push(`atrim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`);
     aFilters.push('asetpts=PTS-STARTPTS');
     aFilters.push(...buildAtempoChain(speed));
+    aFilters.push(...ffmpegAudioProcessingFilters(clip.audioProcessing));
     aFilters.push(`volume=${clipVolume.toFixed(3)}`);
     aChain = `[${inputIndex}:a]${aFilters.join(',')}${aOutLabel}`;
   } else {
@@ -2131,6 +2137,7 @@ export async function exportProject(
           `atrim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`,
           'asetpts=PTS-STARTPTS',
           ...buildAtempoChain(speed),
+          ...ffmpegAudioProcessingFilters(clip.audioProcessing),
           `volume=${vol.toFixed(3)}`,
         ];
         if (startMs > 0) filters.push(`adelay=${startMs}|${startMs}`);

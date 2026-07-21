@@ -15,6 +15,7 @@ const MAX_ASSETS = 2_000;
 const MAX_OVERLAYS = 512;
 const MAX_OVERLAY_ITEMS = 5_000;
 const MAX_MARKERS = 10_000;
+const MAX_SUBTITLE_CUES = 10_000;
 const MAX_TIMELINE_SECONDS = 7 * 24 * 60 * 60;
 // FFmpeg's expression parser is recursive. Although the project schema can
 // retain larger authored arrays, emitting thousands of nested if() calls makes
@@ -541,12 +542,14 @@ function buildAudioFilterParts(spec) {
       `asetpts=PTS-STARTPTS,volume=${number(volume)}${outputLabel}`,
     ];
   }
+  const processingFilters = buildAudioProcessingFilters(clip.audioProcessing);
   const ramp = validateSpeedRamp(clip.speedRamp);
   if (!ramp) {
     const filters = [
       `atrim=${number(clip.trimStart)}:${number(clip.trimEnd)}`,
       'asetpts=PTS-STARTPTS',
       ...buildAtempoChain(clip.speed ?? 1),
+      ...processingFilters,
       `volume=${number(volume)}`,
     ];
     return [`[${inputIndex}:a]${filters.join(',')}${outputLabel}`];
@@ -591,9 +594,36 @@ function buildAudioFilterParts(spec) {
   }
   parts.push(
     `${renderedLabels.join('')}concat=n=${rampAudioSegments}:v=0:a=1,` +
+    `${processingFilters.length > 0 ? `${processingFilters.join(',')},` : ''}` +
     `volume=${number(volume)}${outputLabel}`,
   );
   return parts;
+}
+
+function buildAudioProcessingFilters(value) {
+  if (value === undefined) return [];
+  if (!value || typeof value !== 'object') {
+    throw new NativeExportPlanError('INVALID_PROJECT', '音声処理が不正です');
+  }
+  const highPass = finite(value.highPassHz ?? 0, 'ハイパス', 0, 300);
+  if (highPass > 0 && highPass < 40) {
+    throw new NativeExportPlanError('INVALID_PROJECT', 'ハイパスが不正です');
+  }
+  const low = finite(value.lowGainDb ?? 0, '低音EQ', -12, 12);
+  const mid = finite(value.midGainDb ?? 0, '中音EQ', -12, 12);
+  const high = finite(value.highGainDb ?? 0, '高音EQ', -12, 12);
+  if (value.compressor !== undefined && typeof value.compressor !== 'boolean') {
+    throw new NativeExportPlanError('INVALID_PROJECT', 'コンプレッサー設定が不正です');
+  }
+  const filters = [];
+  if (highPass > 0) filters.push(`highpass=f=${number(highPass)}`);
+  if (Math.abs(low) > EPS) filters.push(`equalizer=f=120:t=q:w=0.7:g=${number(low)}`);
+  if (Math.abs(mid) > EPS) filters.push(`equalizer=f=1000:t=q:w=1:g=${number(mid)}`);
+  if (Math.abs(high) > EPS) filters.push(`equalizer=f=6000:t=q:w=0.7:g=${number(high)}`);
+  if (value.compressor === true) {
+    filters.push('acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=1.2');
+  }
+  return filters;
 }
 
 function buildClipFilters(spec) {
@@ -1007,6 +1037,25 @@ function buildNativeExportPlan(
     throw new NativeExportPlanError('INVALID_PROJECT', 'マーカー数が不正です');
   }
   if (
+    request.subtitles !== undefined &&
+    (!Array.isArray(request.subtitles) || request.subtitles.length > MAX_SUBTITLE_CUES)
+  ) {
+    throw new NativeExportPlanError('INVALID_SUBTITLES', '字幕数が不正です');
+  }
+  for (const cue of request.subtitles ?? []) {
+    safeId(cue?.id, '字幕ID');
+    finite(cue?.start, '字幕開始位置', 0, MAX_TIMELINE_SECONDS);
+    finite(cue?.end, '字幕終了位置', 0, MAX_TIMELINE_SECONDS);
+    if (
+      cue.end <= cue.start ||
+      typeof cue.text !== 'string' ||
+      cue.text.length === 0 ||
+      cue.text.length > 2_000
+    ) {
+      throw new NativeExportPlanError('INVALID_SUBTITLES', '字幕の時刻または本文が不正です');
+    }
+  }
+  if (
     !(sourceByAssetId instanceof Map) ||
     !(overlayPathByClipId instanceof Map) ||
     typeof outputPath !== 'string' ||
@@ -1152,6 +1201,7 @@ function buildNativeExportPlan(
       }
       if (effect.intensity !== undefined) finite(effect.intensity, 'ブラー強度', 0, 100);
     }
+    buildAudioProcessingFilters(clip.audioProcessing);
     if (clip.transform !== undefined) {
       if (!clip.transform || typeof clip.transform !== 'object') {
         throw new NativeExportPlanError('INVALID_PROJECT', '変形設定が不正です');
@@ -1423,6 +1473,10 @@ function buildNativeExportPlan(
       );
       videoOutputLabel = output;
     });
+  }
+  if ((request.subtitles?.length ?? 0) > 0) {
+    filters.push(`${videoOutputLabel}ass=filename='subtitles.ass'[vsub]`);
+    videoOutputLabel = '[vsub]';
   }
 
   let audioOutputLabel = '[abase]';

@@ -4,7 +4,7 @@ const updaterListeners = new Set();
 const nativeExportListeners = new Set();
 
 function localMediaRef(file, kind) {
-  if (kind !== 'video' && kind !== 'audio') {
+  if (kind !== undefined && kind !== 'video' && kind !== 'audio') {
     return { ok: false, code: 'INVALID_KIND' };
   }
   const filePath = webUtils.getPathForFile(file);
@@ -13,7 +13,7 @@ function localMediaRef(file, kind) {
     path: filePath,
     name: file?.name,
     size: file?.size,
-    kind,
+    ...(kind ? { kind } : {}),
   };
   const approved = ipcRenderer.sendSync('media:authorize-file-sync', ref);
   if (approved !== true) return { ok: false, code: 'NOT_AUTHORIZED' };
@@ -42,6 +42,9 @@ contextBridge.exposeInMainWorld('fce', {
   isElectron: true,
   setDirty(dirty) {
     ipcRenderer.send('app:dirty', Boolean(dirty));
+  },
+  saveDiagnostics(projectSummary) {
+    return ipcRenderer.invoke('diagnostics:save', projectSummary);
   },
   onSaveBeforeClose(cb) {
     const listener = (_event, payload) => cb(payload?.id);
@@ -77,7 +80,7 @@ contextBridge.exposeInMainWorld('fce', {
         ...registered,
         path: local.ref.path,
         name: local.ref.name,
-        kind: local.ref.kind,
+        kind: registered.kind ?? local.ref.kind,
       },
     };
   },
@@ -95,6 +98,12 @@ contextBridge.exposeInMainWorld('fce', {
   },
   cancelMediaWaveform(sourceToken) {
     return ipcRenderer.invoke('media:cancel-waveform', sourceToken);
+  },
+  analyzeMediaLoudness(sourceToken) {
+    return ipcRenderer.invoke('media:analyze-loudness', sourceToken);
+  },
+  cancelMediaLoudness(sourceToken) {
+    return ipcRenderer.invoke('media:cancel-loudness', sourceToken);
   },
   readMediaFileChunk(token, offset, length) {
     return ipcRenderer.invoke('media:read-chunk', token, offset, length);

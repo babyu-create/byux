@@ -8,6 +8,8 @@ import type {
   PendingIn,
   ProjectFps,
   ProjectResolution,
+  SubtitleCue,
+  SubtitleStyle,
   Track,
   TrackKind,
 } from '../lib/types';
@@ -15,6 +17,11 @@ import { useMediaStore } from './mediaStore';
 import type { HudPreset } from '../lib/motionBlurCore';
 import type { AudioDucking } from '../lib/audioDucking';
 import { applyClipLook } from '../lib/presets';
+import {
+  DEFAULT_SUBTITLE_STYLE,
+  MAX_SUBTITLE_CUES,
+  MAX_SUBTITLE_TEXT_LENGTH,
+} from '../lib/subtitles';
 import {
   placeClipCopies,
   readClipClipboard,
@@ -49,6 +56,8 @@ interface ProjectStoreState {
   tracks: Track[];
   clips: Clip[];
   markers: KillMarker[];
+  subtitles: SubtitleCue[];
+  subtitleStyle: SubtitleStyle;
   /**
    * Project-level BGM auto-ducking (Phase P5). Undefined = no ducking. Lives at
    * project scope (like hudPreset) so the BGM is dipped identically in the live
@@ -120,6 +129,11 @@ interface ProjectStoreState {
   setVerticalReframe: (value: number) => void;
   /** Set (or clear with null) the project-level BGM auto-ducking. */
   setAudioDucking: (ducking: AudioDucking | null) => void;
+  setSubtitles: (cues: SubtitleCue[]) => void;
+  addSubtitle: (atTime?: number) => string | null;
+  updateSubtitle: (id: string, patch: Partial<Omit<SubtitleCue, 'id'>>) => void;
+  removeSubtitle: (id: string) => void;
+  setSubtitleStyle: (patch: Partial<SubtitleStyle>) => void;
   splitSelectedAtPlayhead: () => void;
   setIsPlaying: (playing: boolean) => void;
   togglePlay: () => void;
@@ -177,6 +191,10 @@ interface ProjectStoreState {
     ramp: import('../lib/speedRamp').SpeedRamp | null,
   ) => void;
   setClipVolume: (clipId: string, volume: number) => void;
+  setClipAudioProcessing: (
+    clipId: string,
+    processing: import('../lib/types').AudioProcessing | null,
+  ) => void;
   setClipStretch: (clipId: string, stretchToFill: boolean) => void;
   setClipTransform: (
     clipId: string,
@@ -231,6 +249,16 @@ const MAX_TRACKS = 100;
 const MAX_TRACK_LABEL_LENGTH = 48;
 const MAX_PROJECT_CLIPS = 10_000;
 
+function normalizeSubtitleCue(cue: SubtitleCue): SubtitleCue | null {
+  const start = Math.max(0, Number(cue.start));
+  const end = Math.max(0, Number(cue.end));
+  const text = String(cue.text).slice(0, MAX_SUBTITLE_TEXT_LENGTH);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !text.trim()) {
+    return null;
+  }
+  return { id: cue.id, start, end, text };
+}
+
 function withFreshClipIdentity(clip: Clip): Clip {
   return {
     ...clip,
@@ -265,6 +293,7 @@ type DocState = Pick<
   ProjectStoreState,
   | 'name' | 'aspectRatio' | 'fps' | 'resolution'
   | 'tracks' | 'clips' | 'markers' | 'ioRanges'
+  | 'subtitles' | 'subtitleStyle'
   | 'preRollSec' | 'postRollSec' | 'audioDucking'
   | 'hudPreset' | 'verticalReframe'
 >;
@@ -278,6 +307,8 @@ function partializeDoc(s: ProjectStoreState): DocState {
     tracks: s.tracks,
     clips: s.clips,
     markers: s.markers,
+    subtitles: s.subtitles,
+    subtitleStyle: s.subtitleStyle,
     ioRanges: s.ioRanges,
     preRollSec: s.preRollSec,
     postRollSec: s.postRollSec,
@@ -299,6 +330,8 @@ function docEqual(a: DocState, b: DocState): boolean {
     a.tracks === b.tracks &&
     a.clips === b.clips &&
     a.markers === b.markers &&
+    a.subtitles === b.subtitles &&
+    a.subtitleStyle === b.subtitleStyle &&
     a.ioRanges === b.ioRanges &&
     a.preRollSec === b.preRollSec &&
     a.postRollSec === b.postRollSec &&
@@ -362,6 +395,8 @@ export const useProjectStore = create<ProjectStoreState>()(
   tracks: DEFAULT_TRACKS,
   clips: [],
   markers: [],
+  subtitles: [],
+  subtitleStyle: { ...DEFAULT_SUBTITLE_STYLE },
   audioDucking: undefined,
   selectedClipIds: [],
   selectedMarkerId: null,
@@ -392,6 +427,8 @@ export const useProjectStore = create<ProjectStoreState>()(
       tracks: DEFAULT_TRACKS.map((track) => ({ ...track })),
       clips: [],
       markers: [],
+      subtitles: [],
+      subtitleStyle: { ...DEFAULT_SUBTITLE_STYLE },
       ioRanges: [],
       audioDucking: undefined,
       hudPreset: 'valorant',
@@ -702,6 +739,55 @@ export const useProjectStore = create<ProjectStoreState>()(
     // Null clears the setting so the project serialises back to a ducking-free
     // (backward-compatible) shape, mirroring setClipColorGrade(null) etc.
     set({ audioDucking: ducking ?? undefined }),
+
+  setSubtitles: (cues) =>
+    set({
+      subtitles: cues
+        .slice(0, MAX_SUBTITLE_CUES)
+        .map(normalizeSubtitleCue)
+        .filter((cue): cue is SubtitleCue => cue !== null)
+        .sort((a, b) => a.start - b.start || a.end - b.end),
+    }),
+
+  addSubtitle: (atTime) => {
+    const state = get();
+    if (state.subtitles.length >= MAX_SUBTITLE_CUES) return null;
+    const start = Math.max(0, Number.isFinite(atTime) ? Number(atTime) : state.playhead);
+    const id = crypto.randomUUID();
+    set({
+      subtitles: [...state.subtitles, { id, start, end: start + 2, text: '字幕' }]
+        .sort((a, b) => a.start - b.start || a.end - b.end),
+    });
+    return id;
+  },
+
+  updateSubtitle: (id, patch) =>
+    set((state) => ({
+      subtitles: state.subtitles
+        .map((cue) => {
+          if (cue.id !== id) return cue;
+          const normalized = normalizeSubtitleCue({ ...cue, ...patch, id });
+          return normalized ?? cue;
+        })
+        .sort((a, b) => a.start - b.start || a.end - b.end),
+    })),
+
+  removeSubtitle: (id) =>
+    set((state) => ({ subtitles: state.subtitles.filter((cue) => cue.id !== id) })),
+
+  setSubtitleStyle: (patch) =>
+    set((state) => ({
+      subtitleStyle: {
+        ...state.subtitleStyle,
+        ...patch,
+        fontSize: Math.max(2, Math.min(12, Number(patch.fontSize ?? state.subtitleStyle.fontSize))),
+        position: ['top', 'center', 'bottom'].includes(
+          patch.position ?? state.subtitleStyle.position,
+        )
+          ? (patch.position ?? state.subtitleStyle.position)
+          : state.subtitleStyle.position,
+      },
+    })),
 
   splitSelectedAtPlayhead: () => {
     const { selectedClipIds, playhead, splitClipAt } = get();
@@ -1268,6 +1354,26 @@ export const useProjectStore = create<ProjectStoreState>()(
     }));
   },
 
+  setClipAudioProcessing: (clipId, processing) => {
+    const clampDb = (value: number | undefined) =>
+      Math.max(-12, Math.min(12, Number(value ?? 0)));
+    const highPass = Number(processing?.highPassHz ?? 0);
+    const normalized = processing
+      ? {
+          highPassHz: highPass > 0 ? Math.max(40, Math.min(300, highPass)) : 0,
+          lowGainDb: clampDb(processing.lowGainDb),
+          midGainDb: clampDb(processing.midGainDb),
+          highGainDb: clampDb(processing.highGainDb),
+          compressor: processing.compressor === true,
+        }
+      : undefined;
+    set((state) => ({
+      clips: state.clips.map((clip) =>
+        clip.id === clipId ? { ...clip, audioProcessing: normalized } : clip,
+      ),
+    }));
+  },
+
   setClipStretch: (clipId, stretchToFill) => {
     set((state) => {
       const target = state.clips.find((c) => c.id === clipId);
@@ -1431,6 +1537,8 @@ export const useProjectStore = create<ProjectStoreState>()(
       tracks: file.tracks,
       clips: remap(file.clips),
       markers: remap(file.markers),
+      subtitles: file.subtitles ?? [],
+      subtitleStyle: file.subtitleStyle ?? { ...DEFAULT_SUBTITLE_STYLE },
       ioRanges: remap(file.ioRanges),
       preRollSec: file.preRollSec,
       postRollSec: file.postRollSec,

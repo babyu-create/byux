@@ -20,6 +20,8 @@ import { ClipOverlaysSection } from './ClipOverlaysSection';
 import { ClipPresetsSection } from './ClipPresetsSection';
 import { BeatDetectionSection } from './BeatDetectionSection';
 import { AudioDuckingSection } from './AudioDuckingSection';
+import { ClipAudioProcessingSection } from './ClipAudioProcessingSection';
+import { hasAudioProcessing } from '../../lib/audioProcessing';
 import styles from './PropertiesPanel.module.css';
 
 export function PropertiesPanel() {
@@ -76,6 +78,14 @@ export function PropertiesPanel() {
                 }
               >
                 <ClipVolumeSection clip={selectedClip} />
+              </CollapsibleSection>
+
+              <CollapsibleSection
+                id="audio-processing"
+                title="音声クリア・EQ"
+                active={hasAudioProcessing(selectedClip.audioProcessing)}
+              >
+                <ClipAudioProcessingSection clip={selectedClip} />
               </CollapsibleSection>
 
               {isVideoClip ? (

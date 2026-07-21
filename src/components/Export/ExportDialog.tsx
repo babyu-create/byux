@@ -239,6 +239,8 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const clips = useProjectStore((s) => s.clips);
   const tracks = useProjectStore((s) => s.tracks);
   const markers = useProjectStore((s) => s.markers);
+  const subtitles = useProjectStore((s) => s.subtitles);
+  const subtitleStyle = useProjectStore((s) => s.subtitleStyle);
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
   const projectFps = useProjectStore((s) => s.fps);
   const projectResolution = useProjectStore((s) => s.resolution);
@@ -412,7 +414,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
     setElapsedSec(0);
     try {
       const nativeExport = window.fce?.export;
-      const renderInput = { clips, tracks, assets, markers };
+      const renderInput = { clips, tracks, assets, markers, subtitles, subtitleStyle };
       const renderOptions: ExportOptions = {
         resolution,
         fps,
@@ -567,6 +569,11 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           typeof result.size === 'number' ? result.size / (1024 * 1024) : null,
         );
       } else {
+        if (subtitles.length > 0) {
+          throw new Error(
+            '字幕付き動画にはデスクトップ版の長尺処理エンジンが必要です。アプリを再起動して再試行してください。',
+          );
+        }
         const blob = await exportProject(renderInput, {
           ...renderOptions,
           onProgress: ({ stage: progressStage, percent, log }) => {

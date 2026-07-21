@@ -14,6 +14,7 @@ const http = require('node:http');
 const fsStream = require('node:fs');
 const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
@@ -27,6 +28,7 @@ const {
   appendTail,
   minimalEnvironment,
   probeInputHasAudio,
+  probeInputMediaKind,
   resolveFfmpegBinary,
   runCaptured,
   terminateProcess,
@@ -43,7 +45,6 @@ const { renameWithRetry, syncFileForCommit } = require('./nativeFs.cjs');
 const {
   VIDEO_EXTENSIONS,
   AUDIO_EXTENSIONS,
-  mediaExtensionMatchesKind,
   mediaKindForPath,
 } = require('./mediaFormats.cjs');
 const {
@@ -51,6 +52,14 @@ const {
   createWaveformMetadataAccumulator,
   buildWaveformFfmpegArgs,
 } = require('./nativeWaveform.cjs');
+const {
+  MAX_LOUDNESS_LOG_BYTES,
+  buildLoudnessFfmpegArgs,
+  parseLoudnessSummary,
+} = require('./nativeLoudness.cjs');
+const { buildAssSubtitles } = require('./nativeSubtitles.cjs');
+const { encodeWaveformCache, decodeWaveformCache } = require('./waveformCache.cjs');
+const { sanitizeDiagnosticText, boundedProjectSummary, boundedCrashSummary } = require('./diagnostics.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -215,6 +224,44 @@ function autosavePath() {
 
 function recentProjectsPath() {
   return path.join(app.getPath('userData'), 'recent-projects.json');
+}
+
+const recentDiagnosticEvents = [];
+
+function recordDiagnosticEvent(kind, message) {
+  recentDiagnosticEvents.push({
+    at: new Date().toISOString(),
+    kind: String(kind).slice(0, 64),
+    message: sanitizeDiagnosticText(message),
+  });
+  if (recentDiagnosticEvents.length > 50) recentDiagnosticEvents.shift();
+}
+
+function lastCrashPath() {
+  return path.join(app.getPath('userData'), 'last-main-crash.json');
+}
+
+async function directoryDiagnosticSummary(root, extensionPattern) {
+  try {
+    const names = await fs.readdir(root);
+    let files = 0;
+    let bytes = 0;
+    for (const name of names) {
+      if (!extensionPattern.test(name)) continue;
+      try {
+        const stat = await fs.lstat(path.join(root, name));
+        if (stat.isFile() && !stat.isSymbolicLink()) {
+          files += 1;
+          bytes += stat.size;
+        }
+      } catch {
+        // A concurrently pruned cache entry is omitted from the snapshot.
+      }
+    }
+    return { files, bytes };
+  } catch {
+    return { files: 0, bytes: 0 };
+  }
 }
 
 const atomicWriteQueues = new Map();
@@ -642,6 +689,81 @@ ipcMain.handle('project:remove-recent', async (event, requestedPath) => {
   return true;
 });
 
+ipcMain.handle('diagnostics:save', async (event, projectSummary) => {
+  if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  const now = new Date();
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: '診断情報を保存',
+    defaultPath: path.join(app.getPath('documents'), `Byux-diagnostics-${stamp}.json`),
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: true, canceled: true };
+  try {
+    const [gpuInfo, waveformCache, proxyCache, ffmpegResult, previousCrash] = await Promise.all([
+      app.getGPUInfo('basic').catch(() => null),
+      directoryDiagnosticSummary(waveformCacheRoot(), /\.wfc$/),
+      directoryDiagnosticSummary(proxyCacheRoot(), /\.mp4$/),
+      ensureNativeFfmpeg()
+        .then(() => runCaptured(ffmpegBinaryPath(), ['-hide_banner', '-version'], { timeoutMs: 10_000 }))
+        .catch(() => null),
+      fs.readFile(lastCrashPath(), 'utf8').then((text) => JSON.parse(text)).catch(() => null),
+    ]);
+    const cpu = os.cpus()[0];
+    const report = {
+      schemaVersion: 1,
+      generatedAt: now.toISOString(),
+      privacy: '素材名、プロジェクト名、ユーザー名、ローカルパス、メディアトークンは収集しません。',
+      app: {
+        name: app.getName(),
+        version: app.getVersion(),
+        packaged: app.isPackaged,
+      },
+      runtime: {
+        electron: process.versions.electron,
+        chromium: process.versions.chrome,
+        node: process.versions.node,
+        platform: process.platform,
+        arch: process.arch,
+        osRelease: os.release(),
+        systemVersion: process.getSystemVersion(),
+        locale: app.getLocale(),
+      },
+      hardware: {
+        cpuModel: sanitizeDiagnosticText(cpu?.model ?? 'unknown'),
+        logicalCpuCount: os.cpus().length,
+        totalMemoryBytes: os.totalmem(),
+        freeMemoryBytes: os.freemem(),
+        gpu: gpuInfo,
+        gpuFeatureStatus: app.getGPUFeatureStatus(),
+      },
+      ffmpeg: {
+        available: Boolean(ffmpegResult && ffmpegResult.code === 0),
+        version: sanitizeDiagnosticText(
+          ffmpegResult ? `${ffmpegResult.stdout}\n${ffmpegResult.stderr}`.split(/\r?\n/)[0] : 'unavailable',
+        ),
+      },
+      project: boundedProjectSummary(projectSummary),
+      caches: { waveform: waveformCache, previewProxy: proxyCache },
+      processes: app.getAppMetrics().map((metric) => ({
+        type: metric.type,
+        cpuPercent: metric.cpu?.percentCPUUsage,
+        memoryKb: metric.memory?.workingSetSize,
+      })),
+      recentEvents: recentDiagnosticEvents,
+      previousCrash: boundedCrashSummary(previousCrash),
+    };
+    const targetPath = result.filePath.toLowerCase().endsWith('.json')
+      ? result.filePath
+      : `${result.filePath}.json`;
+    await atomicWriteText(targetPath, JSON.stringify(report, null, 2));
+    return { ok: true, canceled: false, path: targetPath };
+  } catch (error) {
+    recordDiagnosticEvent('diagnostics-save-failed', error instanceof Error ? error.message : error);
+    return { ok: false, error: '診断情報を保存できませんでした' };
+  }
+});
+
 // --- Native export destinations --------------------------------------------
 // Rendered MP4 data can be hundreds of MB. The renderer streams bounded chunks
 // to an opaque main-process token instead of cloning one giant ArrayBuffer over
@@ -655,6 +777,7 @@ const MAX_NATIVE_OVERLAY_DECODED_BYTES = 512 * 1024 * 1024;
 const pendingExports = new Map();
 const pendingProxyJobs = new Map();
 const pendingWaveformJobs = new Map();
+const pendingLoudnessJobs = new Map();
 let lastExportPath = null;
 let ffmpegCapabilityPromise = null;
 const hardwareEncoderProbeCache = new Map();
@@ -972,6 +1095,7 @@ function abandonAllExports() {
     ...[...pendingExports.keys()].map((token) => abandonExport(token)),
     ...[...pendingProxyJobs.keys()].map((token) => abandonProxyJob(token)),
     ...[...pendingWaveformJobs.keys()].map((token) => abandonWaveformJob(token)),
+    ...[...pendingLoudnessJobs.keys()].map((token) => abandonLoudnessJob(token)),
   ]);
 }
 
@@ -984,7 +1108,11 @@ async function confirmDiscardBeforeClose() {
     // is ignored, but can no longer overwrite a project file.
     cancelPendingCloseSaveRequest();
   }
-  const hasExport = pendingExports.size > 0 || pendingProxyJobs.size > 0;
+  const hasExport =
+    pendingExports.size > 0 ||
+    pendingProxyJobs.size > 0 ||
+    pendingWaveformJobs.size > 0 ||
+    pendingLoudnessJobs.size > 0;
   const hasChanges = isDirty;
   if (!hasExport && !hasChanges && !autosaveCleanupRequired) return true;
   if (!hasExport && !hasChanges && autosaveCleanupRequired) {
@@ -999,11 +1127,11 @@ async function confirmDiscardBeforeClose() {
   }
   const buttons = hasChanges
     ? [
-        hasExport ? '保存して書き出しを中止・終了' : '保存して終了',
-        hasExport ? '書き出しと変更を破棄して終了' : '保存せずに終了',
+        hasExport ? '保存して動画処理を中止・終了' : '保存して終了',
+        hasExport ? '動画処理と変更を破棄して終了' : '保存せずに終了',
         'キャンセル',
       ]
-    : ['書き出しを中止して終了', 'キャンセル'];
+    : ['動画処理を中止して終了', 'キャンセル'];
   const choice = await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     buttons,
@@ -1013,13 +1141,13 @@ async function confirmDiscardBeforeClose() {
       hasExport && hasChanges
         ? '書き出し中で、未保存の変更があります'
         : hasExport
-          ? '動画を書き出しています'
+          ? '動画処理を実行しています'
           : '未保存の変更があります',
     message: hasChanges
       ? '変更を保存してから終了できます。'
       : '書き出しを中止してアプリを終了しますか？',
     detail: hasExport
-      ? '作成途中のファイルは削除されます。'
+      ? '実行中の解析・変換・書き出しを安全に停止します。'
       : '先に「保存」(Ctrl+S) を実行すると変更を残せます。',
   });
   if (choice.response === (hasChanges ? 2 : 1)) return false;
@@ -1241,6 +1369,30 @@ async function writeNativeOverlayFiles(request, entry) {
   return result;
 }
 
+async function writeNativeSubtitleFile(request, entry, width, height) {
+  const cues = request?.subtitles;
+  if (cues === undefined || (Array.isArray(cues) && cues.length === 0)) return null;
+  let content;
+  try {
+    content = buildAssSubtitles(cues, request?.subtitleStyle, width, height);
+  } catch (error) {
+    throw new NativeExportPlanError(
+      'INVALID_SUBTITLES',
+      error instanceof Error ? error.message : '字幕が不正です',
+    );
+  }
+  if (Buffer.byteLength(content, 'utf8') > 20 * 1024 * 1024) {
+    throw new NativeExportPlanError('INVALID_SUBTITLES', '字幕データが大きすぎます');
+  }
+  const subtitlePath = path.join(entry.workDir, 'subtitles.ass');
+  await fs.writeFile(subtitlePath, content, {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600,
+  });
+  return subtitlePath;
+}
+
 function redactNativeError(error, entry) {
   if (error instanceof NativeExportPlanError) {
     return { code: error.code, message: error.message, details: error.details };
@@ -1434,6 +1586,12 @@ async function runNativeExport(token, entry, request) {
       overlayPathByClipId,
       entry.temporaryPath,
     );
+    await writeNativeSubtitleFile(
+      request,
+      entry,
+      softwarePlan.width,
+      softwarePlan.height,
+    );
     let hardwareEncoder = null;
     if (preference === 'auto') {
       sendNativeExportEvent(token, {
@@ -1563,6 +1721,7 @@ async function runNativeExport(token, entry, request) {
       releaseExportSourceLeases(entry);
     }
     const failure = redactNativeError(error, entry);
+    recordDiagnosticEvent('native-export-failed', `${failure.code}: ${failure.message}`);
     sendNativeExportEvent(token, {
       phase: cleanupError ? 'cleanup-error' : entry.cancelled ? 'cancelled' : 'failed',
       stage: cleanupError ? '一時ファイルを削除できませんでした' : failure.message,
@@ -1867,7 +2026,16 @@ function authorizeMediaRef(ref) {
     return false;
   }
   const ext = path.extname(ref.path).toLowerCase();
-  if (!VIDEO_EXTENSIONS.has(ext) && !AUDIO_EXTENSIONS.has(ext)) return false;
+  const extensionKind = VIDEO_EXTENSIONS.has(ext)
+    ? 'video'
+    : AUDIO_EXTENSIONS.has(ext)
+      ? 'audio'
+      : null;
+  if (
+    ref.kind !== undefined &&
+    (ref.kind !== 'video' && ref.kind !== 'audio' ||
+      (extensionKind !== null && extensionKind !== ref.kind))
+  ) return false;
   for (const [key, approval] of authorizedMediaRefs) {
     if (approval.sessionId !== documentSessionId) authorizedMediaRefs.delete(key);
   }
@@ -1923,7 +2091,18 @@ function registerResolvedMedia(realPath, stat, kind, name) {
     token,
     url: `fce-media://asset/${token}`,
     size: stat.size,
+    kind,
   };
+}
+
+async function resolveMediaKind(realPath, requestedKind = null) {
+  const extensionKind = mediaKindForPath(realPath);
+  if (extensionKind) {
+    return requestedKind && extensionKind !== requestedKind ? null : extensionKind;
+  }
+  await ensureNativeFfmpeg();
+  const probedKind = await probeInputMediaKind(ffmpegBinaryPath(), realPath);
+  return requestedKind && probedKind !== requestedKind ? null : probedKind;
 }
 
 ipcMain.handle('media:select-files', async (event, options) => {
@@ -1971,20 +2150,16 @@ ipcMain.handle('media:select-files', async (event, options) => {
         errors.push(`${displayName}: 安全でないパスのため追加できません`);
         continue;
       }
-      const kind = mediaKindForPath(realPath);
-      if (!kind) {
-        errors.push(`${displayName}: この拡張子はまだ対応していません`);
-        continue;
-      }
-      if (requestedKind && kind !== requestedKind) {
-        errors.push(
-          `${displayName}: ${requestedKind === 'video' ? '動画' : '音声'}ファイルを選択してください`,
-        );
-        continue;
-      }
       const stat = await fs.stat(realPath);
       if (!stat.isFile()) {
         errors.push(`${displayName}: 通常のファイルではありません`);
+        continue;
+      }
+      const kind = await resolveMediaKind(realPath, requestedKind);
+      if (!kind) {
+        errors.push(
+          `${displayName}: ${requestedKind === 'video' ? '動画' : requestedKind === 'audio' ? '音声' : '音声・映像'}ストリームを確認できません`,
+        );
         continue;
       }
       const name = path.basename(realPath);
@@ -2012,8 +2187,7 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     typeof ref.size !== 'number' ||
     !Number.isSafeInteger(ref.size) ||
     ref.size < 0 ||
-    (ref.kind !== 'video' && ref.kind !== 'audio') ||
-    !mediaExtensionMatchesKind(ref.path, ref.kind) ||
+    (ref.kind !== undefined && ref.kind !== 'video' && ref.kind !== 'audio') ||
     path.basename(ref.path).toLowerCase() !== ref.name.toLowerCase()
   ) {
     return null;
@@ -2033,7 +2207,9 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     if (isDangerousWindowsDevicePath(realPath)) return null;
     const stat = await fs.stat(realPath);
     if (!stat.isFile() || stat.size !== ref.size) return null;
-    return registerResolvedMedia(realPath, stat, ref.kind, ref.name);
+    const kind = await resolveMediaKind(realPath, ref.kind ?? null);
+    if (!kind || (ref.kind && kind !== ref.kind)) return null;
+    return registerResolvedMedia(realPath, stat, kind, ref.name);
   } catch {
     return null;
   }
@@ -2043,6 +2219,94 @@ function releaseWaveformSourceLease(job) {
   if (job.sourceLeaseReleased) return;
   job.sourceLeaseReleased = true;
   releaseRegisteredMediaLease(job.sourceToken);
+}
+
+const MAX_WAVEFORM_CACHE_BYTES = 512 * 1024 * 1024;
+const MAX_WAVEFORM_CACHE_FILES = 512;
+
+function waveformCacheRoot() {
+  return path.join(app.getPath('userData'), 'waveforms-v1');
+}
+
+function waveformCacheKey(source) {
+  return crypto
+    .createHash('sha256')
+    .update(`${source.path}\u0000${source.size}\u0000${source.mtimeMs}`)
+    .digest('hex');
+}
+
+async function readWaveformCache(source) {
+  const cachePath = path.join(waveformCacheRoot(), `${waveformCacheKey(source)}.wfc`);
+  try {
+    const stat = await fs.lstat(cachePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024 * 1024) {
+      throw new Error('invalid waveform cache file');
+    }
+    const decoded = decodeWaveformCache(await fs.readFile(cachePath));
+    if (!decoded || decoded.peaksPerSecond !== WAVEFORM_PEAKS_PER_SECOND) {
+      throw new Error('invalid waveform cache data');
+    }
+    const now = new Date();
+    await fs.utimes(cachePath, now, now).catch(() => {});
+    return decoded;
+  } catch {
+    await fs.rm(cachePath, { force: true }).catch(() => {});
+    return null;
+  }
+}
+
+async function pruneWaveformCache() {
+  const root = waveformCacheRoot();
+  let names;
+  try {
+    names = await fs.readdir(root);
+  } catch {
+    return;
+  }
+  const entries = [];
+  for (const name of names) {
+    if (!/^[a-f0-9]{64}\.wfc$/.test(name)) continue;
+    const filePath = path.join(root, name);
+    try {
+      const stat = await fs.lstat(filePath);
+      if (stat.isFile() && !stat.isSymbolicLink()) {
+        entries.push({ filePath, size: stat.size, mtimeMs: stat.mtimeMs });
+      }
+    } catch {
+      // A concurrently removed cache entry needs no further work.
+    }
+  }
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let totalBytes = entries.reduce((total, entry) => total + entry.size, 0);
+  let fileCount = entries.length;
+  for (const entry of entries) {
+    if (totalBytes <= MAX_WAVEFORM_CACHE_BYTES && fileCount <= MAX_WAVEFORM_CACHE_FILES) break;
+    try {
+      await fs.rm(entry.filePath, { force: true });
+      totalBytes -= entry.size;
+      fileCount -= 1;
+    } catch {
+      // Antivirus can temporarily hold a cache file; a later pass retries it.
+    }
+  }
+}
+
+async function writeWaveformCache(source, peaks) {
+  const root = waveformCacheRoot();
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  const destination = path.join(root, `${waveformCacheKey(source)}.wfc`);
+  const temporary = path.join(root, `${crypto.randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(
+      temporary,
+      encodeWaveformCache(peaks, WAVEFORM_PEAKS_PER_SECOND),
+      { flag: 'wx', mode: 0o600 },
+    );
+    await fs.rename(temporary, destination);
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+  }
+  await pruneWaveformCache();
 }
 
 function waitForWaveformChild(job, accumulator) {
@@ -2136,6 +2400,16 @@ ipcMain.handle('media:generate-waveform', async (event, sourceToken) => {
     }
     if (job.cancelled) throw new Error('波形生成を中止しました');
 
+    const cached = await readWaveformCache(source);
+    if (cached) {
+      return {
+        ok: true,
+        peaks: cached.peaks,
+        peaksPerSecond: cached.peaksPerSecond,
+        cached: true,
+      };
+    }
+
     const accumulator = createWaveformMetadataAccumulator();
     const child = spawn(
       ffmpegBinaryPath(),
@@ -2162,10 +2436,12 @@ ipcMain.handle('media:generate-waveform', async (event, sourceToken) => {
     if (peaks.length === 0) {
       throw new Error('音声ストリームが見つかりません');
     }
+    await writeWaveformCache(source, peaks).catch(() => {});
     return {
       ok: true,
       peaks,
       peaksPerSecond: WAVEFORM_PEAKS_PER_SECOND,
+      cached: false,
     };
   } catch (error) {
     let message = error instanceof Error ? error.message : String(error);
@@ -2183,6 +2459,134 @@ ipcMain.handle('media:cancel-waveform', async (event, sourceToken) => {
     (job) => job.sourceToken === sourceToken,
   );
   await Promise.all(jobs.map((job) => abandonWaveformJob(job.token)));
+  return jobs.length > 0;
+});
+
+function releaseLoudnessSourceLease(job) {
+  if (job.sourceLeaseReleased) return;
+  job.sourceLeaseReleased = true;
+  releaseRegisteredMediaLease(job.sourceToken);
+}
+
+function waitForLoudnessChild(job) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(result);
+    };
+    job.child.stderr.on('data', (chunk) => {
+      job.stderrTail = appendTail(
+        job.stderrTail,
+        chunk,
+        MAX_LOUDNESS_LOG_BYTES,
+      );
+    });
+    job.child.once('error', (error) => finish(error));
+    job.child.once('close', (code, signal) => finish(null, { code, signal }));
+  });
+}
+
+async function abandonLoudnessJob(token) {
+  const job = pendingLoudnessJobs.get(token);
+  if (!job) return false;
+  if (job.cleanupPromise) return job.cleanupPromise;
+  job.cancelled = true;
+  const cleanupPromise = (async () => {
+    await terminateProcess(job.child);
+    job.child = null;
+    await job.operation.catch(() => {});
+    releaseLoudnessSourceLease(job);
+    if (pendingLoudnessJobs.get(token) === job) pendingLoudnessJobs.delete(token);
+    return true;
+  })();
+  job.cleanupPromise = cleanupPromise;
+  try {
+    return await cleanupPromise;
+  } catch (error) {
+    if (job.cleanupPromise === cleanupPromise) job.cleanupPromise = null;
+    throw error;
+  }
+}
+
+ipcMain.handle('media:analyze-loudness', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') {
+    return { ok: false, error: '安全でない画面からの操作を拒否しました' };
+  }
+  const source = registeredMedia.get(sourceToken);
+  if (!source || (source.kind !== 'audio' && source.kind !== 'video')) {
+    return { ok: false, error: '素材を確認できません' };
+  }
+  const token = crypto.randomUUID();
+  const job = {
+    token,
+    sourceToken,
+    child: null,
+    operation: Promise.resolve(),
+    cleanupPromise: null,
+    cancelled: false,
+    sourceLeaseReleased: false,
+    stderrTail: '',
+  };
+  source.leases = (source.leases ?? 0) + 1;
+  pendingLoudnessJobs.set(token, job);
+
+  try {
+    await ensureNativeFfmpeg();
+    const [realPath, stat] = await Promise.all([
+      fs.realpath(source.path),
+      fs.stat(source.path),
+    ]);
+    if (
+      !stat.isFile() ||
+      realPath !== source.path ||
+      stat.size !== source.size ||
+      (source.dev !== undefined && stat.dev !== source.dev) ||
+      (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+      Math.abs(stat.mtimeMs - source.mtimeMs) > 1 ||
+      isDangerousWindowsDevicePath(realPath)
+    ) {
+      throw new Error('素材が読み込み後に変更されました');
+    }
+    if (job.cancelled) throw new Error('音量解析を中止しました');
+
+    const child = spawn(ffmpegBinaryPath(), buildLoudnessFfmpegArgs(source.path), {
+      shell: false,
+      windowsHide: true,
+      detached: false,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: minimalEnvironment(),
+    });
+    job.child = child;
+    const operation = waitForLoudnessChild(job);
+    job.operation = operation.then(() => undefined, () => undefined);
+    const result = await operation;
+    job.child = null;
+    if (job.cancelled) throw new Error('音量解析を中止しました');
+    if (result.code !== 0) {
+      throw new Error(`音量解析に失敗しました (FFmpeg: ${String(result.code)})`);
+    }
+    const analysis = parseLoudnessSummary(job.stderrTail);
+    if (!analysis) throw new Error('音声ストリームまたは音量情報を取得できません');
+    return { ok: true, ...analysis };
+  } catch (error) {
+    let message = error instanceof Error ? error.message : String(error);
+    message = message.replaceAll(source.path, '[素材]').slice(0, 500);
+    return { ok: false, error: message, canceled: job.cancelled };
+  } finally {
+    if (pendingLoudnessJobs.get(token) === job) pendingLoudnessJobs.delete(token);
+    releaseLoudnessSourceLease(job);
+  }
+});
+
+ipcMain.handle('media:cancel-loudness', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') return false;
+  const jobs = [...pendingLoudnessJobs.values()].filter(
+    (job) => job.sourceToken === sourceToken,
+  );
+  await Promise.all(jobs.map((job) => abandonLoudnessJob(job.token)));
   return jobs.length > 0;
 });
 
@@ -2925,6 +3329,8 @@ async function createWindow() {
     if (
       pendingExports.size === 0 &&
       pendingProxyJobs.size === 0 &&
+      pendingWaveformJobs.size === 0 &&
+      pendingLoudnessJobs.size === 0 &&
       !isDirty &&
       activeProjectSaves === 0 &&
       !pendingCloseSaveRequest &&
@@ -2963,6 +3369,8 @@ app.on('before-quit', (event) => {
   if (
     (pendingExports.size > 0 ||
       pendingProxyJobs.size > 0 ||
+      pendingWaveformJobs.size > 0 ||
+      pendingLoudnessJobs.size > 0 ||
       isDirty ||
       activeProjectSaves > 0 ||
       pendingCloseSaveRequest ||
@@ -3059,6 +3467,9 @@ process.on('exit', () => {
   for (const job of pendingWaveformJobs.values()) {
     try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
   }
+  for (const job of pendingLoudnessJobs.values()) {
+    try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
+  }
 });
 process.on('uncaughtException', (err) => {
   if (fatalExceptionHandled) {
@@ -3066,6 +3477,20 @@ process.on('uncaughtException', (err) => {
     return;
   }
   fatalExceptionHandled = true;
+  try {
+    const crash = JSON.stringify({
+      at: new Date().toISOString(),
+      type: err?.name ?? 'Error',
+      message: sanitizeDiagnosticText(err?.message ?? err),
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+    }, null, 2);
+    fsStream.mkdirSync(path.dirname(lastCrashPath()), { recursive: true });
+    fsStream.writeFileSync(lastCrashPath(), crash, { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // The process is already fatal; recovery/autosave remains the priority.
+  }
   console.error('[main] uncaught', err);
   if (!isDev) {
     // Generic user-facing text — don't surface internal paths / stack details

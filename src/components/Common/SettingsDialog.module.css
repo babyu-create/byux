@@ -271,3 +271,45 @@
 .btnDone:hover {
   background: var(--accent-hover);
 }
+
+.supportCard {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  color: var(--accent);
+}
+
+.supportCard h3,
+.supportCard p { margin: 0; }
+.supportCard h3 { color: var(--text); font-size: 13px; }
+.supportCard p { margin-top: 5px; color: var(--text-dim); font-size: 11px; line-height: 1.65; }
+
+.diagnosticButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 14px;
+  min-height: 34px;
+  padding: 7px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--text-inverse);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.diagnosticStatus {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 10px 0 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}

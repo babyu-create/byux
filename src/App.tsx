@@ -87,6 +87,8 @@ function createProjectSnapshot() {
     tracks: ps.tracks,
     clips: ps.clips,
     markers: ps.markers,
+    subtitles: ps.subtitles,
+    subtitleStyle: ps.subtitleStyle,
     ioRanges: ps.ioRanges,
     preRollSec: ps.preRollSec,
     postRollSec: ps.postRollSec,
