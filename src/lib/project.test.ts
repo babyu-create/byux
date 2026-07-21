@@ -4,6 +4,8 @@ import {
   serialiseProject,
   buildAssetIdMap,
   remapClipAssetIds,
+  requiredAssetSourceDuration,
+  assetRelinkError,
   type ProjectFile,
   type ProjectAssetRef,
 } from './project';
@@ -282,5 +284,29 @@ describe('remapClipAssetIds', () => {
     const out = remapClipAssetIds(clips, { p1: 'cur1' });
     expect(out[0].assetId).toBe('cur1');
     expect(out[1].assetId).toBe('pX');
+  });
+});
+
+describe('manual asset relinking safety', () => {
+  it('calculates the highest source timestamp still referenced by the project', () => {
+    expect(requiredAssetSourceDuration(
+      'a1',
+      [{ id: 'c', trackId: 't', assetId: 'a1', start: 0, trimStart: 1, trimEnd: 7, effects: [] }],
+      [{ id: 'm', assetId: 'a1', time: 8 }],
+      [{ id: 'r', assetId: 'a1', inTime: 2, outTime: 9 }],
+    )).toBe(9);
+  });
+
+  it('rejects a wrong-kind or too-short replacement before remapping IDs', () => {
+    const target: ProjectAssetRef = {
+      id: 'a1',
+      name: 'source.mp4',
+      size: 100,
+      kind: 'video',
+      duration: 10,
+    };
+    expect(assetRelinkError(target, { kind: 'audio', duration: 20 }, 8)).toMatch(/動画/);
+    expect(assetRelinkError(target, { kind: 'video', duration: 7.9 }, 8)).toMatch(/短すぎ/);
+    expect(assetRelinkError(target, { kind: 'video', duration: 8 }, 8)).toBeNull();
   });
 });

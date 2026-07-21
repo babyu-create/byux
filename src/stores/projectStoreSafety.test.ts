@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearHistory, useProjectStore } from './projectStore';
 import { useMediaStore } from './mediaStore';
-import type { MediaAsset, Track } from '../lib/types';
+import type { Clip, MediaAsset, OverlayText, Track } from '../lib/types';
 import { clearClipClipboard } from '../lib/clipClipboard';
 
 const TRACKS: Track[] = [
@@ -108,6 +108,32 @@ describe('project store safety invariants', () => {
     expect(useProjectStore.getState().clips).toHaveLength(0);
   });
 
+  it('rejects non-finite placement values and never trims beyond the source', () => {
+    const state = useProjectStore.getState();
+    expect(state.addClipFromAsset(ASSET.id, 'video', Number.NaN)).toBeNull();
+    expect(state.addClipFromAsset(ASSET.id, 'video', 5, Number.POSITIVE_INFINITY)).toBeNull();
+    expect(state.addClipFromAsset(ASSET.id, 'video', 999)).toBeTruthy();
+    expect(useProjectStore.getState().clips[0].trimEnd).toBe(ASSET.duration);
+  });
+
+  it('ignores non-finite editor values instead of corrupting the project', () => {
+    useProjectStore.setState({ playhead: 2, zoom: 1, verticalReframe: 0.25 });
+    const state = useProjectStore.getState();
+    state.setPlayhead(Number.NaN);
+    state.setZoom(Number.POSITIVE_INFINITY);
+    state.setVerticalReframe(Number.NaN);
+    state.setPreRoll(Number.NaN);
+    state.setPostRoll(Number.NEGATIVE_INFINITY);
+
+    expect(useProjectStore.getState()).toMatchObject({
+      playhead: 2,
+      zoom: 1,
+      verticalReframe: 0.25,
+      preRollSec: 3,
+      postRollSec: 1,
+    });
+  });
+
   it('keeps source clips when marker settings create no valid clips', () => {
     const sourceClip = {
       id: 'source',
@@ -189,6 +215,154 @@ describe('project store safety invariants', () => {
     expect(second.start).toBe(10);
   });
 
+  it('blocks every property edit while the owning track is locked', () => {
+    const original = {
+      id: 'locked-clip',
+      trackId: 'video',
+      assetId: ASSET.id,
+      start: 0,
+      trimStart: 0,
+      trimEnd: 5,
+      effects: [{ type: 'fade-in' as const, duration: 0.2 }],
+      overlays: [{
+        id: 'overlay',
+        text: 'ACE',
+        fontSize: 8,
+        color: '#fff',
+        position: 'center' as const,
+      }],
+      volume: 1,
+    };
+    useProjectStore.setState({
+      tracks: [{ ...TRACKS[0], locked: true }, TRACKS[1]],
+      clips: [original],
+    });
+    const state = useProjectStore.getState();
+    state.setClipEffects(original.id, []);
+    state.toggleClipEffect(original.id, 'motion-blur');
+    state.updateClipEffect(original.id, 'fade-in', { duration: 1 });
+    state.setClipVolume(original.id, 0.2);
+    state.setClipAudioProcessing(original.id, { highPassHz: 100 });
+    state.toggleClipMuted(original.id);
+    state.addClipOverlay(original.id, { ...original.overlays[0], id: 'new' });
+    state.updateClipOverlay(original.id, 'overlay', { text: 'changed' });
+    state.removeClipOverlay(original.id, 'overlay');
+    state.applyOverlayToClips([original.id], { ...original.overlays[0], id: 'applied' });
+
+    expect(useProjectStore.getState().clips).toEqual([original]);
+  });
+
+  it('normalizes invalid audio controls to saveable finite values', () => {
+    useProjectStore.setState({
+      clips: [{
+        id: 'clip',
+        trackId: 'video',
+        assetId: ASSET.id,
+        start: 0,
+        trimStart: 0,
+        trimEnd: 5,
+        effects: [],
+      }],
+    });
+    const state = useProjectStore.getState();
+    state.setClipVolume('clip', Number.NaN);
+    state.setClipAudioProcessing('clip', {
+      highPassHz: Number.NaN,
+      lowGainDb: Number.POSITIVE_INFINITY,
+      midGainDb: -99,
+      highGainDb: 99,
+    });
+    state.setAudioDucking({
+      enabled: true,
+      amountDb: Number.NaN,
+      attack: Number.POSITIVE_INFINITY,
+      release: -1,
+    });
+
+    const next = useProjectStore.getState();
+    expect(next.clips[0].volume).toBeUndefined();
+    expect(next.clips[0].audioProcessing).toEqual({
+      highPassHz: 0,
+      lowGainDb: 0,
+      midGainDb: -12,
+      highGainDb: 12,
+      compressor: false,
+    });
+    expect(Object.values(next.audioDucking ?? {}).every(
+      (value) => typeof value !== 'number' || Number.isFinite(value),
+    )).toBe(true);
+  });
+
+  it('keeps effects, transitions, transforms and overlays saveable', () => {
+    const clip: Clip = {
+      id: 'clip',
+      trackId: 'video',
+      assetId: ASSET.id,
+      start: 0,
+      trimStart: 0,
+      trimEnd: 5,
+      effects: [],
+    };
+    useProjectStore.setState({ clips: [clip] });
+    const state = useProjectStore.getState();
+    state.setClipEffects('clip', Array.from({ length: 40 }, () => ({
+      type: 'motion-blur',
+      duration: -5,
+      intensity: 999,
+    })));
+    state.setClipTransition('clip', 'in', { type: 'fade', duration: -2 });
+    state.setClipTransform('clip', {
+      x: [{ t: -1, value: 10 }],
+    });
+    state.addClipOverlay('clip', {
+      id: 'invalid id',
+      text: 'x'.repeat(10_050),
+      fontSize: -4,
+      color: 'c'.repeat(600),
+      position: 'center',
+      strokeWidth: -1,
+      introDuration: -2,
+    });
+
+    const updated = useProjectStore.getState().clips[0];
+    expect(updated.effects).toHaveLength(32);
+    expect(updated.effects[0]).toMatchObject({ duration: 0, intensity: 100 });
+    expect(updated.transitionIn?.duration).toBe(0);
+    expect(updated.transform).toBeUndefined();
+    expect(updated.overlays?.[0]).toMatchObject({
+      fontSize: 0.1,
+      strokeWidth: 0,
+      introDuration: 0,
+    });
+    expect(updated.overlays?.[0].id).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
+    expect(updated.overlays?.[0].text).toHaveLength(10_000);
+    expect(updated.overlays?.[0].color).toHaveLength(512);
+  });
+
+  it('never exceeds the per-clip overlay limit', () => {
+    const overlay = (index: number): OverlayText => ({
+      id: `overlay-${index}`,
+      text: String(index),
+      fontSize: 8,
+      color: '#fff',
+      position: 'center',
+    });
+    useProjectStore.setState({
+      clips: [{
+        id: 'clip',
+        trackId: 'video',
+        assetId: ASSET.id,
+        start: 0,
+        trimStart: 0,
+        trimEnd: 5,
+        effects: [],
+        overlays: Array.from({ length: 100 }, (_, index) => overlay(index)),
+      }],
+    });
+    useProjectStore.getState().addClipOverlay('clip', overlay(100));
+    expect(useProjectStore.getState().clips[0].overlays).toHaveLength(100);
+  });
+
   it('cancels a pending debounced history write when history is cleared', () => {
     vi.useFakeTimers();
     useProjectStore.setState({ name: 'old-project-edit' });
@@ -259,6 +433,24 @@ describe('project store safety invariants', () => {
     expect(duplicated?.id).not.toBe('source-clip');
     expect(duplicated?.overlays?.[0].id).not.toBe('source-overlay');
     expect(useProjectStore.getState().selectedClipIds).toEqual([duplicated?.id]);
+  });
+
+  it('refuses edits that would exceed the project clip limit', () => {
+    const clips = Array.from({ length: 10_000 }, (_, index) => ({
+      id: `clip-${index}`,
+      trackId: index === 0 ? 'video' : 'audio',
+      assetId: ASSET.id,
+      start: index,
+      trimStart: 0,
+      trimEnd: 1,
+      effects: [],
+    }));
+    useProjectStore.setState({ clips });
+
+    expect(useProjectStore.getState().addClipFromAsset(ASSET.id, 'video', 1)).toBeNull();
+    expect(useProjectStore.getState().duplicateTrack('video')).toBeNull();
+    useProjectStore.getState().splitClipAt('clip-0', 0.5);
+    expect(useProjectStore.getState().clips).toHaveLength(10_000);
   });
 
   it('copies and pastes a clip at the first collision-free position', () => {

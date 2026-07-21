@@ -87,6 +87,17 @@ interface PreviewGainGraph {
   cleanupTimer: number | null;
 }
 
+function reportMainPlaybackFailure(): void {
+  const state = useProjectStore.getState();
+  if (!state.isPlaying) return;
+  state.setIsPlaying(false);
+  state.showMessage(
+    'error',
+    '動画を再生できませんでした。素材を再追加するか、互換プロキシの作成完了後に再試行してください',
+    6000,
+  );
+}
+
 let previewAudioContext: AudioContext | null = null;
 const previewGainGraphs = new WeakMap<HTMLMediaElement, PreviewGainGraph>();
 
@@ -826,9 +837,7 @@ export function Preview() {
     if (!isPlaying) return;
     const video = videoRef.current;
     if (!video) return;
-    video.play().catch(() => {
-      /* ignore autoplay rejection */
-    });
+    video.play().catch(reportMainPlaybackFailure);
     let rafId = 0;
     const step = () => {
       if (!playingRef.current) return;
@@ -937,9 +946,7 @@ export function Preview() {
       : activeClip.trimStart + localT * (activeClip.speed ?? 1);
     video.currentTime = Math.max(0, Math.min(activeAsset.duration, target));
     if (isPlaying) {
-      video.play().catch(() => {
-        /* ignore */
-      });
+      video.play().catch(reportMainPlaybackFailure);
     }
     // We intentionally only react to clip/asset switch.
     // eslint-disable-next-line react-hooks/exhaustive-deps

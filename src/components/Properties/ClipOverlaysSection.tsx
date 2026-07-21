@@ -1,4 +1,7 @@
-import { useProjectStore } from '../../stores/projectStore';
+import {
+  MAX_CLIP_OVERLAYS,
+  useProjectStore,
+} from '../../stores/projectStore';
 import type {
   Clip,
   OverlayDecoration,
@@ -79,7 +82,17 @@ export function ClipOverlaysSection({ clip }: ClipOverlaysSectionProps) {
         </span>
       </div>
 
-      <button type="button" className={styles.addBtn} onClick={handleAdd}>
+      <button
+        type="button"
+        className={styles.addBtn}
+        onClick={handleAdd}
+        disabled={overlays.length >= MAX_CLIP_OVERLAYS}
+        title={
+          overlays.length >= MAX_CLIP_OVERLAYS
+            ? `1クリップにつき${MAX_CLIP_OVERLAYS}個まで追加できます`
+            : undefined
+        }
+      >
         ＋ テキスト追加
       </button>
 

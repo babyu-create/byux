@@ -94,6 +94,10 @@ export const Track = memo(function Track({
     setContextMenu({ x: start.x, y: start.y, clip: hit });
   };
 
+  const handleTrackPointerCancel = () => {
+    rightClickRef.current = null;
+  };
+
   // Drop OS files straight onto any compatible track. Visible video and
   // overlay lanes are composited in both preview and native export.
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
@@ -109,6 +113,7 @@ export const Track = memo(function Track({
     if (!track || track.locked) return;
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
+    const requestedCount = files.length;
 
     const rect = e.currentTarget.getBoundingClientRect();
     const dropTime = Math.max(0, pxToTime(e.clientX - rect.left, zoom));
@@ -120,6 +125,8 @@ export const Track = memo(function Track({
       .then((newAssets) => {
         let cursor = dropTime;
         let skipped = 0;
+        let added = 0;
+        let placementFailed = 0;
         for (const asset of newAssets) {
           const compatible =
             asset.kind === 'audio'
@@ -130,15 +137,36 @@ export const Track = memo(function Track({
             continue;
           }
           const id = ps.addClipFromAsset(asset.id, track.id, asset.duration, cursor);
-          if (id) cursor += asset.duration;
+          if (id) {
+            cursor += asset.duration;
+            added += 1;
+          } else {
+            placementFailed += 1;
+          }
         }
-        if (skipped > 0) {
+        const importFailed = requestedCount - newAssets.length;
+        if (added === 0 && newAssets.length === 0) {
           ps.showMessage(
             'error',
-            `${skipped}個のファイルはこの種類のトラックに追加できません`,
-            3500,
+            useMediaStore.getState().importError ??
+              'ファイルを読み込めませんでした。形式または読み取り権限を確認してください',
+            6000,
+          );
+        } else if (skipped > 0 || placementFailed > 0 || importFailed > 0) {
+          const details = [
+            skipped > 0 ? `種類違い ${skipped}件` : '',
+            placementFailed > 0 ? `配置失敗 ${placementFailed}件` : '',
+            importFailed > 0 ? `読込失敗 ${importFailed}件` : '',
+          ].filter(Boolean).join(' / ');
+          ps.showMessage(
+            'error',
+            `${added}件を配置しました / ${details}`,
+            5000,
           );
         }
+      })
+      .catch(() => {
+        ps.showMessage('error', 'ファイルの読み込み中にエラーが発生しました', 5000);
       });
   };
 
@@ -154,7 +182,7 @@ export const Track = memo(function Track({
       onDrop={handleDrop}
       onPointerDown={handleTrackPointerDown}
       onPointerUp={handleTrackPointerUp}
-      onPointerCancel={handleTrackPointerUp}
+      onPointerCancel={handleTrackPointerCancel}
       onContextMenu={(e) => e.preventDefault()}
     >
       {orderedClips.map((clip, index) => {

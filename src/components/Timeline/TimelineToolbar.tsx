@@ -11,6 +11,7 @@ import styles from './TimelineToolbar.module.css';
 import { ContextMenu } from '../Common/ContextMenu';
 import type { TrackKind } from '../../lib/types';
 import { SubtitleDialog } from './SubtitleDialog';
+import { clipDuration } from '../../lib/timeline';
 
 export function TimelineToolbar() {
   const [trackMenu, setTrackMenu] = useState<{ x: number; y: number } | null>(null);
@@ -21,6 +22,8 @@ export function TimelineToolbar() {
   const setZoom = useProjectStore((s) => s.setZoom);
   const playhead = useProjectStore((s) => s.playhead);
   const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
+  const clips = useProjectStore((s) => s.clips);
+  const tracks = useProjectStore((s) => s.tracks);
   const snapEnabled = useProjectStore((s) => s.snapEnabled);
   const toggleSnap = useProjectStore((s) => s.toggleSnap);
   const addTrack = useProjectStore((s) => s.addTrack);
@@ -33,7 +36,19 @@ export function TimelineToolbar() {
     ? (assets.find((a) => a.id === pendingIn.assetId)?.name ?? '')
     : '';
 
-  const hasSelection = selectedClipIds.length > 0;
+  const lockedTrackIds = new Set(
+    tracks.filter((track) => track.locked).map((track) => track.id),
+  );
+  const selectedIdSet = new Set(selectedClipIds);
+  const editableSelectedClips = clips.filter(
+    (clip) =>
+      selectedIdSet.has(clip.id) && !lockedTrackIds.has(clip.trackId),
+  );
+  const canDeleteSelection = editableSelectedClips.length > 0;
+  const canSplitSelection = editableSelectedClips.some((clip) => {
+    const end = clip.start + clipDuration(clip);
+    return playhead > clip.start + 0.1 && playhead < end - 0.1;
+  });
   const openTrackMenu = (event: MouseEvent<HTMLButtonElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     setTrackMenu({ x: rect.left, y: rect.bottom + 4 });
@@ -100,7 +115,7 @@ export function TimelineToolbar() {
           type="button"
           className={styles.actionBtn}
           onClick={splitSelectedWithFeedback}
-          disabled={!hasSelection}
+          disabled={!canSplitSelection}
           title="選択クリップを分割 (J)"
           aria-label={`選択クリップを分割（${selectedClipIds.length}本選択中）`}
         >
@@ -111,7 +126,7 @@ export function TimelineToolbar() {
           type="button"
           className={styles.actionBtn}
           onClick={removeSelectedWithFeedback}
-          disabled={!hasSelection}
+          disabled={!canDeleteSelection}
           title="選択クリップを削除 (Delete)"
           aria-label={`選択クリップを削除（${selectedClipIds.length}本選択中）`}
         >

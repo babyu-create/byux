@@ -2,9 +2,12 @@ import { create, useStore } from 'zustand';
 import { temporal } from 'zundo';
 import type {
   Clip,
+  ClipEffect,
+  ClipTransform,
   IORange,
   KillMarker,
   MediaAsset,
+  OverlayText,
   PendingIn,
   ProjectFps,
   ProjectResolution,
@@ -15,8 +18,8 @@ import type {
 } from '../lib/types';
 import { useMediaStore } from './mediaStore';
 import type { HudPreset } from '../lib/motionBlurCore';
-import type { AudioDucking } from '../lib/audioDucking';
-import { applyClipLook } from '../lib/presets';
+import { resolveDucking, type AudioDucking } from '../lib/audioDucking';
+import { applyClipLook, isValidClipLook } from '../lib/presets';
 import {
   DEFAULT_SUBTITLE_STYLE,
   MAX_SUBTITLE_CUES,
@@ -248,6 +251,101 @@ const MIN_CLIP_DURATION = 0.1;
 const MAX_TRACKS = 100;
 const MAX_TRACK_LABEL_LENGTH = 48;
 const MAX_PROJECT_CLIPS = 10_000;
+const MAX_CLIP_EFFECTS = 32;
+export const MAX_CLIP_OVERLAYS = 100;
+const MAX_OVERLAY_TEXT_LENGTH = 10_000;
+const MAX_ANIMATION_KEYFRAMES = 2_000;
+const VALID_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+function isFiniteNumber(value: number): boolean {
+  return Number.isFinite(value);
+}
+
+function hasOnlyFiniteNumbers(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(hasOnlyFiniteNumbers);
+  if (value && typeof value === 'object') {
+    return Object.values(value).every(hasOnlyFiniteNumbers);
+  }
+  return true;
+}
+
+function isClipEditable(state: ProjectStoreState, clipId: string): boolean {
+  const clip = state.clips.find((candidate) => candidate.id === clipId);
+  if (!clip) return false;
+  const track = state.tracks.find((candidate) => candidate.id === clip.trackId);
+  return Boolean(track && !track.locked);
+}
+
+function normalizeAudioDucking(ducking: AudioDucking): AudioDucking {
+  const resolved = resolveDucking(ducking);
+  return {
+    enabled: resolved.enabled,
+    amountDb: resolved.amountDb,
+    attack: resolved.attack,
+    release: resolved.release,
+  };
+}
+
+function normalizeClipEffect(effect: ClipEffect): ClipEffect {
+  return {
+    type: effect.type,
+    ...(effect.duration !== undefined
+      ? { duration: Math.max(0, Number(effect.duration)) }
+      : null),
+    ...(effect.intensity !== undefined
+      ? { intensity: Math.max(0, Math.min(100, Number(effect.intensity))) }
+      : null),
+  };
+}
+
+function normalizeOverlay(overlay: OverlayText): OverlayText | null {
+  if (!hasOnlyFiniteNumbers(overlay) || !Number.isFinite(overlay.fontSize)) return null;
+  return {
+    ...overlay,
+    id: VALID_ID.test(overlay.id) ? overlay.id : crypto.randomUUID(),
+    text: String(overlay.text).slice(0, MAX_OVERLAY_TEXT_LENGTH),
+    fontSize: Math.max(0.1, overlay.fontSize),
+    color: String(overlay.color).slice(0, 512),
+    ...(overlay.weight !== undefined && Number.isFinite(overlay.weight)
+      ? { weight: overlay.weight }
+      : null),
+    ...(overlay.outlineColor !== undefined
+      ? { outlineColor: String(overlay.outlineColor).slice(0, 512) }
+      : null),
+    ...(overlay.fontFamily !== undefined
+      ? { fontFamily: String(overlay.fontFamily).slice(0, 512) }
+      : null),
+    ...(overlay.background !== undefined
+      ? { background: String(overlay.background).slice(0, 512) }
+      : null),
+    ...(overlay.decorationColor !== undefined
+      ? { decorationColor: String(overlay.decorationColor).slice(0, 512) }
+      : null),
+    ...(overlay.strokeWidth !== undefined
+      ? { strokeWidth: Math.max(0, overlay.strokeWidth) }
+      : null),
+    ...(overlay.introDuration !== undefined
+      ? { introDuration: Math.max(0, overlay.introDuration) }
+      : null),
+  };
+}
+
+function isSerializableTransform(transform: ClipTransform | undefined): boolean {
+  if (!transform) return true;
+  return Object.values(transform).every((value) => {
+    if (value === undefined) return true;
+    if (typeof value === 'number') return Number.isFinite(value);
+    return value.length <= MAX_ANIMATION_KEYFRAMES && value.every((keyframe: {
+      t: number;
+      value: number;
+    }) =>
+      Number.isFinite(keyframe.t) &&
+      keyframe.t >= 0 &&
+      Number.isFinite(keyframe.value),
+    );
+  });
+}
 
 function normalizeSubtitleCue(cue: SubtitleCue): SubtitleCue | null {
   const start = Math.max(0, Number(cue.start));
@@ -445,19 +543,24 @@ export const useProjectStore = create<ProjectStoreState>()(
     }),
 
   addClipFromAsset: (assetId, trackId, durationSec, atTime) => {
-    if (durationSec <= 0) return null;
+    if (!isFiniteNumber(durationSec) || durationSec <= 0) return null;
+    if (atTime !== undefined && !isFiniteNumber(atTime)) return null;
     const state = get();
+    if (state.clips.length >= MAX_PROJECT_CLIPS) return null;
     const track = state.tracks.find((candidate) => candidate.id === trackId);
     if (!track || track.locked) return null;
     const asset = useMediaStore
       .getState()
       .assets.find((candidate) => candidate.id === assetId);
     if (!asset) return null;
+    if (!isFiniteNumber(asset.duration) || asset.duration <= 0) return null;
     const compatible =
       asset.kind === 'audio'
         ? track.kind === 'audio'
         : track.kind === 'video' || track.kind === 'overlay';
     if (!compatible) return null;
+    const sourceDuration = Math.min(durationSec, asset.duration);
+    if (sourceDuration < MIN_CLIP_DURATION) return null;
     const id = crypto.randomUUID();
     const sameTrackClips = state.clips.filter((c) => c.trackId === trackId);
     const preferred =
@@ -467,7 +570,7 @@ export const useProjectStore = create<ProjectStoreState>()(
             (max, c) => Math.max(max, c.start + clipDuration(c)),
             0,
           );
-    const start = findFreeSlot(sameTrackClips, durationSec, preferred);
+    const start = findFreeSlot(sameTrackClips, sourceDuration, preferred);
 
     const clip: Clip = {
       id,
@@ -475,7 +578,7 @@ export const useProjectStore = create<ProjectStoreState>()(
       assetId,
       start,
       trimStart: 0,
-      trimEnd: durationSec,
+      trimEnd: sourceDuration,
       effects: [],
     };
     set({ clips: [...state.clips, clip], selectedClipIds: [id] });
@@ -483,6 +586,7 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   moveClip: (clipId, newStart) => {
+    if (!isFiniteNumber(newStart)) return;
     set((state) => {
       const clip = state.clips.find((c) => c.id === clipId);
       if (!clip) return state;
@@ -502,6 +606,7 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   trimClipStart: (clipId, newTrimStart) => {
+    if (!isFiniteNumber(newTrimStart)) return;
     set((state) => {
       const clip = state.clips.find((c) => c.id === clipId);
       if (!clip) return state;
@@ -542,6 +647,7 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   trimClipEnd: (clipId, newTrimEnd) => {
+    if (!isFiniteNumber(newTrimEnd)) return;
     set((state) => {
       const clip = state.clips.find((c) => c.id === clipId);
       if (!clip) return state;
@@ -570,7 +676,9 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   splitClipAt: (clipId, atTime) => {
+    if (!isFiniteNumber(atTime)) return;
     set((state) => {
+      if (state.clips.length >= MAX_PROJECT_CLIPS) return state;
       const clip = state.clips.find((c) => c.id === clipId);
       if (!clip) return state;
       const track = state.tracks.find((t) => t.id === clip.trackId);
@@ -724,8 +832,12 @@ export const useProjectStore = create<ProjectStoreState>()(
     return copies.length;
   },
 
-  setPlayhead: (time) => set({ playhead: Math.max(0, time) }),
-  setZoom: (zoom) => set({ zoom: clamp(zoom, MIN_ZOOM, MAX_ZOOM) }),
+  setPlayhead: (time) => {
+    if (isFiniteNumber(time)) set({ playhead: Math.max(0, time) });
+  },
+  setZoom: (zoom) => {
+    if (isFiniteNumber(zoom)) set({ zoom: clamp(zoom, MIN_ZOOM, MAX_ZOOM) });
+  },
   zoomIn: () => set((s) => ({ zoom: clamp(s.zoom * 1.4, MIN_ZOOM, MAX_ZOOM) })),
   zoomOut: () => set((s) => ({ zoom: clamp(s.zoom / 1.4, MIN_ZOOM, MAX_ZOOM) })),
   toggleSnap: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
@@ -733,12 +845,16 @@ export const useProjectStore = create<ProjectStoreState>()(
   setHudPreset: (hudPreset) => set({ hudPreset }),
 
   setVerticalReframe: (value) =>
-    set({ verticalReframe: Math.max(-1, Math.min(1, value)) }),
+    isFiniteNumber(value)
+      ? set({ verticalReframe: Math.max(-1, Math.min(1, value)) })
+      : undefined,
 
   setAudioDucking: (ducking) =>
     // Null clears the setting so the project serialises back to a ducking-free
     // (backward-compatible) shape, mirroring setClipColorGrade(null) etc.
-    set({ audioDucking: ducking ?? undefined }),
+    set({
+      audioDucking: ducking ? normalizeAudioDucking(ducking) : undefined,
+    }),
 
   setSubtitles: (cues) =>
     set({
@@ -780,7 +896,15 @@ export const useProjectStore = create<ProjectStoreState>()(
       subtitleStyle: {
         ...state.subtitleStyle,
         ...patch,
-        fontSize: Math.max(2, Math.min(12, Number(patch.fontSize ?? state.subtitleStyle.fontSize))),
+        fontSize: Math.max(
+          2,
+          Math.min(
+            12,
+            Number.isFinite(patch.fontSize)
+              ? Number(patch.fontSize)
+              : state.subtitleStyle.fontSize,
+          ),
+        ),
         position: ['top', 'center', 'bottom'].includes(
           patch.position ?? state.subtitleStyle.position,
         )
@@ -873,6 +997,8 @@ export const useProjectStore = create<ProjectStoreState>()(
     const index = state.tracks.findIndex((track) => track.id === trackId);
     if (index < 0) return null;
     const sourceTrack = state.tracks[index];
+    const sourceClips = state.clips.filter((clip) => clip.trackId === trackId);
+    if (sourceClips.length > MAX_PROJECT_CLIPS - state.clips.length) return null;
     const id = crypto.randomUUID();
     const track: Track = {
       ...sourceTrack,
@@ -880,8 +1006,7 @@ export const useProjectStore = create<ProjectStoreState>()(
       label: `${sourceTrack.label} コピー`.slice(0, MAX_TRACK_LABEL_LENGTH),
       locked: false,
     };
-    const duplicatedClips = state.clips
-      .filter((clip) => clip.trackId === trackId)
+    const duplicatedClips = sourceClips
       .map((clip) => ({
         ...clip,
         id: crypto.randomUUID(),
@@ -930,7 +1055,7 @@ export const useProjectStore = create<ProjectStoreState>()(
     const marker: KillMarker = {
       id,
       assetId,
-      time: Math.max(0, time),
+      time: isFiniteNumber(time) ? Math.max(0, time) : 0,
       label,
     };
     set((state) => ({
@@ -951,6 +1076,7 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   moveKillMarker: (markerId, newTime) => {
+    if (!isFiniteNumber(newTime)) return;
     set((state) => ({
       markers: state.markers.map((m) =>
         m.id === markerId ? { ...m, time: Math.max(0, newTime) } : m,
@@ -977,10 +1103,22 @@ export const useProjectStore = create<ProjectStoreState>()(
 
   selectMarker: (markerId) => set({ selectedMarkerId: markerId }),
 
-  setPreRoll: (sec) => set({ preRollSec: Math.max(0, sec) }),
-  setPostRoll: (sec) => set({ postRollSec: Math.max(0, sec) }),
+  setPreRoll: (sec) => {
+    if (isFiniteNumber(sec)) set({ preRollSec: Math.max(0, sec) });
+  },
+  setPostRoll: (sec) => {
+    if (isFiniteNumber(sec)) set({ postRollSec: Math.max(0, sec) });
+  },
 
   autoClipFromMarkers: (assetId, options) => {
+    if (
+      !isFiniteNumber(options.preRoll) ||
+      !isFiniteNumber(options.postRoll) ||
+      options.preRoll < 0 ||
+      options.postRoll < 0
+    ) {
+      return 0;
+    }
     const state = get();
     const assetDuration = useMediaStore
       .getState()
@@ -1008,6 +1146,9 @@ export const useProjectStore = create<ProjectStoreState>()(
       );
     }
 
+    const available = Math.max(0, MAX_PROJECT_CLIPS - baseClips.length);
+    if (available === 0) return 0;
+
     // Start placement after the last existing clip on the video track.
     const sameTrack = baseClips.filter((c) => c.trackId === videoTrackId);
     let cursor = sameTrack.reduce(
@@ -1017,6 +1158,7 @@ export const useProjectStore = create<ProjectStoreState>()(
 
     const newClips: Clip[] = [];
     for (const m of markers) {
+      if (newClips.length >= available) break;
       const trimStart = Math.min(assetDuration, Math.max(0, m.time - options.preRoll));
       const trimEnd = Math.min(assetDuration, m.time + options.postRoll);
       if (trimEnd <= trimStart + 0.05) continue;
@@ -1061,10 +1203,12 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   setIoIn: (assetId, time) => {
+    if (!isFiniteNumber(time)) return;
     set({ pendingIn: { assetId, time: Math.max(0, time) } });
   },
 
   setIoOut: (assetId, time) => {
+    if (!isFiniteNumber(time)) return null;
     const state = get();
     const pending = state.pendingIn;
     if (!pending || pending.assetId !== assetId) {
@@ -1126,6 +1270,7 @@ export const useProjectStore = create<ProjectStoreState>()(
 
   extractCurrentRange: () => {
     const state = get();
+    if (state.clips.length >= MAX_PROJECT_CLIPS) return null;
     const pending = state.pendingIn;
     if (!pending) return null;
     // Find current source time at playhead via the active video clip,
@@ -1198,6 +1343,9 @@ export const useProjectStore = create<ProjectStoreState>()(
       );
     }
 
+    const available = Math.max(0, MAX_PROJECT_CLIPS - baseClips.length);
+    if (available === 0) return 0;
+
     const sameTrack = baseClips.filter((c) => c.trackId === videoTrackId);
     let cursor = sameTrack.reduce(
       (m, c) => Math.max(m, c.start + clipDuration(c)),
@@ -1206,6 +1354,7 @@ export const useProjectStore = create<ProjectStoreState>()(
 
     const newClips: Clip[] = [];
     for (const r of ranges) {
+      if (newClips.length >= available) break;
       const dur = r.outTime - r.inTime;
       if (dur < 0.05) continue;
       newClips.push({
@@ -1242,16 +1391,24 @@ export const useProjectStore = create<ProjectStoreState>()(
   clearMessage: () => set({ transientMessage: null }),
 
   setClipEffects: (clipId, effects) => {
-    set((state) => ({
-      clips: state.clips.map((c) =>
-        c.id === clipId ? { ...c, effects } : c,
-      ),
-    }));
+    if (!hasOnlyFiniteNumbers(effects)) return;
+    const normalized = effects
+      .slice(0, MAX_CLIP_EFFECTS)
+      .map(normalizeClipEffect);
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return {
+        clips: state.clips.map((c) =>
+          c.id === clipId ? { ...c, effects: normalized } : c,
+        ),
+      };
+    });
   },
 
   toggleClipEffect: (clipId, type) => {
-    set((state) => ({
-      clips: state.clips.map((c) => {
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return { clips: state.clips.map((c) => {
         if (c.id !== clipId) return c;
         const has = c.effects.some((e) => e.type === type);
         if (has) {
@@ -1265,24 +1422,35 @@ export const useProjectStore = create<ProjectStoreState>()(
           'fade-out': { type: 'fade-out', duration: 0.4 },
           'motion-blur': { type: 'motion-blur', intensity: 40 },
         };
+        if (c.effects.length >= MAX_CLIP_EFFECTS) return c;
         return { ...c, effects: [...c.effects, defaults[type]] };
-      }),
-    }));
+      }) };
+    });
   },
 
   updateClipEffect: (clipId, type, patch) => {
-    set((state) => ({
-      clips: state.clips.map((c) => {
+    if (
+      (patch.duration !== undefined && !isFiniteNumber(patch.duration)) ||
+      (patch.intensity !== undefined && !isFiniteNumber(patch.intensity))
+    ) {
+      return;
+    }
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return { clips: state.clips.map((c) => {
         if (c.id !== clipId) return c;
         return {
           ...c,
-          effects: c.effects.map((e) => (e.type === type ? { ...e, ...patch } : e)),
+          effects: c.effects.map((e) =>
+            e.type === type ? normalizeClipEffect({ ...e, ...patch }) : e,
+          ),
         };
-      }),
-    }));
+      }) };
+    });
   },
 
   setClipSpeed: (clipId, speed) => {
+    if (!isFiniteNumber(speed)) return;
     const clamped = Math.max(0.0625, Math.min(4, speed));
     set((state) => {
       const target = state.clips.find((c) => c.id === clipId);
@@ -1313,6 +1481,12 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   setClipSpeedRamp: (clipId, ramp) => {
+    if (
+      ramp !== null &&
+      (!isFiniteNumber(ramp.from) || !isFiniteNumber(ramp.to))
+    ) {
+      return;
+    }
     set((state) => {
       const target = state.clips.find((c) => c.id === clipId);
       if (!target) return state;
@@ -1346,32 +1520,44 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   setClipVolume: (clipId, volume) => {
+    if (!isFiniteNumber(volume)) return;
     const clamped = Math.max(0, Math.min(2, volume));
-    set((state) => ({
-      clips: state.clips.map((c) =>
-        c.id === clipId ? { ...c, volume: clamped } : c,
-      ),
-    }));
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return {
+        clips: state.clips.map((c) =>
+          c.id === clipId ? { ...c, volume: clamped } : c,
+        ),
+      };
+    });
   },
 
   setClipAudioProcessing: (clipId, processing) => {
-    const clampDb = (value: number | undefined) =>
-      Math.max(-12, Math.min(12, Number(value ?? 0)));
+    const clampDb = (value: number | undefined) => {
+      const finite = Number.isFinite(value) ? Number(value) : 0;
+      return Math.max(-12, Math.min(12, finite));
+    };
     const highPass = Number(processing?.highPassHz ?? 0);
     const normalized = processing
       ? {
-          highPassHz: highPass > 0 ? Math.max(40, Math.min(300, highPass)) : 0,
+          highPassHz:
+            Number.isFinite(highPass) && highPass > 0
+              ? Math.max(40, Math.min(300, highPass))
+              : 0,
           lowGainDb: clampDb(processing.lowGainDb),
           midGainDb: clampDb(processing.midGainDb),
           highGainDb: clampDb(processing.highGainDb),
           compressor: processing.compressor === true,
         }
       : undefined;
-    set((state) => ({
-      clips: state.clips.map((clip) =>
-        clip.id === clipId ? { ...clip, audioProcessing: normalized } : clip,
-      ),
-    }));
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return {
+        clips: state.clips.map((clip) =>
+          clip.id === clipId ? { ...clip, audioProcessing: normalized } : clip,
+        ),
+      };
+    });
   },
 
   setClipStretch: (clipId, stretchToFill) => {
@@ -1389,6 +1575,7 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   setClipTransform: (clipId, transform) => {
+    if (!isSerializableTransform(transform)) return;
     set((state) => {
       const target = state.clips.find((c) => c.id === clipId);
       if (!target) return state;
@@ -1403,6 +1590,7 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   setClipColorGrade: (clipId, grade) => {
+    if (grade !== null && !hasOnlyFiniteNumbers(grade)) return;
     set((state) => {
       const target = state.clips.find((c) => c.id === clipId);
       if (!target) return state;
@@ -1425,6 +1613,10 @@ export const useProjectStore = create<ProjectStoreState>()(
   },
 
   setClipTransition: (clipId, edge, transition) => {
+    if (transition !== null && !hasOnlyFiniteNumbers(transition)) return;
+    const normalized = transition === null
+      ? null
+      : { ...transition, duration: Math.max(0, transition.duration) };
     set((state) => {
       const target = state.clips.find((c) => c.id === clipId);
       if (!target) return state;
@@ -1434,7 +1626,7 @@ export const useProjectStore = create<ProjectStoreState>()(
       return {
         clips: state.clips.map((c) => {
           if (c.id !== clipId) return c;
-          if (transition === null || transition.type === 'none') {
+          if (normalized === null || normalized.type === 'none') {
             // Drop the boundary transition entirely so the clip reverts to a
             // hard cut and serialises back to a transition-free (backward-
             // compatible) shape.
@@ -1442,73 +1634,93 @@ export const useProjectStore = create<ProjectStoreState>()(
             void _drop;
             return rest;
           }
-          return { ...c, [key]: transition };
+          return { ...c, [key]: normalized };
         }),
       };
     });
   },
 
   toggleClipMuted: (clipId) => {
-    set((state) => ({
-      clips: state.clips.map((c) =>
-        c.id === clipId ? { ...c, muted: !c.muted } : c,
-      ),
-    }));
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return {
+        clips: state.clips.map((c) =>
+          c.id === clipId ? { ...c, muted: !c.muted } : c,
+        ),
+      };
+    });
   },
 
   addClipOverlay: (clipId, overlay) => {
-    set((state) => ({
-      clips: state.clips.map((c) =>
-        c.id === clipId
-          ? { ...c, overlays: [...(c.overlays ?? []), overlay] }
-          : c,
-      ),
-    }));
+    const normalized = normalizeOverlay(overlay);
+    if (!normalized) return;
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return {
+        clips: state.clips.map((c) =>
+          c.id === clipId && (c.overlays?.length ?? 0) < MAX_CLIP_OVERLAYS
+            ? { ...c, overlays: [...(c.overlays ?? []), normalized] }
+            : c,
+        ),
+      };
+    });
   },
 
   updateClipOverlay: (clipId, overlayId, patch) => {
-    set((state) => ({
-      clips: state.clips.map((c) => {
+    if (!hasOnlyFiniteNumbers(patch)) return;
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return { clips: state.clips.map((c) => {
         if (c.id !== clipId) return c;
         return {
           ...c,
           overlays: (c.overlays ?? []).map((o) =>
-            o.id === overlayId ? { ...o, ...patch } : o,
+            o.id === overlayId ? (normalizeOverlay({ ...o, ...patch }) ?? o) : o,
           ),
         };
-      }),
-    }));
+      }) };
+    });
   },
 
   removeClipOverlay: (clipId, overlayId) => {
-    set((state) => ({
-      clips: state.clips.map((c) => {
+    set((state) => {
+      if (!isClipEditable(state, clipId)) return state;
+      return { clips: state.clips.map((c) => {
         if (c.id !== clipId) return c;
         return {
           ...c,
           overlays: (c.overlays ?? []).filter((o) => o.id !== overlayId),
         };
-      }),
-    }));
+      }) };
+    });
   },
 
   applyOverlayToClips: (clipIds, overlay) => {
-    set((state) => ({
-      clips: state.clips.map((c) =>
-        clipIds.includes(c.id)
+    const normalized = normalizeOverlay(overlay);
+    if (!normalized) return;
+    const targetIds = new Set(clipIds);
+    set((state) => {
+      const lockedTrackIds = new Set(
+        state.tracks.filter((track) => track.locked).map((track) => track.id),
+      );
+      return { clips: state.clips.map((c) =>
+        targetIds.has(c.id) &&
+        !lockedTrackIds.has(c.trackId) &&
+        (c.overlays?.length ?? 0) < MAX_CLIP_OVERLAYS
           ? {
               ...c,
               overlays: [
                 ...(c.overlays ?? []),
-                { ...overlay, id: crypto.randomUUID() },
+                { ...normalized, id: crypto.randomUUID() },
               ],
             }
           : c,
-      ),
-    }));
+      ) };
+    });
   },
 
   applyPresetToClips: (clipIds, look) => {
+    if (!isValidClipLook(look)) return 0;
     const targetIds = new Set(clipIds);
     let applied = 0;
     set((state) => {

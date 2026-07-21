@@ -4,7 +4,11 @@ import { useMediaStore } from '../../stores/mediaStore';
 import { clearHistory, useProjectStore } from '../../stores/projectStore';
 import { formatDuration, formatFileSize } from '../../lib/media';
 import type { MediaAsset } from '../../lib/types';
-import type { ProjectAssetRef } from '../../lib/project';
+import {
+  assetRelinkError,
+  requiredAssetSourceDuration,
+  type ProjectAssetRef,
+} from '../../lib/project';
 import { ConfirmDialog } from '../Common/ConfirmDialog';
 import styles from './MediaLibrary.module.css';
 
@@ -155,13 +159,17 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
     target: ProjectAssetRef,
     sourceName: string,
   ) => {
-    if (asset.kind !== target.kind) {
+    const project = useProjectStore.getState();
+    const requiredDuration = requiredAssetSourceDuration(
+      target.id,
+      project.clips,
+      project.markers,
+      project.ioRanges,
+    );
+    const error = assetRelinkError(target, asset, requiredDuration);
+    if (error) {
       removeAsset(asset.id);
-      showMessage(
-        'error',
-        target.kind === 'video' ? '動画ファイルを選択してください' : '音声ファイルを選択してください',
-        4000,
-      );
+      showMessage('error', error, 6000);
       return;
     }
     remapAssetIds({ [target.id]: asset.id });

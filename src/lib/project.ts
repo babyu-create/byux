@@ -29,6 +29,47 @@ export interface ProjectAssetRef {
   path?: string;
 }
 
+/** Highest source timestamp that must remain readable after a manual relink. */
+export function requiredAssetSourceDuration(
+  assetId: string,
+  clips: readonly Clip[],
+  markers: readonly KillMarker[],
+  ranges: readonly IORange[],
+): number {
+  return Math.max(
+    0,
+    ...clips
+      .filter((clip) => clip.assetId === assetId)
+      .map((clip) => clip.trimEnd),
+    ...markers
+      .filter((marker) => marker.assetId === assetId)
+      .map((marker) => marker.time),
+    ...ranges
+      .filter((range) => range.assetId === assetId)
+      .map((range) => range.outTime),
+  );
+}
+
+/** User-facing reason a replacement cannot safely preserve the project. */
+export function assetRelinkError(
+  target: ProjectAssetRef,
+  candidate: Pick<MediaAsset, 'kind' | 'duration'>,
+  requiredDuration = target.duration,
+): string | null {
+  if (candidate.kind !== target.kind) {
+    return target.kind === 'video'
+      ? '動画ファイルを選択してください'
+      : '音声ファイルを選択してください';
+  }
+  if (!Number.isFinite(candidate.duration) || candidate.duration <= 0) {
+    return '選択した素材の長さを確認できませんでした';
+  }
+  if (candidate.duration + 1e-6 < requiredDuration) {
+    return `選択した素材が短すぎます（必要 ${requiredDuration.toFixed(2)}秒 / 選択 ${candidate.duration.toFixed(2)}秒）`;
+  }
+  return null;
+}
+
 export interface ProjectFile {
   version: 1;
   // 'fps-clip-editor' は v1.0.1 以前の旧識別子。読み込み時のみ受け入れる。

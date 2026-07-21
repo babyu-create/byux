@@ -56,8 +56,10 @@ import {
 import { useMediaStore } from './stores/mediaStore';
 import {
   buildAssetIdMap,
+  assetRelinkError,
   downloadProjectFile,
   parseProjectFile,
+  requiredAssetSourceDuration,
   serialiseProject,
   type ProjectAssetRef,
 } from './lib/project';
@@ -127,6 +129,17 @@ async function relinkFromDisk(
       });
       if (!source) continue;
       const asset = await useMediaStore.getState().addRecoveredAsset(ref, source);
+      const project = useProjectStore.getState();
+      const requiredDuration = requiredAssetSourceDuration(
+        ref.id,
+        project.clips,
+        project.markers,
+        project.ioRanges,
+      );
+      if (assetRelinkError(ref, asset, requiredDuration)) {
+        useMediaStore.getState().removeAsset(asset.id);
+        continue;
+      }
       idMap[ref.id] = asset.id;
       recovered += 1;
     } catch {

@@ -294,6 +294,12 @@ export const Clip = memo(function Clip({
     return true;
   };
 
+  const handlePointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    cancelActiveDrag();
+  };
+
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     selectClip(clip.id, e.shiftKey);
@@ -373,7 +379,7 @@ export const Clip = memo(function Clip({
       onPointerDown={(e) => startDrag(e, 'move')}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
       onClick={handleClick}
       onKeyDown={(event) => {
         if (event.key === 'Escape' && cancelActiveDrag()) {
@@ -434,7 +440,7 @@ export const Clip = memo(function Clip({
           onPointerDown={(e) => startDrag(e, 'trim-start')}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
           onKeyDown={(event) => handleTrimKeyDown(event, 'start')}
           role="slider"
           tabIndex={isSelected ? 0 : -1}
@@ -509,7 +515,7 @@ export const Clip = memo(function Clip({
           onPointerDown={(e) => startDrag(e, 'trim-end')}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
           onKeyDown={(event) => handleTrimKeyDown(event, 'end')}
           role="slider"
           tabIndex={isSelected ? 0 : -1}

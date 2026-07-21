@@ -33,9 +33,11 @@ export function PropertiesPanel() {
     selectedClipIds.length === 1
       ? (clips.find((c) => c.id === selectedClipIds[0]) ?? null)
       : null;
-  const selectedClipTrackKind = selectedClip
-    ? (tracks.find((t) => t.id === selectedClip.trackId)?.kind ?? null)
+  const selectedClipTrack = selectedClip
+    ? (tracks.find((track) => track.id === selectedClip.trackId) ?? null)
     : null;
+  const selectedClipTrackKind = selectedClipTrack?.kind ?? null;
+  const selectedClipLocked = selectedClipTrack?.locked === true;
   // The FIRST audio track is the BGM lane; auto-ducking is a BGM feature, so
   // the ducking control only shows for a clip on that track (not SE etc.).
   const bgmTrackId = tracks.find((t) => t.kind === 'audio')?.id ?? null;
@@ -51,6 +53,16 @@ export function PropertiesPanel() {
         <div className={styles.content}>
           {selectedClip ? (
             <>
+              {selectedClipLocked ? (
+                <div className={styles.lockedNotice} role="status">
+                  このトラックはロック中です。タイムラインの鍵を解除すると編集できます。
+                </div>
+              ) : null}
+              <div
+                className={selectedClipLocked ? styles.clipEditorLocked : undefined}
+                inert={selectedClipLocked}
+                aria-disabled={selectedClipLocked}
+              >
               {/* High-frequency FPS-montage control: open by default. */}
               <CollapsibleSection
                 id="speed"
@@ -163,6 +175,7 @@ export function PropertiesPanel() {
                   <ClipPresetsSection clip={selectedClip} />
                 </CollapsibleSection>
               ) : null}
+              </div>
             </>
           ) : null}
           {selectedClipIds.length > 1 ? (
