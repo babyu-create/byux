@@ -58,6 +58,39 @@ function nativeRegistrationError(
   );
 }
 
+const PROXY_PROBE_RETRY_DELAYS_MS = [0, 500, 1_500] as const;
+
+async function probeNativeProxyMetadata(
+  url: string,
+  kind: 'video' | 'audio',
+): Promise<{ metadata: MediaProbeResult; url: string }> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < PROXY_PROBE_RETRY_DELAYS_MS.length; attempt += 1) {
+    const delayMs = PROXY_PROBE_RETRY_DELAYS_MS[attempt];
+    if (delayMs > 0) {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
+    }
+    // Chromium can cache a transient PIPELINE_ERROR_DECODE against the exact
+    // custom-protocol URL while a freshly renamed proxy becomes visible.
+    // A query suffix keeps the same opaque token while forcing a clean media
+    // pipeline for the bounded retries and for subsequent editor playback.
+    const candidateUrl = attempt === 0
+      ? url
+      : `${url}${url.includes('?') ? '&' : '?'}probeRetry=${attempt}`;
+    try {
+      const metadata = kind === 'video'
+        ? await probeVideoUrlMetadata(candidateUrl)
+        : await probeAudioUrlMetadata(candidateUrl);
+      return { metadata, url: candidateUrl };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('互換プレビューを確認できませんでした');
+}
+
 async function assetFromNativeSource(
   source: NativeMediaSource,
 ): Promise<MediaAsset> {
@@ -81,6 +114,7 @@ async function assetFromNativeSource(
       previewProxy = true;
     };
     if (
+      source.requiresPreviewProxy ||
       (source.kind === 'video' && needsVideoPreviewProxy(source.name)) ||
       (source.kind === 'audio' && needsAudioPreviewProxy(source.name))
     ) {
@@ -88,10 +122,15 @@ async function assetFromNativeSource(
     }
     let metadata: MediaProbeResult;
     try {
-      metadata =
-        source.kind === 'video'
+      if (previewProxy) {
+        const probed = await probeNativeProxyMetadata(previewUrl, source.kind);
+        metadata = probed.metadata;
+        previewUrl = probed.url;
+      } else {
+        metadata = source.kind === 'video'
           ? await probeVideoUrlMetadata(previewUrl)
           : await probeAudioUrlMetadata(previewUrl);
+      }
     } catch (probeError) {
       // A container extension does not guarantee Chromium can decode the
       // streams inside it (HEVC/AV1/PCM/WMA are common examples). Keep the
@@ -100,10 +139,9 @@ async function assetFromNativeSource(
         throw probeError;
       }
       await createCompatiblePreview();
-      metadata =
-        source.kind === 'video'
-          ? await probeVideoUrlMetadata(previewUrl)
-          : await probeAudioUrlMetadata(previewUrl);
+      const probed = await probeNativeProxyMetadata(previewUrl, source.kind);
+      metadata = probed.metadata;
+      previewUrl = probed.url;
     }
     return {
       id: crypto.randomUUID(),
@@ -361,7 +399,8 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
         try {
           if (
             window.fce?.isElectron &&
-            ((kind === 'video' && needsVideoPreviewProxy(file.name)) ||
+            (registeredSource?.requiresPreviewProxy ||
+              (kind === 'video' && needsVideoPreviewProxy(file.name)) ||
               (kind === 'audio' && needsAudioPreviewProxy(file.name))) &&
             window.fce.createPreviewProxy
           ) {
@@ -408,15 +447,13 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
                 );
               }
               proxyToken = proxy.token;
-              const meta =
-                kind === 'video'
-                  ? await probeVideoUrlMetadata(proxy.url)
-                  : await probeAudioUrlMetadata(proxy.url);
+              const probed = await probeNativeProxyMetadata(proxy.url, kind);
+              const meta = probed.metadata;
               asset = {
                 id: crypto.randomUUID(),
                 name: file.name,
                 kind,
-                url: proxy.url,
+                url: probed.url,
                 file,
                 size: file.size,
                 mimeType: file.type || guessMimeType(file.name, kind),

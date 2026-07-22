@@ -162,6 +162,38 @@ async function probeInputMediaKind(binaryPath, sourcePath) {
   return parseInputMediaStreams(result.stderr).kind;
 }
 
+/** Decode a short leading sample and fail on the first corrupt packet. This is
+ * intentionally stricter than normal FFmpeg transcoding: it protects Chromium
+ * from entering an unrecoverable black-preview state before the app can switch
+ * the source to a repaired compatibility proxy. */
+async function probeInputVideoDecodable(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-v',
+      'error',
+      '-xerror',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+      '-t',
+      '2',
+      '-map',
+      '0:v:0',
+      '-an',
+      '-sn',
+      '-f',
+      'null',
+      '-',
+    ],
+    { timeoutMs: 20_000 },
+  );
+  return result.code === 0;
+}
+
 function parseDuration(stderr) {
   const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
   if (!match) return null;
@@ -327,6 +359,7 @@ module.exports = {
   parseInputMediaStreams,
   probeInputHasAudio,
   probeInputMediaKind,
+  probeInputVideoDecodable,
   resolveFfmpegBinary,
   runCaptured,
   terminateProcess,

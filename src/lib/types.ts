@@ -123,6 +123,8 @@ export interface NativeMediaSource {
   kind: 'video' | 'audio';
   token: string;
   url: string;
+  /** Main-process FFmpeg found corrupt/undecodable leading video packets. */
+  requiresPreviewProxy?: boolean;
 }
 
 export interface NativeMediaSelectionResult {

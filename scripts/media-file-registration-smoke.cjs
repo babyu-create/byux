@@ -7,10 +7,13 @@ const path = require('node:path');
 
 const executableArg = process.argv[2];
 const fixtureArg = process.argv[3];
-const fullImport = process.argv.includes('--full-import');
+const previewPlayback = process.argv.includes('--preview-playback');
+const registeredPlayback = process.argv.includes('--registered-playback');
+const keepProfile = process.argv.includes('--keep-profile');
+const fullImport = previewPlayback || process.argv.includes('--full-import');
 if (!executableArg || !fixtureArg) {
   throw new Error(
-    'usage: node media-file-registration-smoke.cjs <Byux.exe> <media-file> [--full-import]',
+    'usage: node media-file-registration-smoke.cjs <Byux.exe> <media-file> [--full-import] [--preview-playback] [--registered-playback] [--keep-profile]',
   );
 }
 
@@ -65,7 +68,7 @@ function connect(webSocketUrl) {
             const timeout = setTimeout(() => {
               pending.delete(id);
               commandReject(new Error(`${method} timed out`));
-            }, 30_000);
+            }, 60_000);
             pending.set(id, { resolve: commandResolve, reject: commandReject, timeout });
             ws.send(JSON.stringify({ id, method, params }));
           });
@@ -99,8 +102,10 @@ async function cleanup() {
   } else {
     child.kill('SIGKILL');
   }
-  await fs.rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-    .catch(() => {});
+  if (!keepProfile) {
+    await fs.rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+      .catch(() => {});
+  }
 }
 
 async function main() {
@@ -150,6 +155,37 @@ async function main() {
         const file = this.files?.[0];
         if (!file) return { ok: false, error: 'file input is empty' };
         const registration = await window.fce.registerMediaFileFromFile(file);
+        let registeredPlayback = null;
+        if (registration.ok && ${registeredPlayback ? 'true' : 'false'}) {
+          const video = document.createElement('video');
+          video.preload = 'auto';
+          video.muted = true;
+          video.crossOrigin = 'anonymous';
+          video.src = registration.source.url;
+          await Promise.race([
+            new Promise((resolve) => video.addEventListener('loadedmetadata', resolve, { once: true })),
+            new Promise((resolve) => video.addEventListener('error', resolve, { once: true })),
+            new Promise((resolve) => setTimeout(resolve, 15_000)),
+          ]);
+          if (video.duration > 0) video.currentTime = Math.min(1, video.duration / 2);
+          await Promise.race([
+            new Promise((resolve) => video.addEventListener('loadeddata', resolve, { once: true })),
+            new Promise((resolve) => video.addEventListener('seeked', resolve, { once: true })),
+            new Promise((resolve) => video.addEventListener('error', resolve, { once: true })),
+            new Promise((resolve) => setTimeout(resolve, 15_000)),
+          ]);
+          registeredPlayback = {
+            ok: video.readyState >= 2 && !video.error,
+            readyState: video.readyState,
+            networkState: video.networkState,
+            duration: video.duration,
+            width: video.videoWidth,
+            height: video.videoHeight,
+            error: video.error?.message ?? null,
+          };
+          video.removeAttribute('src');
+          video.load();
+        }
         if (registration.ok) await window.fce.releaseMediaFile(registration.source.token);
         return {
           ok: registration.ok,
@@ -159,13 +195,17 @@ async function main() {
           browserName: file.name,
           registeredSize: registration.ok ? registration.source.size : null,
           registeredName: registration.ok ? registration.source.name : null,
+          requiresPreviewProxy: registration.ok
+            ? registration.source.requiresPreviewProxy === true
+            : null,
+          registeredPlayback,
         };
       }`,
       awaitPromise: true,
       returnByValue: true,
     });
     const result = evaluated.result?.value;
-    const report = { diskSize: stat.size, ...result };
+    const report = { diskSize: stat.size, profile: keepProfile ? profile : undefined, ...result };
     if (!result?.ok) process.exitCode = 1;
     if (result?.ok && fullImport) {
       const refreshedDocument = await cdp.command('DOM.getDocument', { depth: -1 });
@@ -200,6 +240,116 @@ async function main() {
         body: importState?.added ? undefined : importState?.body,
       };
       if (!report.fullImport.ok) process.exitCode = 1;
+      if (report.fullImport.ok && previewPlayback) {
+        const addResult = await cdp.command('Runtime.evaluate', {
+          expression: `(() => {
+            const button = document.querySelector(${JSON.stringify(`[aria-label="${expectedLabel}"]`)});
+            button?.click();
+            return Boolean(button);
+          })()`,
+          returnByValue: true,
+        });
+        if (addResult.result?.value !== true) throw new Error('timeline add button was not found');
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const clipResult = await cdp.command('Runtime.evaluate', {
+            expression: 'document.querySelectorAll("[data-clip-id]").length',
+            returnByValue: true,
+          });
+          if (clipResult.result?.value > 0) break;
+          await delay(100);
+        }
+        const playbackResult = await cdp.command('Runtime.evaluate', {
+          expression: `(async () => {
+            const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            let video = null;
+            for (let attempt = 0; attempt < 200 && !video; attempt += 1) {
+              video = [...document.querySelectorAll('video')]
+                .filter((candidate) => {
+                  const rect = candidate.getBoundingClientRect();
+                  return rect.width >= 200 && rect.height >= 100;
+                })
+                .sort((a, b) => {
+                  const ar = a.getBoundingClientRect();
+                  const br = b.getBoundingClientRect();
+                  return br.width * br.height - ar.width * ar.height;
+                })[0] ?? null;
+              if (!video) await delay(100);
+            }
+            if (!video) return { ok: false, error: 'preview video was not found' };
+            let mediaError = null;
+            const onError = () => { mediaError = video.error?.message ?? 'media error'; };
+            video.addEventListener('error', onError, { once: true });
+            if (video.readyState < 2) {
+              await Promise.race([
+                new Promise((resolve) => video.addEventListener('loadeddata', resolve, { once: true })),
+                delay(15_000),
+              ]);
+            }
+            const seekTarget = Math.min(1, Math.max(0, (video.duration || 1) / 2));
+            if (Number.isFinite(seekTarget)) {
+              video.currentTime = seekTarget;
+              await Promise.race([
+                new Promise((resolve) => video.addEventListener('seeked', resolve, { once: true })),
+                delay(15_000),
+              ]);
+            }
+            let frameCallback = false;
+            if (typeof video.requestVideoFrameCallback === 'function') {
+              await Promise.race([
+                new Promise((resolve) => video.requestVideoFrameCallback(() => {
+                  frameCallback = true;
+                  resolve();
+                })),
+                delay(5_000),
+              ]);
+            }
+            let meanRgb = null;
+            let nonBlackRatio = null;
+            let canvasError = null;
+            try {
+              const canvas = document.createElement('canvas');
+              canvas.width = 64;
+              canvas.height = 36;
+              const context = canvas.getContext('2d', { willReadFrequently: true });
+              context.drawImage(video, 0, 0, canvas.width, canvas.height);
+              const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+              let sum = 0;
+              let nonBlack = 0;
+              for (let index = 0; index < pixels.length; index += 4) {
+                const value = (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
+                sum += value;
+                if (value > 8) nonBlack += 1;
+              }
+              meanRgb = sum / (pixels.length / 4);
+              nonBlackRatio = nonBlack / (pixels.length / 4);
+            } catch (error) {
+              canvasError = error instanceof Error ? error.message : String(error);
+            }
+            video.removeEventListener('error', onError);
+            return {
+              ok: (video.readyState >= 2 || frameCallback) &&
+                !mediaError &&
+                nonBlackRatio !== null &&
+                nonBlackRatio > 0.05,
+              readyState: video.readyState,
+              networkState: video.networkState,
+              currentTime: video.currentTime,
+              duration: video.duration,
+              width: video.videoWidth,
+              height: video.videoHeight,
+              frameCallback,
+              meanRgb,
+              nonBlackRatio,
+              mediaError,
+              canvasError,
+            };
+          })()`,
+          awaitPromise: true,
+          returnByValue: true,
+        });
+        report.previewPlayback = playbackResult.result?.value ?? null;
+        if (!report.previewPlayback?.ok) process.exitCode = 1;
+      }
     }
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     cdp.close();

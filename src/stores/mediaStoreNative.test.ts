@@ -195,6 +195,67 @@ describe('mediaStore native source registration', () => {
     })
   })
 
+  it('proxies a corrupt MP4 before Chromium sees its video packets', async () => {
+    const source = { ...SOURCE, requiresPreviewProxy: true }
+    const createPreviewProxy = vi.fn().mockResolvedValue({
+      ok: true,
+      token: 'preflight-proxy-token',
+      url: 'fce-media://asset/preflight-proxy-token',
+      size: 5_000_000,
+      cached: false,
+    })
+    installFceApi({ createPreviewProxy })
+    mediaMocks.probeVideoUrlMetadata.mockResolvedValue({
+      duration: 140,
+      width: 1280,
+      height: 720,
+    })
+
+    const created = await useMediaStore.getState().addNativeSources([source])
+
+    expect(createPreviewProxy).toHaveBeenCalledWith(source.token)
+    expect(mediaMocks.probeVideoUrlMetadata).toHaveBeenCalledOnce()
+    expect(mediaMocks.probeVideoUrlMetadata).toHaveBeenCalledWith(
+      'fce-media://asset/preflight-proxy-token',
+    )
+    expect(created[0]).toMatchObject({
+      sourceToken: source.token,
+      previewSourceToken: 'preflight-proxy-token',
+      previewProxy: true,
+    })
+  })
+
+  it('retries a freshly finalized proxy with a cache-busted media URL', async () => {
+    const createPreviewProxy = vi.fn().mockResolvedValue({
+      ok: true,
+      token: 'retry-proxy-token',
+      url: 'fce-media://asset/retry-proxy-token',
+      size: 5_000_000,
+      cached: false,
+    })
+    installFceApi({ createPreviewProxy })
+    mediaMocks.probeVideoUrlMetadata
+      .mockRejectedValueOnce(new Error('source decode failed'))
+      .mockRejectedValueOnce(new Error('fresh proxy race'))
+      .mockResolvedValueOnce({ duration: 140, width: 1280, height: 720 })
+
+    const created = await useMediaStore.getState().addNativeSources([SOURCE])
+
+    expect(mediaMocks.probeVideoUrlMetadata).toHaveBeenNthCalledWith(
+      2,
+      'fce-media://asset/retry-proxy-token',
+    )
+    expect(mediaMocks.probeVideoUrlMetadata).toHaveBeenNthCalledWith(
+      3,
+      'fce-media://asset/retry-proxy-token?probeRetry=1',
+    )
+    expect(created[0]).toMatchObject({
+      url: 'fce-media://asset/retry-proxy-token?probeRetry=1',
+      previewSourceToken: 'retry-proxy-token',
+      previewProxy: true,
+    })
+  })
+
   it('creates an AAC compatibility proxy for WMA audio', async () => {
     const source: NativeMediaSource = {
       path: 'C:\\Audio\\soundtrack.wma',

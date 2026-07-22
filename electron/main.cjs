@@ -29,6 +29,7 @@ const {
   minimalEnvironment,
   probeInputHasAudio,
   probeInputMediaKind,
+  probeInputVideoDecodable,
   resolveFfmpegBinary,
   runCaptured,
   terminateProcess,
@@ -2003,6 +2004,13 @@ const registeredMedia = new Map();
 const authorizedMediaRefs = new Map();
 const MAX_MEDIA_CHUNK_BYTES = 8 * 1024 * 1024;
 
+function registeredMediaUrl(token) {
+  if (!isDev && prodEntryUrl) {
+    return new URL(`media/${token}`, prodEntryUrl).href;
+  }
+  return `fce-media://asset/${token}`;
+}
+
 function mediaApprovalKey(filePath, size) {
   const normalized = path.resolve(filePath);
   const platformPath = process.platform === 'win32'
@@ -2089,7 +2097,13 @@ ipcMain.on('media:authorize-file-sync', (event, ref) => {
   } catch {}
 });
 
-function registerResolvedMedia(realPath, stat, kind, name) {
+function registerResolvedMedia(
+  realPath,
+  stat,
+  kind,
+  name,
+  requiresPreviewProxy = false,
+) {
   const token = crypto.randomUUID();
   registeredMedia.set(token, {
     path: realPath,
@@ -2104,10 +2118,11 @@ function registerResolvedMedia(realPath, stat, kind, name) {
   });
   return {
     token,
-    url: `fce-media://asset/${token}`,
+    url: registeredMediaUrl(token),
     size: stat.size,
     kind,
     name,
+    requiresPreviewProxy: requiresPreviewProxy === true,
   };
 }
 
@@ -2119,6 +2134,19 @@ async function resolveMediaKind(realPath, requestedKind = null) {
   await ensureNativeFfmpeg();
   const probedKind = await probeInputMediaKind(ffmpegBinaryPath(), realPath);
   return requestedKind && probedKind !== requestedKind ? null : probedKind;
+}
+
+async function sourceRequiresPreviewProxy(realPath, kind) {
+  if (kind !== 'video') return false;
+  try {
+    await ensureNativeFfmpeg();
+    return !(await probeInputVideoDecodable(ffmpegBinaryPath(), realPath));
+  } catch {
+    // A timeout or probe startup failure must not send an unverified source
+    // into Chromium. The proxy path will surface a useful FFmpeg error if the
+    // bundled decoder is genuinely unavailable.
+    return true;
+  }
 }
 
 /**
@@ -2152,10 +2180,11 @@ ipcMain.handle('media:register-selected-file', async (event, ref) => {
     const kind = await resolveMediaKind(realPath, ref.kind ?? null);
     if (!kind) return { ok: false, code: 'INVALID_KIND' };
     const name = path.basename(realPath);
+    const requiresPreviewProxy = await sourceRequiresPreviewProxy(realPath, kind);
     return {
       ok: true,
       source: {
-        ...registerResolvedMedia(realPath, stat, kind, name),
+        ...registerResolvedMedia(realPath, stat, kind, name, requiresPreviewProxy),
         path: realPath,
         name,
         kind,
@@ -2224,7 +2253,14 @@ ipcMain.handle('media:select-files', async (event, options) => {
         continue;
       }
       const name = path.basename(realPath);
-      const registered = registerResolvedMedia(realPath, stat, kind, name);
+      const requiresPreviewProxy = await sourceRequiresPreviewProxy(realPath, kind);
+      const registered = registerResolvedMedia(
+        realPath,
+        stat,
+        kind,
+        name,
+        requiresPreviewProxy,
+      );
       sources.push({
         ...registered,
         path: realPath,
@@ -2271,7 +2307,14 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     if (!stat.isFile() || stat.size !== ref.size) return null;
     const kind = await resolveMediaKind(realPath, ref.kind ?? null);
     if (!kind || (ref.kind && kind !== ref.kind)) return null;
-    return registerResolvedMedia(realPath, stat, kind, approval.name ?? canonicalName);
+    const requiresPreviewProxy = await sourceRequiresPreviewProxy(realPath, kind);
+    return registerResolvedMedia(
+      realPath,
+      stat,
+      kind,
+      approval.name ?? canonicalName,
+      requiresPreviewProxy,
+    );
   } catch {
     return null;
   }
@@ -2797,7 +2840,7 @@ async function registerProxyFile(proxyPath, kind) {
   });
   return {
     token,
-    url: `fce-media://asset/${token}`,
+    url: registeredMediaUrl(token),
     size: stat.size,
   };
 }
@@ -3131,6 +3174,104 @@ function writeStaticError(response, statusCode, message) {
   response.end(message);
 }
 
+const MEDIA_HTTP_MIME_TYPES = new Map([
+  ['.aac', 'audio/aac'],
+  ['.flac', 'audio/flac'],
+  ['.m4a', 'audio/mp4'],
+  ['.m4v', 'video/mp4'],
+  ['.mov', 'video/quicktime'],
+  ['.mp3', 'audio/mpeg'],
+  ['.mp4', 'video/mp4'],
+  ['.ogg', 'audio/ogg'],
+  ['.opus', 'audio/ogg'],
+  ['.wav', 'audio/wav'],
+  ['.webm', 'video/webm'],
+]);
+
+async function serveRegisteredMedia(request, response, mediaToken) {
+  const source = registeredMedia.get(mediaToken);
+  if (!source) {
+    writeStaticError(response, 404, 'Not found');
+    return;
+  }
+  let stat;
+  try {
+    stat = await fs.stat(source.path);
+  } catch {
+    writeStaticError(response, 404, 'Not found');
+    return;
+  }
+  if (
+    !stat.isFile() ||
+    stat.size !== source.size ||
+    (source.dev !== undefined && stat.dev !== source.dev) ||
+    (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+    Math.abs(stat.mtimeMs - source.mtimeMs) > 1
+  ) {
+    writeStaticError(response, 409, 'Media changed');
+    return;
+  }
+
+  let statusCode = 200;
+  let start = 0;
+  let end = Math.max(0, stat.size - 1);
+  const range = request.headers.range;
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (!match || (match[1] === '' && match[2] === '')) {
+      response.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+      response.end();
+      return;
+    }
+    if (match[1] === '') {
+      const suffixLength = Number(match[2]);
+      if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+        response.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+        response.end();
+        return;
+      }
+      start = Math.max(0, stat.size - suffixLength);
+    } else {
+      start = Number(match[1]);
+      if (match[2] !== '') end = Number(match[2]);
+    }
+    if (
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(end) ||
+      start < 0 ||
+      start >= stat.size ||
+      end < start
+    ) {
+      response.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+      response.end();
+      return;
+    }
+    end = Math.min(end, stat.size - 1);
+    statusCode = 206;
+  }
+
+  response.writeHead(statusCode, {
+    'Content-Type': MEDIA_HTTP_MIME_TYPES.get(path.extname(source.path).toLowerCase()) ??
+      (source.kind === 'video' ? 'video/mp4' : 'application/octet-stream'),
+    'Content-Length': String(stat.size === 0 ? 0 : end - start + 1),
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'no-cache',
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Embedder-Policy': 'require-corp',
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    ...(statusCode === 206
+      ? { 'Content-Range': `bytes ${start}-${end}/${stat.size}` }
+      : null),
+  });
+  if (request.method === 'HEAD' || stat.size === 0) {
+    response.end();
+    return;
+  }
+  const stream = fsStream.createReadStream(source.path, { start, end });
+  stream.on('error', () => response.destroy());
+  stream.pipe(response);
+}
+
 async function serveAppAsset(request, response, token, expectedHost) {
   if (request.headers.host !== expectedHost) {
     writeStaticError(response, 400, 'Invalid host');
@@ -3157,6 +3298,12 @@ async function serveAppAsset(request, response, token, expectedHost) {
     relativePath = decodedPath || 'index.html';
   } catch {
     writeStaticError(response, 400, 'Invalid URL');
+    return;
+  }
+
+  const mediaMatch = /^media\/([0-9a-f-]{36})$/i.exec(relativePath);
+  if (mediaMatch) {
+    await serveRegisteredMedia(request, response, mediaMatch[1]);
     return;
   }
 

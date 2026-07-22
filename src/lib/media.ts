@@ -150,40 +150,91 @@ export function guessMimeType(filename: string, kind: 'video' | 'audio'): string
   return EXTENSION_MIME[ext] ?? (kind === 'video' ? 'video/mp4' : 'audio/mpeg');
 }
 
-export function probeVideoMetadata(file: File): Promise<MediaProbeResult> {
+/**
+ * Reading container metadata is not enough to prove Chromium can display the
+ * video. Some damaged capture files report duration and dimensions correctly,
+ * then fail on the first H.264 packet and leave the editor preview black.
+ * Seek to a real sample frame and require decoded frame data before accepting
+ * the source. Callers can then fall back to the FFmpeg compatibility proxy.
+ */
+function probePlayableVideoSource(
+  url: string,
+  errorMessage: string,
+): Promise<MediaProbeResult> {
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
     const video = document.createElement('video');
-    video.preload = 'metadata';
-    video.muted = true;
+    let result: MediaProbeResult | null = null;
+    let sampleTime = 0;
+    let settled = false;
 
     const cleanup = () => {
       clearTimeout(timeoutId);
+      video.onloadedmetadata = null;
+      video.onloadeddata = null;
+      video.onseeked = null;
+      video.onerror = null;
       video.removeAttribute('src');
-      URL.revokeObjectURL(url);
+      video.load();
     };
-
-    video.onloadedmetadata = () => {
-      const result: MediaProbeResult = {
-        duration: Number.isFinite(video.duration) ? video.duration : 0,
-        width: video.videoWidth,
-        height: video.videoHeight,
-      };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(errorMessage));
+    };
+    const acceptDecodedFrame = () => {
+      if (
+        settled ||
+        !result ||
+        video.seeking ||
+        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+        Math.abs(video.currentTime - sampleTime) > 0.5
+      ) {
+        return;
+      }
+      settled = true;
       cleanup();
       resolve(result);
     };
 
-    video.onerror = () => {
-      cleanup();
-      reject(new Error(`Failed to read video metadata: ${file.name}`));
+    video.preload = 'auto';
+    video.muted = true;
+    video.crossOrigin = 'anonymous';
+    video.onloadedmetadata = () => {
+      result = {
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      };
+      if (
+        !Number.isFinite(result.duration) ||
+        result.duration <= 0 ||
+        !result.width ||
+        !result.height
+      ) {
+        fail();
+        return;
+      }
+      sampleTime = result.duration > 2 ? 1 : result.duration / 2;
+      try {
+        video.currentTime = sampleTime;
+        queueMicrotask(acceptDecodedFrame);
+      } catch {
+        fail();
+      }
     };
-
-    const timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new Error(`Timed out reading video metadata: ${file.name}`));
-    }, MEDIA_METADATA_TIMEOUT_MS);
+    video.onloadeddata = acceptDecodedFrame;
+    video.onseeked = acceptDecodedFrame;
+    video.onerror = fail;
+    const timeoutId = setTimeout(fail, MEDIA_METADATA_TIMEOUT_MS);
     video.src = url;
   });
+}
+
+export function probeVideoMetadata(file: File): Promise<MediaProbeResult> {
+  const url = URL.createObjectURL(file);
+  return probePlayableVideoSource(url, `Failed to decode video: ${file.name}`)
+    .finally(() => URL.revokeObjectURL(url));
 }
 
 export function probeAudioMetadata(file: File): Promise<MediaProbeResult> {
@@ -323,48 +374,7 @@ export async function mediaAssetToFile(asset: MediaAsset): Promise<File> {
 /** Probe a main-process streamed preview URL without materialising the proxy as
  * a renderer File/Blob. Used by the native long-form compatibility pipeline. */
 export function probeVideoUrlMetadata(url: string): Promise<MediaProbeResult> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    const cleanup = () => {
-      clearTimeout(timeoutId);
-      // Clearing the handlers first is important: calling load() after
-      // removing src can itself emit `error`, which otherwise re-enters
-      // cleanup and may loop on some Chromium versions.
-      video.onloadedmetadata = null;
-      video.onerror = null;
-      video.removeAttribute('src');
-      video.load();
-    };
-    video.preload = 'metadata';
-    video.crossOrigin = 'anonymous';
-    video.onloadedmetadata = () => {
-      const result = {
-        duration: video.duration,
-        width: video.videoWidth,
-        height: video.videoHeight,
-      };
-      cleanup();
-      if (
-        !Number.isFinite(result.duration) ||
-        result.duration <= 0 ||
-        result.width <= 0 ||
-        result.height <= 0
-      ) {
-        reject(new Error('プレビュー用動画の情報を読み取れませんでした'));
-        return;
-      }
-      resolve(result);
-    };
-    video.onerror = () => {
-      cleanup();
-      reject(new Error('プレビュー用動画を読み込めませんでした'));
-    };
-    const timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new Error('プレビュー用動画の読み込みがタイムアウトしました'));
-    }, MEDIA_METADATA_TIMEOUT_MS);
-    video.src = url;
-  });
+  return probePlayableVideoSource(url, 'プレビュー用動画をデコードできませんでした');
 }
 
 /** Probe a main-process streamed audio URL without copying the whole source

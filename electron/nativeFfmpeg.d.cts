@@ -35,6 +35,10 @@ export function probeInputMediaKind(
   binaryPath: string,
   sourcePath: string,
 ): Promise<'video' | 'audio' | null>;
+export function probeInputVideoDecodable(
+  binaryPath: string,
+  sourcePath: string,
+): Promise<boolean>;
 export function validateOutput(
   binaryPath: string,
   outputPath: string,
