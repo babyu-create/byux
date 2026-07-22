@@ -1,6 +1,8 @@
 import { useProjectStore } from '../../stores/projectStore';
+import type { Clip } from '../../lib/types';
+import { clipDuration } from '../../lib/timeline';
 
-export type TimelineEditOperation = 'split' | 'delete';
+export type TimelineEditOperation = 'split' | 'delete' | 'ripple-delete';
 
 interface ClipNudgeEvent {
   key: string;
@@ -42,6 +44,43 @@ export function releasePointerCaptureIfHeld(
   return true;
 }
 
+/** Clip ids touched by a horizontal marquee, in project order. */
+export function clipIdsIntersectingTimeRange(
+  clips: readonly Clip[],
+  firstTime: number,
+  secondTime: number,
+): string[] {
+  const start = Math.max(0, Math.min(firstTime, secondTime));
+  const end = Math.max(0, Math.max(firstTime, secondTime));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end - start <= 1e-6) {
+    return [];
+  }
+  return clips
+    .filter((clip) => {
+      const clipEnd = clip.start + clipDuration(clip);
+      return clipEnd > start + 1e-6 && clip.start < end - 1e-6;
+    })
+    .map((clip) => clip.id);
+}
+
+/**
+ * Return the most recently selected clip that belongs to this track without
+ * multiplying selected-count by track-clip-count. Ctrl/Cmd+A can select the
+ * full 10,000-clip project, so the former nested `find(some())` became a
+ * visible main-thread stall.
+ */
+export function lastSelectedClipIdOnTrack(
+  orderedClips: readonly Pick<Clip, 'id'>[],
+  selectedClipIds: readonly string[],
+): string | undefined {
+  const trackClipIds = new Set(orderedClips.map((clip) => clip.id));
+  for (let index = selectedClipIds.length - 1; index >= 0; index -= 1) {
+    const id = selectedClipIds[index];
+    if (trackClipIds.has(id)) return id;
+  }
+  return orderedClips[0]?.id;
+}
+
 export function timelineEditFeedback(
   operation: TimelineEditOperation,
   changedCount: number,
@@ -52,6 +91,8 @@ export function timelineEditFeedback(
       text:
         operation === 'split'
           ? `${changedCount}本のクリップを分割しました（Ctrl+Zで元に戻せます）`
+          : operation === 'ripple-delete'
+            ? `${changedCount}本を詰めて削除しました（Ctrl+Zで元に戻せます）`
           : `${changedCount}本のクリップを削除しました（Ctrl+Zで元に戻せます）`,
     };
   }
@@ -60,6 +101,8 @@ export function timelineEditFeedback(
     text:
       operation === 'split'
         ? '再生ヘッド位置とトラックのロックを確認してください'
+        : operation === 'ripple-delete'
+          ? '詰めて削除できるクリップがありません（トラックのロックを確認してください）'
         : '選択クリップは削除できません（トラックのロックを確認してください）',
   };
 }
@@ -102,6 +145,11 @@ export function removeSelectedWithFeedback(): number {
     before - useProjectStore.getState().clips.length,
   );
   return showEditFeedback('delete', changedCount);
+}
+
+export function rippleDeleteSelectedWithFeedback(): number {
+  const changedCount = useProjectStore.getState().rippleDeleteSelectedClips();
+  return showEditFeedback('ripple-delete', changedCount);
 }
 
 export function removeClipWithFeedback(clipId: string): number {

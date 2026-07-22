@@ -1,10 +1,11 @@
 import { useState, type MouseEvent } from 'react';
-import { Captions, Scissors, Trash2, Magnet, ZoomIn, ZoomOut, ListPlus } from 'lucide-react';
+import { Captions, Scissors, Trash2, Magnet, ZoomIn, ZoomOut, ListPlus, ListX } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { formatTimecode } from '../../lib/media';
 import {
   removeSelectedWithFeedback,
+  rippleDeleteSelectedWithFeedback,
   splitSelectedWithFeedback,
 } from './timelineCommands';
 import styles from './TimelineToolbar.module.css';
@@ -132,6 +133,17 @@ export function TimelineToolbar() {
         >
           <Trash2 size={14} strokeWidth={2} aria-hidden="true" />
           <span>削除</span>
+        </button>
+        <button
+          type="button"
+          className={styles.actionBtn}
+          onClick={rippleDeleteSelectedWithFeedback}
+          disabled={!canDeleteSelection}
+          title="選択クリップを削除して、トラックごとに後続を詰める (Shift+Delete)"
+          aria-label={`選択クリップを詰めて削除（${selectedClipIds.length}本選択中）`}
+        >
+          <ListX size={14} strokeWidth={2} aria-hidden="true" />
+          <span>詰めて削除</span>
         </button>
         <button
           type="button"

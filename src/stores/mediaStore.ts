@@ -30,7 +30,12 @@ interface MediaStoreState {
   addNativeSources: (sources: NativeMediaSource[]) => Promise<MediaAsset[]>;
   addRecoveredAsset: (
     ref: ProjectAssetRef,
-    source: { token: string; url: string; size: number },
+    source: {
+      token: string;
+      url: string;
+      size: number;
+      requiresPreviewProxy?: boolean;
+    },
   ) => Promise<MediaAsset>;
   removeAsset: (id: string) => void;
   clearAssets: () => void;
@@ -613,14 +618,20 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
 
   addRecoveredAsset: async (ref, source) => {
     const importGeneration = mediaImportGeneration;
-    const asset = await assetFromNativeSource({
+    const recovered = await assetFromNativeSource({
       path: ref.path ?? '',
       name: ref.name,
       size: source.size,
       kind: ref.kind,
       token: source.token,
       url: source.url,
+      requiresPreviewProxy: source.requiresPreviewProxy,
     });
+    // Project references already point at ref.id. Keeping that stable avoids
+    // a transient split-brain state where clips still use the saved ID while
+    // the asynchronously recovered media receives a new random ID. That race
+    // could make an immediate export report a missing source after reopen.
+    const asset = { ...recovered, id: ref.id };
     if (importGeneration !== mediaImportGeneration) {
       await releaseAssetMediaTokensNow(asset);
       throw new Error('素材の復元が中止されました');

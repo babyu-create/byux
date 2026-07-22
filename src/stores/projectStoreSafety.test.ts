@@ -508,4 +508,173 @@ describe('project store safety invariants', () => {
     });
     expect(useProjectStore.getState().duplicateSelectedClips()).toBe(0);
   });
+
+  it('moves a multi-track selection as one group and stops at the nearest blocker', () => {
+    useProjectStore.setState({
+      clips: [
+        {
+          id: 'video-selected',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 1,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+        {
+          id: 'audio-selected',
+          trackId: 'audio',
+          assetId: ASSET.id,
+          start: 2,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+        {
+          id: 'blocker',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 4,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+      ],
+      selectedClipIds: ['video-selected', 'audio-selected'],
+    });
+
+    expect(useProjectStore.getState().moveSelectedClips('video-selected', 8)).toBe(2);
+    expect(
+      useProjectStore.getState().clips.map((clip) => [clip.id, clip.start]),
+    ).toEqual([
+      ['video-selected', 3],
+      ['audio-selected', 4],
+      ['blocker', 4],
+    ]);
+    expect(useProjectStore.getState().moveSelectedClips('video-selected', 9)).toBe(0);
+  });
+
+  it('does not partially move a selection that includes a locked track', () => {
+    useProjectStore.setState({
+      tracks: [TRACKS[0], { ...TRACKS[1], locked: true }],
+      clips: [
+        {
+          id: 'video-selected',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 1,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+        {
+          id: 'locked-selected',
+          trackId: 'audio',
+          assetId: ASSET.id,
+          start: 2,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+      ],
+      selectedClipIds: ['video-selected', 'locked-selected'],
+    });
+
+    expect(useProjectStore.getState().moveSelectedClips('video-selected', 3)).toBe(0);
+    expect(useProjectStore.getState().clips.map((clip) => clip.start)).toEqual([1, 2]);
+  });
+
+  it('ripple deletes on each editable track while preserving locked selections', () => {
+    useProjectStore.setState({
+      tracks: [TRACKS[0], { ...TRACKS[1], locked: true }],
+      clips: [
+        {
+          id: 'remove-first',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 0,
+          trimStart: 0,
+          trimEnd: 2,
+          effects: [],
+        },
+        {
+          id: 'keep-middle',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 3,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+        {
+          id: 'remove-second',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 5,
+          trimStart: 0,
+          trimEnd: 2,
+          effects: [],
+        },
+        {
+          id: 'keep-last',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 7,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+        {
+          id: 'locked-selected',
+          trackId: 'audio',
+          assetId: ASSET.id,
+          start: 1,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+      ],
+      selectedClipIds: ['remove-first', 'remove-second', 'locked-selected'],
+    });
+
+    expect(useProjectStore.getState().rippleDeleteSelectedClips()).toBe(2);
+    expect(
+      useProjectStore.getState().clips.map((clip) => [clip.id, clip.start]),
+    ).toEqual([
+      ['keep-middle', 1],
+      ['keep-last', 3],
+      ['locked-selected', 1],
+    ]);
+    expect(useProjectStore.getState().selectedClipIds).toEqual(['locked-selected']);
+  });
+
+  it('normalizes batch selection ids and supports additive marquee selection', () => {
+    useProjectStore.setState({
+      clips: [
+        {
+          id: 'first',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 0,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+        {
+          id: 'second',
+          trackId: 'video',
+          assetId: ASSET.id,
+          start: 2,
+          trimStart: 0,
+          trimEnd: 1,
+          effects: [],
+        },
+      ],
+    });
+
+    useProjectStore.getState().selectClips(['first', 'first', 'missing']);
+    expect(useProjectStore.getState().selectedClipIds).toEqual(['first']);
+    useProjectStore.getState().selectClips(['second'], true);
+    expect(useProjectStore.getState().selectedClipIds).toEqual(['first', 'second']);
+  });
 });

@@ -111,14 +111,19 @@ interface ProjectStoreState {
     atTime?: number,
   ) => string | null;
   moveClip: (clipId: string, newStart: number) => void;
+  /** Move the current multi-selection as one rigid group, anchored by clipId. */
+  moveSelectedClips: (clipId: string, newStart: number) => number;
   trimClipStart: (clipId: string, newTrimStart: number) => void;
   trimClipEnd: (clipId: string, newTrimEnd: number) => void;
   splitClipAt: (clipId: string, atTime: number) => void;
   removeClip: (clipId: string) => void;
   removeSelectedClips: () => void;
+  /** Delete editable selected clips and close their duration on each track. */
+  rippleDeleteSelectedClips: () => number;
   /** Remove every timeline/reference object owned by a media asset. */
   removeAssetReferences: (assetId: string) => void;
   selectClip: (clipId: string, additive?: boolean) => void;
+  selectClips: (clipIds: string[], additive?: boolean) => void;
   clearSelection: () => void;
   copySelectedClips: () => number;
   pasteClipsAtPlayhead: () => number;
@@ -275,6 +280,72 @@ function isClipEditable(state: ProjectStoreState, clipId: string): boolean {
   if (!clip) return false;
   const track = state.tracks.find((candidate) => candidate.id === clip.trackId);
   return Boolean(track && !track.locked);
+}
+
+/**
+ * Clamp a rigid multi-clip move before any selected clip crosses a stationary
+ * neighbour. This stays O(selected * log(stationary)) per drag frame and keeps
+ * relative timing intact across tracks.
+ */
+function resolveGroupMoveDelta(
+  state: ProjectStoreState,
+  movingClips: readonly Clip[],
+  requestedDelta: number,
+): number {
+  if (Math.abs(requestedDelta) <= 1e-9 || movingClips.length === 0) return 0;
+  const movingIds = new Set(movingClips.map((clip) => clip.id));
+  const stationaryByTrack = new Map<string, Clip[]>();
+  for (const clip of state.clips) {
+    if (movingIds.has(clip.id)) continue;
+    const list = stationaryByTrack.get(clip.trackId);
+    if (list) list.push(clip);
+    else stationaryByTrack.set(clip.trackId, [clip]);
+  }
+  for (const clips of stationaryByTrack.values()) {
+    clips.sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
+  }
+
+  if (requestedDelta > 0) {
+    let allowed = requestedDelta;
+    for (const moving of movingClips) {
+      const stationary = stationaryByTrack.get(moving.trackId) ?? [];
+      const movingEnd = moving.start + clipDuration(moving);
+      let low = 0;
+      let high = stationary.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (stationary[middle].start < movingEnd - 1e-6) low = middle + 1;
+        else high = middle;
+      }
+      const next = stationary[low];
+      if (next) allowed = Math.min(allowed, Math.max(0, next.start - movingEnd));
+    }
+    return Math.max(0, allowed);
+  }
+
+  let allowed = Math.max(
+    requestedDelta,
+    -Math.min(...movingClips.map((clip) => clip.start)),
+  );
+  for (const moving of movingClips) {
+    const stationary = stationaryByTrack.get(moving.trackId) ?? [];
+    let low = 0;
+    let high = stationary.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (stationary[middle].start < moving.start - 1e-6) low = middle + 1;
+      else high = middle;
+    }
+    for (let index = low - 1; index >= 0; index -= 1) {
+      const previous = stationary[index];
+      const previousEnd = previous.start + clipDuration(previous);
+      if (previousEnd <= moving.start + 1e-6) {
+        allowed = Math.max(allowed, previousEnd - moving.start);
+        break;
+      }
+    }
+  }
+  return Math.min(0, allowed);
 }
 
 function normalizeAudioDucking(ducking: AudioDucking): AudioDucking {
@@ -605,6 +676,53 @@ export const useProjectStore = create<ProjectStoreState>()(
     });
   },
 
+  moveSelectedClips: (clipId, newStart) => {
+    if (!isFiniteNumber(newStart)) return 0;
+    const state = get();
+    const anchor = state.clips.find((clip) => clip.id === clipId);
+    if (!anchor) return 0;
+    const selectedIds = state.selectedClipIds.includes(clipId)
+      ? new Set(state.selectedClipIds)
+      : new Set([clipId]);
+    const movingClips = state.clips.filter((clip) => selectedIds.has(clip.id));
+    if (movingClips.length === 0) return 0;
+    const tracksById = new Map(state.tracks.map((track) => [track.id, track]));
+    if (movingClips.some((clip) => tracksById.get(clip.trackId)?.locked !== false)) {
+      return 0;
+    }
+
+    if (movingClips.length === 1) {
+      const others = state.clips.filter(
+        (clip) => clip.trackId === anchor.trackId && clip.id !== anchor.id,
+      );
+      const resolved = resolveClipPosition(
+        others,
+        newStart,
+        clipDuration(anchor),
+        anchor.start,
+      );
+      if (Math.abs(resolved - anchor.start) <= 1e-9) return 0;
+      set({
+        clips: state.clips.map((clip) =>
+          clip.id === anchor.id ? { ...clip, start: resolved } : clip,
+        ),
+      });
+      return 1;
+    }
+
+    const delta = resolveGroupMoveDelta(state, movingClips, newStart - anchor.start);
+    if (Math.abs(delta) <= 1e-9) return 0;
+    const movingIds = new Set(movingClips.map((clip) => clip.id));
+    set({
+      clips: state.clips.map((clip) =>
+        movingIds.has(clip.id)
+          ? { ...clip, start: Math.max(0, clip.start + delta) }
+          : clip,
+      ),
+    });
+    return movingClips.length;
+  },
+
   trimClipStart: (clipId, newTrimStart) => {
     if (!isFiniteNumber(newTrimStart)) return;
     set((state) => {
@@ -768,6 +886,71 @@ export const useProjectStore = create<ProjectStoreState>()(
     });
   },
 
+  rippleDeleteSelectedClips: () => {
+    const state = get();
+    const selectedIds = new Set(state.selectedClipIds);
+    const lockedTrackIds = new Set(
+      state.tracks.filter((track) => track.locked).map((track) => track.id),
+    );
+    const removed = state.clips.filter(
+      (clip) => selectedIds.has(clip.id) && !lockedTrackIds.has(clip.trackId),
+    );
+    if (removed.length === 0) return 0;
+
+    const removedIds = new Set(removed.map((clip) => clip.id));
+    const removedByTrack = new Map<string, Clip[]>();
+    for (const clip of removed) {
+      const list = removedByTrack.get(clip.trackId);
+      if (list) list.push(clip);
+      else removedByTrack.set(clip.trackId, [clip]);
+    }
+    for (const clips of removedByTrack.values()) {
+      clips.sort(
+        (a, b) =>
+          a.start + clipDuration(a) - (b.start + clipDuration(b)) ||
+          a.id.localeCompare(b.id),
+      );
+    }
+    const ripplePlans = new Map<
+      string,
+      { ends: number[]; cumulativeDurations: number[] }
+    >();
+    for (const [trackId, clips] of removedByTrack) {
+      const ends: number[] = [];
+      const cumulativeDurations = [0];
+      for (const clip of clips) {
+        ends.push(clip.start + clipDuration(clip));
+        cumulativeDurations.push(
+          cumulativeDurations.at(-1)! + clipDuration(clip),
+        );
+      }
+      ripplePlans.set(trackId, { ends, cumulativeDurations });
+    }
+
+    const clips = state.clips
+      .filter((clip) => !removedIds.has(clip.id))
+      .map((clip) => {
+        const plan = ripplePlans.get(clip.trackId);
+        if (!plan) return clip;
+        let low = 0;
+        let high = plan.ends.length;
+        while (low < high) {
+          const middle = (low + high) >>> 1;
+          if (plan.ends[middle] <= clip.start + 1e-6) low = middle + 1;
+          else high = middle;
+        }
+        const shift = plan.cumulativeDurations[low];
+        return shift > 1e-9
+          ? { ...clip, start: Math.max(0, clip.start - shift) }
+          : clip;
+      });
+    set({
+      clips,
+      selectedClipIds: state.selectedClipIds.filter((id) => !removedIds.has(id)),
+    });
+    return removed.length;
+  },
+
   selectClip: (clipId, additive = false) => {
     set((state) => {
       if (additive) {
@@ -779,6 +962,17 @@ export const useProjectStore = create<ProjectStoreState>()(
         };
       }
       return { selectedClipIds: [clipId] };
+    });
+  },
+
+  selectClips: (clipIds, additive = false) => {
+    set((state) => {
+      const existingIds = new Set(state.clips.map((clip) => clip.id));
+      const requested = [...new Set(clipIds)].filter((id) => existingIds.has(id));
+      if (!additive) return { selectedClipIds: requested };
+      const selected = new Set(state.selectedClipIds);
+      requested.forEach((id) => selected.add(id));
+      return { selectedClipIds: [...selected] };
     });
   },
 

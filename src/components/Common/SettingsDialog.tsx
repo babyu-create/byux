@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Settings, Keyboard, Palette, Mic, AlertTriangle, RotateCcw, Activity, FileDown, CheckCircle2 } from 'lucide-react';
+import { Settings, Keyboard, Palette, Mic, AlertTriangle, RotateCcw, Activity, FileDown, CheckCircle2, HardDrive, Trash2 } from 'lucide-react';
 import {
   ACTIONS,
   DEFAULT_BINDINGS,
@@ -21,6 +21,14 @@ import styles from './SettingsDialog.module.css';
 
 type SettingsTab = 'shortcuts' | 'theme' | 'support';
 
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+  const megabytes = bytes / (1024 * 1024);
+  return megabytes >= 1024
+    ? `${(megabytes / 1024).toFixed(1)} GB`
+    : `${megabytes.toFixed(megabytes >= 10 ? 0 : 1)} MB`;
+}
+
 interface SettingsDialogProps {
   onClose: () => void;
 }
@@ -31,6 +39,12 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   const [recordingId, setRecordingId] = useState<ActionId | null>(null);
   const [conflictWarning, setConflictWarning] = useState<string | null>(null);
   const [diagnosticStatus, setDiagnosticStatus] = useState<string | null>(null);
+  const [cacheStatus, setCacheStatus] = useState<string | null>(null);
+  const [cacheSummary, setCacheSummary] = useState<{
+    waveform: { files: number; bytes: number };
+    previewProxy: { files: number; bytes: number };
+  } | null>(null);
+  const [clearingCache, setClearingCache] = useState(false);
   const tracks = useProjectStore((state) => state.tracks);
   const clips = useProjectStore((state) => state.clips);
   const subtitleCount = useProjectStore((state) => state.subtitles.length);
@@ -39,6 +53,15 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   useEffect(() => {
     return subscribeBindings(() => setBindingsState({ ...getBindings() }));
   }, []);
+
+  useEffect(() => {
+    if (tab !== 'support') return;
+    let cancelled = false;
+    void window.fce?.cache?.getSummary().then((result) => {
+      if (!cancelled && result.ok && result.summary) setCacheSummary(result.summary);
+    });
+    return () => { cancelled = true; };
+  }, [tab]);
 
   // Capture next keypress when recording
   useEffect(() => {
@@ -261,6 +284,50 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
                 {diagnosticStatus.startsWith('保存しました') ? <CheckCircle2 size={14} aria-hidden="true" /> : null}
                 {diagnosticStatus}
               </p>
+            ) : null}
+            <section className={styles.cacheCard}>
+              <HardDrive size={22} aria-hidden="true" />
+              <div>
+                <h3>キャッシュ管理</h3>
+                <p>
+                  {cacheSummary
+                    ? `互換プレビュー ${formatBytes(cacheSummary.previewProxy.bytes)} / 波形 ${formatBytes(cacheSummary.waveform.bytes)}`
+                    : 'キャッシュ容量を確認しています…'}
+                </p>
+                <p>編集中の素材は保護し、再生成できる未使用ファイルだけを削除します。</p>
+              </div>
+            </section>
+            <button
+              type="button"
+              className={styles.cacheButton}
+              disabled={clearingCache || !window.fce?.cache}
+              onClick={async () => {
+                const cache = window.fce?.cache;
+                if (!cache) return;
+                if (!window.confirm('未使用の互換プレビューと波形キャッシュを削除しますか？')) return;
+                setClearingCache(true);
+                setCacheStatus('未使用キャッシュを削除中…');
+                try {
+                  const result = await cache.clearUnused();
+                  if (result.ok && result.summary) {
+                    const removedBytes =
+                      (result.removed?.previewProxy.bytes ?? 0) +
+                      (result.removed?.waveform.bytes ?? 0);
+                    setCacheSummary(result.summary);
+                    setCacheStatus(`${formatBytes(removedBytes)}を削除しました`);
+                  } else {
+                    setCacheStatus(result.error ?? 'キャッシュを削除できませんでした');
+                  }
+                } finally {
+                  setClearingCache(false);
+                }
+              }}
+            >
+              <Trash2 size={16} aria-hidden="true" />
+              {clearingCache ? '削除中…' : '未使用キャッシュを削除'}
+            </button>
+            {cacheStatus ? (
+              <p className={styles.diagnosticStatus} aria-live="polite">{cacheStatus}</p>
             ) : null}
           </div>
         ) : null}

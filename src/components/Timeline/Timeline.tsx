@@ -9,7 +9,7 @@ import {
 } from 'react';
 import { useProjectStore, useTimelineDuration } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
-import { clipDuration, sourceTimeAtTimelineTime, timeToPx } from '../../lib/timeline';
+import { clipDuration, pxToTime, sourceTimeAtTimelineTime, timeToPx } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
 import { eventToKey, matchAction } from '../../lib/keybindings';
 import type { MediaAsset } from '../../lib/types';
@@ -25,6 +25,8 @@ import {
   copySelectedWithFeedback,
   pasteAtPlayheadWithFeedback,
   duplicateSelectedWithFeedback,
+  rippleDeleteSelectedWithFeedback,
+  clipIdsIntersectingTimeRange,
 } from './timelineCommands';
 import { TimelineScrollProvider } from '../../hooks/useTimelineAutoScroll';
 import styles from './Timeline.module.css';
@@ -46,6 +48,11 @@ const TrackHeaderList = memo(function TrackHeaderList({
     </>
   );
 });
+
+function xInTrackArea(element: HTMLDivElement, clientX: number): number {
+  const rect = element.getBoundingClientRect();
+  return Math.max(0, Math.min(rect.width, clientX - rect.left));
+}
 
 export function Timeline() {
   const tracks = useProjectStore((s) => s.tracks);
@@ -77,6 +84,14 @@ export function Timeline() {
   const headerScrollRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
   const [horizontalScrollbarHeight, setHorizontalScrollbarHeight] = useState(0);
+  const marqueeRef = useRef<{
+    pointerId: number;
+    startX: number;
+    currentX: number;
+    additive: boolean;
+    active: boolean;
+  } | null>(null);
+  const [marquee, setMarquee] = useState<{ startX: number; currentX: number } | null>(null);
 
   useLayoutEffect(() => {
     const scroll = scrollRef.current;
@@ -99,6 +114,10 @@ export function Timeline() {
   );
   const stableSplitSelected = useCallback(
     () => splitSelectedWithFeedback(),
+    [],
+  );
+  const stableRippleDeleteSelected = useCallback(
+    () => rippleDeleteSelectedWithFeedback(),
     [],
   );
   const stableZoomIn = useCallback(() => zoomIn(), [zoomIn]);
@@ -131,6 +150,23 @@ export function Timeline() {
       if (shortcut === 'ctrl+d' || shortcut === 'meta+d') {
         e.preventDefault();
         duplicateSelectedWithFeedback();
+        return;
+      }
+      if (shortcut === 'ctrl+a' || shortcut === 'meta+a') {
+        e.preventDefault();
+        state.selectClips(state.clips.map((clip) => clip.id));
+        state.showMessage(
+          state.clips.length > 0 ? 'success' : 'info',
+          state.clips.length > 0
+            ? `${state.clips.length}本のクリップを選択しました`
+            : '選択できるクリップがありません',
+          2200,
+        );
+        return;
+      }
+      if (shortcut === 'escape' && state.selectedClipIds.length > 0) {
+        e.preventDefault();
+        state.clearSelection();
         return;
       }
       const action = matchAction(e);
@@ -181,6 +217,12 @@ export function Timeline() {
           if (state.selectedClipIds.length > 0) {
             e.preventDefault();
             stableRemoveSelected();
+          }
+          return;
+        case 'clip.rippleDelete':
+          if (state.selectedClipIds.length > 0) {
+            e.preventDefault();
+            stableRippleDeleteSelected();
           }
           return;
         case 'zoom.in':
@@ -303,15 +345,78 @@ export function Timeline() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [stableRemoveSelected, stableSplitSelected, stableZoomIn, stableZoomOut]);
+  }, [
+    stableRemoveSelected,
+    stableRippleDeleteSelected,
+    stableSplitSelected,
+    stableZoomIn,
+    stableZoomOut,
+  ]);
 
-  const handleTrackAreaClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) {
-        clearSelection();
+  const handleTrackAreaPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0 || event.pointerType === 'touch') return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('[data-timeline-clip="true"]')) return;
+      const startX = xInTrackArea(event.currentTarget, event.clientX);
+      marqueeRef.current = {
+        pointerId: event.pointerId,
+        startX,
+        currentX: startX,
+        additive: event.shiftKey || event.ctrlKey || event.metaKey,
+        active: false,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [],
+  );
+  const handleTrackAreaPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const current = marqueeRef.current;
+      if (!current || current.pointerId !== event.pointerId) return;
+      current.currentX = xInTrackArea(event.currentTarget, event.clientX);
+      if (!current.active && Math.abs(current.currentX - current.startX) >= 4) {
+        current.active = true;
+      }
+      if (current.active) {
+        event.preventDefault();
+        setMarquee({ startX: current.startX, currentX: current.currentX });
       }
     },
-    [clearSelection],
+    [],
+  );
+  const finishTrackAreaGesture = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
+      const current = marqueeRef.current;
+      if (!current || current.pointerId !== event.pointerId) return;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      marqueeRef.current = null;
+      setMarquee(null);
+      if (cancelled) return;
+
+      const state = useProjectStore.getState();
+      if (current.active) {
+        const clipIds = clipIdsIntersectingTimeRange(
+          state.clips,
+          pxToTime(current.startX, zoom),
+          pxToTime(current.currentX, zoom),
+        );
+        state.selectClips(clipIds, current.additive);
+        state.showMessage(
+          clipIds.length > 0 ? 'success' : 'info',
+          clipIds.length > 0
+            ? `${clipIds.length}本を範囲選択しました`
+            : '範囲内にクリップがありません',
+          1800,
+        );
+      } else {
+        state.setPlayhead(pxToTime(current.currentX, zoom));
+        if (!current.additive) clearSelection();
+      }
+    },
+    [clearSelection, zoom],
   );
   const syncFromTimeline = useCallback(() => {
     if (headerScrollRef.current && scrollRef.current) {
@@ -356,7 +461,10 @@ export function Timeline() {
               className={styles.trackArea}
               ref={trackAreaRef}
               data-track-area=""
-              onClick={handleTrackAreaClick}
+              onPointerDown={handleTrackAreaPointerDown}
+              onPointerMove={handleTrackAreaPointerMove}
+              onPointerUp={finishTrackAreaGesture}
+              onPointerCancel={(event) => finishTrackAreaGesture(event, true)}
             >
               {tracks.map((track) => (
                 <Track
@@ -367,6 +475,16 @@ export function Timeline() {
                   assetsById={assetsById}
                 />
               ))}
+              {marquee ? (
+                <div
+                  className={styles.marquee}
+                  style={{
+                    left: Math.min(marquee.startX, marquee.currentX),
+                    width: Math.abs(marquee.currentX - marquee.startX),
+                  }}
+                  aria-hidden="true"
+                />
+              ) : null}
               <Playhead zoom={zoom} />
               <SnapGuide zoom={zoom} />
             </div>

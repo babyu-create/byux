@@ -543,11 +543,14 @@ export function buildAssetIdMap(
     byIdentity.set(key, byIdentity.has(key) ? null : asset);
   }
   for (const pa of projectAssets) {
-    const match =
+    const candidate =
       (pa.path ? byPath.get(pa.path) : undefined) ??
       byIdentity.get(`${pa.name}\u0000${pa.size}`);
-    if (match) {
-      idMap[pa.id] = match.id;
+    // Automatic relinking must be conservative: a same-name/path candidate
+    // with a different media kind or a shorter source can silently corrupt
+    // trims, markers, ranges, and the final export.
+    if (candidate && !assetRelinkError(pa, candidate, pa.duration)) {
+      idMap[pa.id] = candidate.id;
     } else {
       missing.push(pa.id);
     }

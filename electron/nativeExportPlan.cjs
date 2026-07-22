@@ -8,6 +8,7 @@
 // output, a network protocol, or a `movie=` file read into FFmpeg.
 
 const { buildVideoEncodingArgs } = require('./hardwareEncoding.cjs');
+const { buildHdrToSdrFilter } = require('./nativeFfmpeg.cjs');
 
 const MAX_CLIPS = 10_000;
 const MAX_TRACKS = 100;
@@ -35,6 +36,14 @@ const MAX_TOTAL_RAMP_AUDIO_SEGMENTS = 8_192;
 const MAX_RAMP_AUDIO_ERROR_SECONDS = 1 / 120;
 const MAX_DUCK_POINTS = 10_000;
 const EPS = 1e-4;
+// 48 kHz is the native rate used by OBS and the major GPU capture tools.
+// Normalize every clip before timeline concat so mixed-rate sources cannot
+// accumulate timestamp drift across a long project.
+const AUDIO_SAMPLE_RATE = 48_000;
+const AUDIO_NORMALIZATION_FILTERS = [
+  `aresample=${AUDIO_SAMPLE_RATE}:async=1:first_pts=0`,
+  `aformat=sample_fmts=fltp:sample_rates=${AUDIO_SAMPLE_RATE}:channel_layouts=stereo`,
+];
 
 class NativeExportPlanError extends Error {
   constructor(code, message, details = []) {
@@ -538,8 +547,9 @@ function buildAudioFilterParts(spec) {
   const duration = clipDuration(clip);
   if (!hasAudio || volume <= EPS) {
     return [
-      `anullsrc=r=44100:cl=stereo,atrim=0:${number(duration)},` +
-      `asetpts=PTS-STARTPTS,volume=${number(volume)}${outputLabel}`,
+      `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:${number(duration)},` +
+      `asetpts=PTS-STARTPTS,volume=${number(volume)},` +
+      `${AUDIO_NORMALIZATION_FILTERS.join(',')}${outputLabel}`,
     ];
   }
   const processingFilters = buildAudioProcessingFilters(clip.audioProcessing);
@@ -551,6 +561,7 @@ function buildAudioFilterParts(spec) {
       ...buildAtempoChain(clip.speed ?? 1),
       ...processingFilters,
       `volume=${number(volume)}`,
+      ...AUDIO_NORMALIZATION_FILTERS,
     ];
     return [`[${inputIndex}:a]${filters.join(',')}${outputLabel}`];
   }
@@ -595,7 +606,7 @@ function buildAudioFilterParts(spec) {
   parts.push(
     `${renderedLabels.join('')}concat=n=${rampAudioSegments}:v=0:a=1,` +
     `${processingFilters.length > 0 ? `${processingFilters.join(',')},` : ''}` +
-    `volume=${number(volume)}${outputLabel}`,
+    `volume=${number(volume)},${AUDIO_NORMALIZATION_FILTERS.join(',')}${outputLabel}`,
   );
   return parts;
 }
@@ -642,6 +653,7 @@ function buildClipFilters(spec) {
     motionBlurOptions,
     flattenOnBlack,
     workPrefix,
+    hdrToneMap,
   } = spec;
   const speed = clip.speed ?? 1;
   const duration = clipDuration(clip);
@@ -657,6 +669,8 @@ function buildClipFilters(spec) {
   else if (Math.abs(speed - 1) > 1e-3) {
     videoFilters.push(`setpts=${number(1 / speed)}*PTS`);
   }
+  const hdrToSdrFilter = buildHdrToSdrFilter(hdrToneMap);
+  if (hdrToSdrFilter) videoFilters.push(hdrToSdrFilter);
 
   const sourceMatchesOutput = asset.width === width && asset.height === height;
   const sourceWidth = Number(asset.width) || 0;
@@ -1332,6 +1346,14 @@ function buildNativeExportPlan(
         `元素材を確認できません: ${assetById.get(assetId)?.name ?? assetId}`,
       );
     }
+    if (
+      source.hdrToneMap !== undefined &&
+      source.hdrToneMap !== null &&
+      source.hdrToneMap !== 'pq' &&
+      source.hdrToneMap !== 'hlg'
+    ) {
+      throw new NativeExportPlanError('INVALID_PROJECT', 'HDR素材情報が不正です');
+    }
     inputIndexByAssetId.set(assetId, index);
     inputArgs.push('-i', source.path);
   });
@@ -1351,7 +1373,7 @@ function buildNativeExportPlan(
         `format=yuv420p,setsar=1,setpts=PTS-STARTPTS${videoLabel}`,
       );
       filters.push(
-        `anullsrc=r=44100:cl=stereo,atrim=0:${duration.toFixed(4)},` +
+        `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:${duration.toFixed(4)},` +
         `asetpts=PTS-STARTPTS${audioLabel}`,
       );
       return;
@@ -1374,6 +1396,7 @@ function buildNativeExportPlan(
         motionBlurOptions: options,
         flattenOnBlack: true,
         workPrefix: `p${index}`,
+        hdrToneMap: source.hdrToneMap ?? null,
       }),
     );
   });
@@ -1404,6 +1427,7 @@ function buildNativeExportPlan(
         motionBlurOptions: options,
         flattenOnBlack: false,
         workPrefix: `u${index}`,
+        hdrToneMap: source.hdrToneMap ?? null,
       }),
     );
     filters.push(
@@ -1558,12 +1582,24 @@ function buildNativeExportPlan(
     ...videoEncodingArgs,
     '-pix_fmt',
     'yuv420p',
+    ...([...sourceByAssetId.values()].some((source) => source.hdrToneMap)
+      ? [
+          '-color_primaries',
+          'bt709',
+          '-color_trc',
+          'bt709',
+          '-colorspace',
+          'bt709',
+          '-color_range',
+          'tv',
+        ]
+      : []),
     '-c:a',
     'aac',
     '-b:a',
     encoding.audioBitrate,
     '-ar',
-    '44100',
+    String(AUDIO_SAMPLE_RATE),
     '-ac',
     '2',
     '-movflags',

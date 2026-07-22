@@ -77,6 +77,33 @@ describe('mediaStore native source registration', () => {
     expect(created[0].file).toBeUndefined()
   })
 
+  it('keeps the saved asset id when reopening a project', async () => {
+    mediaMocks.probeVideoUrlMetadata.mockResolvedValue({
+      duration: 140.394688,
+      width: 1920,
+      height: 1080,
+    })
+
+    const recovered = await useMediaStore.getState().addRecoveredAsset(
+      {
+        id: 'saved-asset-id',
+        name: SOURCE.name,
+        size: SOURCE.size,
+        kind: 'video',
+        duration: 140.394688,
+        path: SOURCE.path,
+      },
+      SOURCE,
+    )
+
+    expect(recovered).toMatchObject({
+      id: 'saved-asset-id',
+      sourceToken: SOURCE.token,
+      path: SOURCE.path,
+    })
+    expect(useMediaStore.getState().assets[0]?.id).toBe('saved-asset-id')
+  })
+
   it('analyzes the audio stream inside a native video for volume tools', async () => {
     const peaks = new Float32Array([0.2, 0.9, 0.4])
     const generateMediaWaveform = vi.fn().mockResolvedValue({

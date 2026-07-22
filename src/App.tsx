@@ -824,7 +824,17 @@ function App() {
     }
     for (const ref of expectedAssets) {
       const key = `${ref.kind}\0${ref.name}\0${ref.size}`;
-      const match = availableByIdentity.get(key)?.shift();
+      const requiredDuration = requiredAssetSourceDuration(
+        ref.id,
+        projectState.clips,
+        projectState.markers,
+        projectState.ioRanges,
+      );
+      const candidates = availableByIdentity.get(key);
+      const matchIndex = candidates?.findIndex(
+        (candidate) => !assetRelinkError(ref, candidate, requiredDuration),
+      ) ?? -1;
+      const match = matchIndex >= 0 ? candidates?.splice(matchIndex, 1)[0] : undefined;
       if (match) {
         idMap[ref.id] = match.id;
         matched += 1;

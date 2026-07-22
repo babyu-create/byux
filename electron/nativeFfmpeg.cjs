@@ -162,36 +162,133 @@ async function probeInputMediaKind(binaryPath, sourcePath) {
   return parseInputMediaStreams(result.stderr).kind;
 }
 
-/** Decode a short leading sample and fail on the first corrupt packet. This is
- * intentionally stricter than normal FFmpeg transcoding: it protects Chromium
- * from entering an unrecoverable black-preview state before the app can switch
- * the source to a repaired compatibility proxy. */
-async function probeInputVideoDecodable(binaryPath, sourcePath) {
+function parseInputVideoColorMetadata(stderr) {
+  // Every consumer maps 0:v:0. Inspect exactly the first advertised video
+  // stream so an HDR alternate angle or cover-art stream cannot cause the
+  // wrong source to be tone-mapped.
+  const videoMetadata = (
+    String(stderr)
+      .split(/\r?\n/)
+      .find((line) => /Stream #\d+:\d+.*Video:/i.test(line)) ?? ''
+  ).toLowerCase();
+  const transferMatch = /\b(smpte2084|arib-std-b67)\b/.exec(videoMetadata);
+  const primariesMatch = /\b(bt2020|smpte432)\b/.exec(videoMetadata);
+  const transfer = transferMatch?.[1] ?? null;
+  return {
+    transfer,
+    primaries: primariesMatch?.[1] ?? null,
+    toneMap: transfer === 'smpte2084'
+      ? 'pq'
+      : transfer === 'arib-std-b67'
+        ? 'hlg'
+        : null,
+  };
+}
+
+async function probeInputVideoColorMetadata(binaryPath, sourcePath) {
   const result = await runCaptured(
     binaryPath,
     [
       '-hide_banner',
       '-nostdin',
-      '-v',
-      'error',
-      '-xerror',
+      '-loglevel',
+      'info',
       '-protocol_whitelist',
       'file,pipe',
       '-i',
       sourcePath,
-      '-t',
-      '2',
-      '-map',
-      '0:v:0',
-      '-an',
-      '-sn',
-      '-f',
-      'null',
-      '-',
     ],
     { timeoutMs: 20_000 },
   );
-  return result.code === 0;
+  return parseInputVideoColorMetadata(result.stderr);
+}
+
+function buildHdrToSdrFilter(toneMap) {
+  const inputTransfer = toneMap === 'pq'
+    ? 'smpte2084'
+    : toneMap === 'hlg'
+      ? 'arib-std-b67'
+      : null;
+  if (!inputTransfer) return '';
+  // Convert to linear light before tone mapping, then explicitly convert the
+  // original wide-gamut primaries to a limited-range BT.709 SDR output. zscale
+  // reads the source primaries/matrix from the decoded frame metadata.
+  return (
+    `zscale=tin=${inputTransfer}:t=linear:npl=100,` +
+    'format=gbrpf32le,' +
+    'tonemap=tonemap=hable:desat=0,' +
+    'zscale=p=bt709:t=bt709:m=bt709:r=tv,' +
+    'format=yuv420p'
+  );
+}
+
+function buildVideoDecodeProbePlan(duration, sampleSeconds = 2) {
+  if (
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    !Number.isFinite(sampleSeconds) ||
+    sampleSeconds <= 0
+  ) {
+    return [{ start: 0, duration: sampleSeconds > 0 ? sampleSeconds : 2 }];
+  }
+  const starts = [
+    0,
+    duration * 0.25,
+    duration * 0.5,
+    duration * 0.75,
+    duration * 0.9,
+    Math.max(0, duration - 5),
+  ];
+  const uniqueStarts = [];
+  for (const value of starts) {
+    const start = Math.min(Math.max(0, value), Math.max(0, duration - 0.05));
+    if (uniqueStarts.some((existing) => Math.abs(existing - start) < 0.05)) continue;
+    uniqueStarts.push(start);
+  }
+  return uniqueStarts.map((start) => ({
+    start,
+    duration: Math.min(sampleSeconds, duration - start),
+  }));
+}
+
+/** Decode independent samples and fail on the first corrupt packet. Seeking a
+ * fresh decoder at each point catches DVR corruption that starts well after
+ * the opening GOP while keeping work constant for one-hour and five-hour
+ * recordings. This is intentionally stricter than the salvage transcode used
+ * by the compatibility proxy. */
+async function probeInputVideoDecodable(binaryPath, sourcePath) {
+  const duration = await probeInputDuration(binaryPath, sourcePath);
+  const samples = buildVideoDecodeProbePlan(duration, 2);
+  for (const sample of samples) {
+    const result = await runCaptured(
+      binaryPath,
+      [
+        '-hide_banner',
+        '-nostdin',
+        '-v',
+        'error',
+        '-xerror',
+        '-protocol_whitelist',
+        'file,pipe',
+        '-ss',
+        sample.start.toFixed(6),
+        '-i',
+        sourcePath,
+        '-t',
+        sample.duration.toFixed(6),
+        '-map',
+        '0:v:0',
+        '-an',
+        '-sn',
+        '-f',
+        'null',
+        '-',
+      ],
+      { timeoutMs: 12_000 },
+    );
+    if (result.code !== 0) return false;
+  }
+  return true;
 }
 
 async function probeInputDuration(binaryPath, sourcePath) {
@@ -233,6 +330,48 @@ function buildSegmentPlan(duration, segmentSeconds) {
       duration: Math.min(segmentSeconds, duration - start),
     };
   });
+}
+
+/**
+ * Keep decoder-reset repair useful for damaged captures without launching one
+ * FFmpeg process for every short slice of a multi-hour recording. Short media
+ * keeps the preferred reset interval; long media increases it just enough to
+ * stay below the process/file cap.
+ */
+function buildBoundedSegmentPlan(duration, preferredSegmentSeconds, maxSegments) {
+  if (
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    !Number.isFinite(preferredSegmentSeconds) ||
+    preferredSegmentSeconds <= 0 ||
+    !Number.isSafeInteger(maxSegments) ||
+    maxSegments <= 0
+  ) {
+    return [];
+  }
+  const preferredMultiples = Math.ceil(
+    duration / maxSegments / preferredSegmentSeconds,
+  );
+  const segmentSeconds = Math.max(
+    preferredSegmentSeconds,
+    preferredMultiples * preferredSegmentSeconds,
+  );
+  return buildSegmentPlan(duration, segmentSeconds);
+}
+
+function estimatePreviewProxyBytes(kind, duration) {
+  if (
+    (kind !== 'video' && kind !== 'audio') ||
+    !Number.isFinite(duration) ||
+    duration <= 0
+  ) {
+    return 0;
+  }
+  // CRF video size is content-dependent. 8 Mbps is a deliberately cautious
+  // planning rate for the 720p-or-smaller ultrafast preview profile; audio is
+  // bounded by its configured AAC bitrate.
+  const bitsPerSecond = kind === 'video' ? 8_000_000 + 128_000 : 160_000;
+  return Math.ceil((duration * bitsPerSecond) / 8);
 }
 
 async function validateOutput(binaryPath, outputPath, expected) {
@@ -390,13 +529,19 @@ async function terminateProcess(child, graceMs = 3_000) {
 module.exports = {
   MAX_CAPTURE_BYTES,
   appendTail,
+  buildHdrToSdrFilter,
+  buildBoundedSegmentPlan,
   buildSegmentPlan,
+  buildVideoDecodeProbePlan,
+  estimatePreviewProxyBytes,
   minimalEnvironment,
   parseDuration,
   parseInputMediaStreams,
+  parseInputVideoColorMetadata,
   probeInputDuration,
   probeInputHasAudio,
   probeInputMediaKind,
+  probeInputVideoColorMetadata,
   probeInputVideoDecodable,
   resolveFfmpegBinary,
   runCaptured,

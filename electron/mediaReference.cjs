@@ -17,4 +17,25 @@ function canonicalMediaName(filePath) {
   return name;
 }
 
-module.exports = { canonicalMediaName };
+/**
+ * Revoke media registrations owned by a renderer document. Active native jobs
+ * keep their leased source until they settle; idle registrations can be
+ * removed immediately. This prevents renderer reloads/crashes from leaking
+ * opaque registrations or pinning preview-proxy files forever.
+ */
+function revokeMediaRegistrations(registry) {
+  let removed = 0;
+  let deferred = 0;
+  for (const [token, source] of registry) {
+    if ((source?.leases ?? 0) > 0) {
+      source.releaseRequested = true;
+      deferred += 1;
+    } else {
+      registry.delete(token);
+      removed += 1;
+    }
+  }
+  return { removed, deferred };
+}
+
+module.exports = { canonicalMediaName, revokeMediaRegistrations };

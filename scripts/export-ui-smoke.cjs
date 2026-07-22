@@ -304,6 +304,12 @@ async function main() {
       Boolean,
       90_000,
     );
+    await poll(
+      page,
+      `document.querySelectorAll('[data-media-asset-id]').length === 1`,
+      Boolean,
+      10_000,
+    );
 
     progress('save');
     const saveStarted = await evaluate(
@@ -348,8 +354,20 @@ async function main() {
     ) {
       throw new Error(`saved project was incomplete: ${JSON.stringify(savedProject)}`);
     }
+    progress(
+      `saved-ids clip=${savedProject.clips[0].assetId} asset=${savedProject.assets[0].id}`,
+    );
 
     progress('new-project');
+    await poll(
+      page,
+      `(() => {
+        const button = document.querySelector('[aria-label="新しいプロジェクト"]');
+        return Boolean(button && !button.disabled);
+      })()`,
+      Boolean,
+      30_000,
+    );
     const resetStarted = await evaluate(
       page,
       `(() => {
@@ -384,6 +402,22 @@ async function main() {
       Boolean,
       90_000,
     );
+    await poll(
+      page,
+      `document.querySelectorAll('[data-media-asset-id]').length === 1`,
+      Boolean,
+      10_000,
+    );
+    const reopenedIds = await evaluate(
+      page,
+      `(() => ({
+        clipAssetIds: [...document.querySelectorAll('[data-clip-asset-id]')]
+          .map((node) => node.getAttribute('data-clip-asset-id')),
+        mediaAssetIds: [...document.querySelectorAll('[data-media-asset-id]')]
+          .map((node) => node.getAttribute('data-media-asset-id')),
+      }))()`,
+    );
+    progress(`reopened-ids ${JSON.stringify(reopenedIds)}`);
 
     progress('export-dialog');
     const opened = await evaluate(
@@ -474,7 +508,10 @@ async function main() {
       page,
       `(() => ({
         done: document.body.innerText.includes('書き出し完了'),
-        failed: document.body.innerText.includes('書き出しに失敗しました'),
+        failed:
+          document.body.innerText.includes('書き出しに失敗しました') ||
+          document.body.innerText.includes('元のメディアファイルを確認できません') ||
+          Boolean(document.querySelector('summary')),
         badge: document.querySelector('[title="FFmpeg コアモード"]')?.innerText ?? '',
         savedPath: document.querySelector('[aria-labelledby="export-dialog-title"] [title$=".mp4"]')?.getAttribute('title') ?? '',
         body: document.body.innerText.slice(-2000),
@@ -483,7 +520,18 @@ async function main() {
       120_000,
     );
     if (!completed.done || completed.failed) {
-      throw new Error(`packaged export failed: ${JSON.stringify(completed)}`);
+      const failureDetails = await evaluate(
+        page,
+        `(() => {
+          const details = [...document.querySelectorAll('summary')]
+            .find((summary) => summary.innerText.includes('詳細を表示'));
+          details?.click();
+          return document.body.innerText.slice(-4000);
+        })()`,
+      );
+      throw new Error(
+        `packaged export failed: ${JSON.stringify({ ...completed, failureDetails })}`,
+      );
     }
     if (!completed.badge.includes('GPU') || !completed.badge.includes('NVIDIA NVENC')) {
       throw new Error(`hardware encoder was not reported: ${JSON.stringify(completed)}`);

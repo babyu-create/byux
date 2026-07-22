@@ -249,15 +249,21 @@ describe('buildAssetIdMap', () => {
     { id: 'p1', name: 'a.mp4', size: 100, kind: 'video', duration: 3 },
     { id: 'p2', name: 'b.mp3', size: 200, kind: 'audio', duration: 9 },
   ];
-  const makeAsset = (id: string, name: string, size: number): MediaAsset => ({
+  const makeAsset = (
+    id: string,
+    name: string,
+    size: number,
+    kind: MediaAsset['kind'] = 'video',
+    duration = 10,
+  ): MediaAsset => ({
     id,
     name,
-    kind: 'video',
+    kind,
     url: '',
     file: { name, size } as File,
     size,
-    mimeType: 'video/mp4',
-    duration: 0,
+    mimeType: kind === 'video' ? 'video/mp4' : 'audio/mpeg',
+    duration,
   });
 
   it('maps by name + size and reports unmatched assets', () => {
@@ -272,6 +278,20 @@ describe('buildAssetIdMap', () => {
     const { idMap, missingAssetIds } = buildAssetIdMap(projAssets, current);
     expect(idMap.p1).toBeUndefined();
     expect(missingAssetIds).toContain('p1');
+  });
+
+  it('does not automatically relink a wrong-kind or too-short candidate', () => {
+    const wrongKind = [makeAsset('audio', 'a.mp4', 100, 'audio', 10)];
+    expect(buildAssetIdMap(projAssets, wrongKind)).toEqual({
+      idMap: {},
+      missingAssetIds: ['p1', 'p2'],
+    });
+
+    const tooShort = [makeAsset('short', 'a.mp4', 100, 'video', 2.9)];
+    expect(buildAssetIdMap(projAssets, tooShort)).toEqual({
+      idMap: {},
+      missingAssetIds: ['p1', 'p2'],
+    });
   });
 });
 

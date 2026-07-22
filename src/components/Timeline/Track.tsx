@@ -12,6 +12,8 @@ import {
   splitClipWithFeedback,
   copySelectedWithFeedback,
   duplicateSelectedWithFeedback,
+  lastSelectedClipIdOnTrack,
+  rippleDeleteSelectedWithFeedback,
 } from './timelineCommands';
 import styles from './Track.module.css';
 
@@ -43,9 +45,10 @@ export const Track = memo(function Track({
     () => [...clips].sort((a, b) => a.start - b.start || a.id.localeCompare(b.id)),
     [clips],
   );
-  const keyboardClipId =
-    [...selectedClipIds].reverse().find((id) => orderedClips.some((clip) => clip.id === id)) ??
-    orderedClips[0]?.id;
+  const keyboardClipId = useMemo(
+    () => lastSelectedClipIdOnTrack(orderedClips, selectedClipIds),
+    [orderedClips, selectedClipIds],
+  );
 
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -247,6 +250,10 @@ export const Track = memo(function Track({
           {
             label: '削除',
             onSelect: () => removeClipWithFeedback(contextMenu.clip.id),
+          },
+          {
+            label: '選択を詰めて削除（Shift+Delete）',
+            onSelect: rippleDeleteSelectedWithFeedback,
           },
         ]}
       />

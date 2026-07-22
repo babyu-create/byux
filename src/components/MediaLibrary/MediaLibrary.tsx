@@ -517,6 +517,7 @@ function MediaItem({ asset, isSelected, onSelect, onRemove }: MediaItemProps) {
         className={`${styles.item} ${isSelected ? styles.itemSelected : ''}`}
         role="group"
         aria-label={`${asset.name} の操作`}
+        data-media-asset-id={asset.id}
       >
       <button
         type="button"

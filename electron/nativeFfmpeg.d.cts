@@ -35,6 +35,33 @@ export function buildSegmentPlan(
   duration: number,
   segmentSeconds: number,
 ): Array<{ start: number; duration: number }>;
+export function buildBoundedSegmentPlan(
+  duration: number,
+  preferredSegmentSeconds: number,
+  maxSegments: number,
+): Array<{ start: number; duration: number }>;
+export function buildVideoDecodeProbePlan(
+  duration: number | null,
+  sampleSeconds?: number,
+): Array<{ start: number; duration: number }>;
+export function estimatePreviewProxyBytes(
+  kind: 'video' | 'audio',
+  duration: number,
+): number;
+export function parseInputVideoColorMetadata(stderr: string): {
+  transfer: 'smpte2084' | 'arib-std-b67' | null;
+  primaries: 'bt2020' | 'smpte432' | null;
+  toneMap: 'pq' | 'hlg' | null;
+};
+export function probeInputVideoColorMetadata(
+  binaryPath: string,
+  sourcePath: string,
+): Promise<{
+  transfer: 'smpte2084' | 'arib-std-b67' | null;
+  primaries: 'bt2020' | 'smpte432' | null;
+  toneMap: 'pq' | 'hlg' | null;
+}>;
+export function buildHdrToSdrFilter(toneMap: 'pq' | 'hlg' | null): string;
 export function parseInputMediaStreams(stderr: string): {
   hasVideo: boolean;
   hasAudio: boolean;

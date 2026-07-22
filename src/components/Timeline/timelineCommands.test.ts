@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   consumeClipNudgeGesture,
+  clipIdsIntersectingTimeRange,
+  lastSelectedClipIdOnTrack,
   releasePointerCaptureIfHeld,
   timelineEditFeedback,
 } from './timelineCommands';
@@ -18,6 +20,63 @@ describe('timelineEditFeedback', () => {
       kind: 'info',
       text: '再生ヘッド位置とトラックのロックを確認してください',
     });
+  });
+
+  it('describes ripple deletion separately from ordinary deletion', () => {
+    expect(timelineEditFeedback('ripple-delete', 3)).toEqual({
+      kind: 'success',
+      text: '3本を詰めて削除しました（Ctrl+Zで元に戻せます）',
+    });
+  });
+
+  it('selects every clip intersecting a reversed horizontal time range', () => {
+    const clips = [
+      {
+        id: 'first',
+        trackId: 'video',
+        assetId: 'asset',
+        start: 0,
+        trimStart: 0,
+        trimEnd: 1,
+        effects: [],
+      },
+      {
+        id: 'second',
+        trackId: 'video',
+        assetId: 'asset',
+        start: 1,
+        trimStart: 0,
+        trimEnd: 1,
+        effects: [],
+      },
+      {
+        id: 'outside',
+        trackId: 'video',
+        assetId: 'asset',
+        start: 3,
+        trimStart: 0,
+        trimEnd: 1,
+        effects: [],
+      },
+    ];
+
+    expect(clipIdsIntersectingTimeRange(clips, 1.5, 0.5)).toEqual([
+      'first',
+      'second',
+    ]);
+    expect(clipIdsIntersectingTimeRange(clips, 2, 3)).toEqual([]);
+  });
+
+  it('finds the latest selection on a track in linear time and preserves selection order', () => {
+    const clips = Array.from({ length: 10_000 }, (_, index) => ({
+      id: `clip-${index}`,
+    }));
+    const selected = clips.map((clip) => clip.id);
+    selected.push('clip-42');
+
+    expect(lastSelectedClipIdOnTrack(clips, selected)).toBe('clip-42');
+    expect(lastSelectedClipIdOnTrack(clips, ['other'])).toBe('clip-0');
+    expect(lastSelectedClipIdOnTrack([], selected)).toBeUndefined();
   });
 
   it('consumes Alt+Arrow on the clip itself and prevents browser navigation', () => {

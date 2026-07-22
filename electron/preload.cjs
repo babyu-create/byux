@@ -73,6 +73,14 @@ contextBridge.exposeInMainWorld('fce', {
   saveDiagnostics(projectSummary) {
     return ipcRenderer.invoke('diagnostics:save', projectSummary);
   },
+  cache: {
+    getSummary() {
+      return ipcRenderer.invoke('cache:get-summary');
+    },
+    clearUnused() {
+      return ipcRenderer.invoke('cache:clear-unused');
+    },
+  },
   onSaveBeforeClose(cb) {
     const listener = (_event, payload) => cb(payload?.id);
     ipcRenderer.on('app:save-before-close', listener);

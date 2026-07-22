@@ -184,6 +184,20 @@ interface FCEGlobal {
     subtitles: number;
     durationSeconds: number;
   }) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+  cache?: {
+    getSummary(): Promise<{
+      ok: boolean;
+      summary?: CacheSummary;
+      error?: string;
+    }>;
+    clearUnused(): Promise<{
+      ok: boolean;
+      busy?: boolean;
+      summary?: CacheSummary;
+      removed?: CacheSummary;
+      error?: string;
+    }>;
+  };
   onSaveBeforeClose?: (cb: (id: string) => void) => () => void;
   completeSaveBeforeClose?: (id: string, success: boolean) => void;
   /** Real disk path of a File the user dropped/picked (empty string if none). */
@@ -227,6 +241,11 @@ interface FCEGlobal {
     length: number,
   ) => Promise<Uint8Array<ArrayBuffer> | null>;
   releaseMediaFile?: (token: string) => Promise<boolean>;
+}
+
+interface CacheSummary {
+  waveform: { files: number; bytes: number };
+  previewProxy: { files: number; bytes: number };
 }
 
 declare global {
