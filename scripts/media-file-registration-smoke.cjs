@@ -285,63 +285,93 @@ async function main() {
                 delay(15_000),
               ]);
             }
-            const seekTarget = Math.min(1, Math.max(0, (video.duration || 1) / 2));
-            if (Number.isFinite(seekTarget)) {
-              video.currentTime = seekTarget;
-              await Promise.race([
-                new Promise((resolve) => video.addEventListener('seeked', resolve, { once: true })),
-                delay(15_000),
-              ]);
-            }
-            let frameCallback = false;
-            if (typeof video.requestVideoFrameCallback === 'function') {
-              await Promise.race([
-                new Promise((resolve) => video.requestVideoFrameCallback(() => {
-                  frameCallback = true;
-                  resolve();
-                })),
-                delay(5_000),
-              ]);
-            }
-            let meanRgb = null;
-            let nonBlackRatio = null;
-            let canvasError = null;
-            try {
-              const canvas = document.createElement('canvas');
-              canvas.width = 64;
-              canvas.height = 36;
-              const context = canvas.getContext('2d', { willReadFrequently: true });
-              context.drawImage(video, 0, 0, canvas.width, canvas.height);
-              const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-              let sum = 0;
-              let nonBlack = 0;
-              for (let index = 0; index < pixels.length; index += 4) {
-                const value = (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
-                sum += value;
-                if (value > 8) nonBlack += 1;
+            const scrubber = document.querySelector('input[aria-label="シークバー"]');
+            const inputValueSetter = Object.getOwnPropertyDescriptor(
+              HTMLInputElement.prototype,
+              'value',
+            )?.set;
+            const duration = video.duration || 0;
+            const targets = [...new Set([
+              Math.min(1, duration / 2),
+              duration * 0.4,
+              duration * 0.72,
+              duration * 0.96,
+            ].filter((value) => Number.isFinite(value) && value >= 0)
+              .map((value) => Math.min(duration, value).toFixed(3)))]
+              .map(Number);
+            const samples = [];
+            for (const target of targets) {
+              if (scrubber && inputValueSetter) {
+                inputValueSetter.call(scrubber, String(target));
+                scrubber.dispatchEvent(new Event('input', { bubbles: true }));
+                scrubber.dispatchEvent(new Event('change', { bubbles: true }));
+              } else {
+                video.currentTime = target;
               }
-              meanRgb = sum / (pixels.length / 4);
-              nonBlackRatio = nonBlack / (pixels.length / 4);
-            } catch (error) {
-              canvasError = error instanceof Error ? error.message : String(error);
+              for (let attempt = 0; attempt < 300; attempt += 1) {
+                if (Math.abs(video.currentTime - target) <= 0.2 && video.readyState >= 2) break;
+                await delay(50);
+              }
+              let frameCallback = false;
+              if (typeof video.requestVideoFrameCallback === 'function') {
+                await Promise.race([
+                  new Promise((resolve) => video.requestVideoFrameCallback(() => {
+                    frameCallback = true;
+                    resolve();
+                  })),
+                  delay(5_000),
+                ]);
+              }
+              let meanRgb = null;
+              let nonBlackRatio = null;
+              let canvasError = null;
+              try {
+                const canvas = document.createElement('canvas');
+                canvas.width = 64;
+                canvas.height = 36;
+                const context = canvas.getContext('2d', { willReadFrequently: true });
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+                let sum = 0;
+                let nonBlack = 0;
+                for (let index = 0; index < pixels.length; index += 4) {
+                  const value = (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
+                  sum += value;
+                  if (value > 8) nonBlack += 1;
+                }
+                meanRgb = sum / (pixels.length / 4);
+                nonBlackRatio = nonBlack / (pixels.length / 4);
+              } catch (error) {
+                canvasError = error instanceof Error ? error.message : String(error);
+              }
+              samples.push({
+                target,
+                currentTime: video.currentTime,
+                frameCallback,
+                meanRgb,
+                nonBlackRatio,
+                canvasError,
+              });
             }
             video.removeEventListener('error', onError);
             return {
-              ok: (video.readyState >= 2 || frameCallback) &&
+              ok: samples.length > 0 &&
+                samples.every((sample) =>
+                  Math.abs(sample.currentTime - sample.target) <= 0.2 &&
+                  (video.readyState >= 2 || sample.frameCallback) &&
+                  sample.nonBlackRatio !== null &&
+                  sample.nonBlackRatio > 0.05
+                ) &&
                 !mediaError &&
-                nonBlackRatio !== null &&
-                nonBlackRatio > 0.05,
+                video.readyState >= 2,
               readyState: video.readyState,
               networkState: video.networkState,
               currentTime: video.currentTime,
-              duration: video.duration,
+              duration,
               width: video.videoWidth,
               height: video.videoHeight,
-              frameCallback,
-              meanRgb,
-              nonBlackRatio,
               mediaError,
-              canvasError,
+              samples,
             };
           })()`,
           awaitPromise: true,

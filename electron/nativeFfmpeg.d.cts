@@ -26,6 +26,15 @@ export function runCaptured(
 }>;
 export function verifyFfmpegBinary(binaryPath: string): Promise<boolean>;
 export function probeInputHasAudio(binaryPath: string, sourcePath: string): Promise<boolean>;
+export function probeInputDuration(
+  binaryPath: string,
+  sourcePath: string,
+): Promise<number | null>;
+export function parseDuration(stderr: string): number | null;
+export function buildSegmentPlan(
+  duration: number,
+  segmentSeconds: number,
+): Array<{ start: number; duration: number }>;
 export function parseInputMediaStreams(stderr: string): {
   hasVideo: boolean;
   hasAudio: boolean;

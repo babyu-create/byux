@@ -194,10 +194,45 @@ async function probeInputVideoDecodable(binaryPath, sourcePath) {
   return result.code === 0;
 }
 
+async function probeInputDuration(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+    ],
+    { timeoutMs: 30_000 },
+  );
+  return parseDuration(result.stderr);
+}
+
 function parseDuration(stderr) {
   const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
   if (!match) return null;
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+function buildSegmentPlan(duration, segmentSeconds) {
+  if (
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    !Number.isFinite(segmentSeconds) ||
+    segmentSeconds <= 0
+  ) {
+    return [];
+  }
+  const count = Math.ceil(duration / segmentSeconds);
+  return Array.from({ length: count }, (_, index) => {
+    const start = index * segmentSeconds;
+    return {
+      start,
+      duration: Math.min(segmentSeconds, duration - start),
+    };
+  });
 }
 
 async function validateOutput(binaryPath, outputPath, expected) {
@@ -355,8 +390,11 @@ async function terminateProcess(child, graceMs = 3_000) {
 module.exports = {
   MAX_CAPTURE_BYTES,
   appendTail,
+  buildSegmentPlan,
   minimalEnvironment,
+  parseDuration,
   parseInputMediaStreams,
+  probeInputDuration,
   probeInputHasAudio,
   probeInputMediaKind,
   probeInputVideoDecodable,

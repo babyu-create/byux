@@ -26,7 +26,9 @@ const {
 } = require('./nativeExportPlan.cjs');
 const {
   appendTail,
+  buildSegmentPlan,
   minimalEnvironment,
+  probeInputDuration,
   probeInputHasAudio,
   probeInputMediaKind,
   probeInputVideoDecodable,
@@ -2115,6 +2117,7 @@ function registerResolvedMedia(
     mtimeMs: stat.mtimeMs,
     leases: 0,
     releaseRequested: false,
+    requiresPreviewProxy: requiresPreviewProxy === true,
   });
   return {
     token,
@@ -2796,15 +2799,22 @@ async function cleanupOrphanedProxies() {
   } catch {
     return;
   }
-  await Promise.all(
-    entries
-      .filter(
-        (entry) =>
-          entry.isFile() &&
-          /^[0-9a-f]{64}\.[0-9a-f-]{36}\.part$/i.test(entry.name),
-      )
-      .map((entry) => fs.rm(path.join(root, entry.name), { force: true }).catch(() => {})),
-  );
+  await Promise.all(entries.flatMap((entry) => {
+    const orphanPath = path.join(root, entry.name);
+    if (
+      entry.isFile() &&
+      /^[0-9a-f]{64}\.[0-9a-f-]{36}\.part$/i.test(entry.name)
+    ) {
+      return [fs.rm(orphanPath, { force: true }).catch(() => {})];
+    }
+    if (
+      entry.isDirectory() &&
+      /^[0-9a-f]{64}\.[0-9a-f-]{36}\.segments$/i.test(entry.name)
+    ) {
+      return [fs.rm(orphanPath, { recursive: true, force: true }).catch(() => {})];
+    }
+    return [];
+  }));
   await pruneProxyCache();
 }
 
@@ -2862,6 +2872,151 @@ function waitForProxyChild(job) {
   });
 }
 
+async function runProxyCommand(job, binaryPath, args) {
+  if (job.cancelled) throw new Error('プレビュー変換を中止しました');
+  const child = spawn(binaryPath, args, {
+    shell: false,
+    windowsHide: true,
+    detached: false,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: minimalEnvironment(),
+  });
+  job.child = child;
+  const result = await waitForProxyChild(job);
+  job.child = null;
+  if (job.cancelled) throw new Error('プレビュー変換を中止しました');
+  if (result.code !== 0) {
+    throw new Error(`プレビュー変換に失敗しました (FFmpeg: ${String(result.code)})`);
+  }
+}
+
+const REPAIR_PROXY_SEGMENT_SECONDS = 10;
+
+function concatFileLine(filePath) {
+  return `file '${filePath.replaceAll("'", "'\\''")}'`;
+}
+
+async function createSegmentedRepairProxy(job, binaryPath, source, temporaryPath) {
+  const duration = await probeInputDuration(binaryPath, source.path);
+  if (!Number.isFinite(duration) || duration <= 0 || duration > 7 * 24 * 60 * 60) {
+    throw new Error('元素材の長さを確認できません');
+  }
+  const segments = buildSegmentPlan(duration, REPAIR_PROXY_SEGMENT_SECONDS);
+  const segmentDirectory = job.segmentDirectory;
+  await fs.mkdir(segmentDirectory, { recursive: false, mode: 0o700 });
+  const segmentPaths = [];
+  try {
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const segmentPath = path.join(
+        segmentDirectory,
+        `video-${String(index).padStart(6, '0')}.mp4`,
+      );
+      segmentPaths.push(segmentPath);
+      await runProxyCommand(job, binaryPath, [
+        '-hide_banner',
+        '-nostdin',
+        '-nostats',
+        '-loglevel',
+        'warning',
+        '-protocol_whitelist',
+        'file,pipe',
+        '-ss',
+        segment.start.toFixed(6),
+        '-i',
+        source.path,
+        '-t',
+        segment.duration.toFixed(6),
+        '-map',
+        '0:v:0',
+        '-an',
+        '-sn',
+        '-vf',
+        "scale='min(1280,iw)':-2",
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '27',
+        '-pix_fmt',
+        'yuv420p',
+        '-avoid_negative_ts',
+        'make_zero',
+        '-n',
+        '-f',
+        'mp4',
+        segmentPath,
+      ]);
+    }
+
+    const concatPath = path.join(segmentDirectory, 'concat.txt');
+    await fs.writeFile(
+      concatPath,
+      `${segmentPaths.map(concatFileLine).join('\n')}\n`,
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+    );
+    const joinedVideoPath = path.join(segmentDirectory, 'joined-video.mp4');
+    await runProxyCommand(job, binaryPath, [
+      '-hide_banner',
+      '-nostdin',
+      '-nostats',
+      '-loglevel',
+      'warning',
+      '-f',
+      'concat',
+      '-safe',
+      '0',
+      '-i',
+      concatPath,
+      '-map',
+      '0:v:0',
+      '-an',
+      '-c:v',
+      'copy',
+      '-n',
+      '-f',
+      'mp4',
+      joinedVideoPath,
+    ]);
+    await runProxyCommand(job, binaryPath, [
+      '-hide_banner',
+      '-nostdin',
+      '-nostats',
+      '-loglevel',
+      'warning',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      joinedVideoPath,
+      '-i',
+      source.path,
+      '-map',
+      '0:v:0',
+      '-map',
+      '1:a:0?',
+      '-c:v',
+      'copy',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-ac',
+      '2',
+      '-t',
+      duration.toFixed(6),
+      '-movflags',
+      '+faststart',
+      '-n',
+      '-f',
+      'mp4',
+      temporaryPath,
+    ]);
+  } finally {
+    await fs.rm(segmentDirectory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function abandonProxyJob(token) {
   const job = pendingProxyJobs.get(token);
   if (!job) return false;
@@ -2872,6 +3027,9 @@ async function abandonProxyJob(token) {
     job.child = null;
     await job.operation.catch(() => {});
     await fs.rm(job.temporaryPath, { force: true });
+    if (job.segmentDirectory) {
+      await fs.rm(job.segmentDirectory, { recursive: true, force: true });
+    }
     if (!job.sourceLeaseReleased) {
       job.sourceLeaseReleased = true;
       releaseRegisteredMediaLease(job.sourceToken);
@@ -2915,7 +3073,9 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
       throw new Error('元素材が読み込み後に変更されました');
     }
     const proxyProfile = source.kind === 'video'
-      ? 'proxy-v1-1280-crf27'
+      ? source.requiresPreviewProxy
+        ? 'proxy-v2-segmented10-1280-crf27'
+        : 'proxy-v1-1280-crf27'
       : 'audio-proxy-v1-aac160-stereo';
     const fingerprint = crypto
       .createHash('sha256')
@@ -2945,6 +3105,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
       cancelled: false,
       sourceLeaseReleased: false,
       temporaryPath,
+      segmentDirectory: path.join(root, `${fingerprint}.${token}.segments`),
       stderrTail: '',
     };
     pendingProxyJobs.set(token, job);
@@ -2983,43 +3144,28 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
           '-ac',
           '2',
         ];
-    const child = spawn(
-      binaryPath,
-      [
-        '-hide_banner',
-        '-nostdin',
-        '-nostats',
-        '-loglevel',
-        'warning',
-        '-protocol_whitelist',
-        'file,pipe',
-        '-i',
-        source.path,
-        ...transcodeArgs,
-        '-movflags',
-        '+faststart',
-        '-n',
-        '-f',
-        'mp4',
-        temporaryPath,
-      ],
-      {
-        shell: false,
-        windowsHide: true,
-        detached: false,
-        stdio: ['ignore', 'ignore', 'pipe'],
-        env: minimalEnvironment(),
-      },
-    );
-    job.child = child;
-    const operation = waitForProxyChild(job);
+    const operation = source.kind === 'video' && source.requiresPreviewProxy
+      ? createSegmentedRepairProxy(job, binaryPath, source, temporaryPath)
+      : runProxyCommand(job, binaryPath, [
+          '-hide_banner',
+          '-nostdin',
+          '-nostats',
+          '-loglevel',
+          'warning',
+          '-protocol_whitelist',
+          'file,pipe',
+          '-i',
+          source.path,
+          ...transcodeArgs,
+          '-movflags',
+          '+faststart',
+          '-n',
+          '-f',
+          'mp4',
+          temporaryPath,
+        ]);
     job.operation = operation.then(() => undefined, () => undefined);
-    const result = await operation;
-    job.child = null;
-    if (job.cancelled) throw new Error('プレビュー変換を中止しました');
-    if (result.code !== 0) {
-      throw new Error(`プレビュー変換に失敗しました (FFmpeg: ${String(result.code)})`);
-    }
+    await operation;
     await syncFileForCommit(temporaryPath, {
       shouldAbort: () => job.cancelled,
     });
