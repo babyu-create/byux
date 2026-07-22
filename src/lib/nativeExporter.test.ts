@@ -84,6 +84,7 @@ function makeOptions(extra: Partial<ExportOptions> = {}): ExportOptions {
 
 function installFceApi(api: {
   registerMediaFile?: ReturnType<typeof vi.fn>;
+  registerMediaFileFromFile?: ReturnType<typeof vi.fn>;
   releaseMediaFile?: ReturnType<typeof vi.fn>;
 }): void {
   Object.defineProperty(globalThis, 'window', {
@@ -319,6 +320,7 @@ describe('prepareNativeExportRequest', () => {
     );
 
     expect(prepared.request.version).toBe(1);
+    expect(prepared.request.encodingPreference).toBe('auto');
     expect(prepared.request.options).not.toHaveProperty('signal');
     expect(prepared.request.options).not.toHaveProperty('onProgress');
     expect(prepared.request.assets).toEqual([
@@ -373,6 +375,53 @@ describe('prepareNativeExportRequest', () => {
     await prepared.release();
     expect(releaseMediaFile).toHaveBeenCalledTimes(1);
     expect(releaseMediaFile).toHaveBeenCalledWith('temporary-token');
+  });
+
+  it('recovers a missing path from the original File before native export', async () => {
+    const file = new File(['video'], 'source.mp4', { type: 'video/mp4' });
+    const registerMediaFileFromFile = vi.fn().mockResolvedValue({
+      ok: true,
+      source: {
+        token: 'file-token',
+        url: 'fce-media://asset/file-token',
+        size: file.size,
+        path: 'C:\\video\\source.mp4',
+        name: file.name,
+        kind: 'video',
+      },
+    });
+    const releaseMediaFile = vi.fn().mockResolvedValue(true);
+    installFceApi({ registerMediaFileFromFile, releaseMediaFile });
+    const asset = makeAsset({
+      file,
+      size: file.size,
+      sourceToken: undefined,
+      path: undefined,
+    });
+
+    const prepared = await prepareNativeExportRequest(
+      makeInput([makeClip()], [asset]),
+      makeOptions(),
+    );
+
+    expect(registerMediaFileFromFile).toHaveBeenCalledWith(file, 'video');
+    expect(prepared.request.assets[0].sourceToken).toBe('file-token');
+    await prepared.release();
+    expect(releaseMediaFile).toHaveBeenCalledWith('file-token');
+  });
+
+  it('explains how to reconnect a source that has neither a path nor a disk-backed File', async () => {
+    const releaseMediaFile = vi.fn().mockResolvedValue(true);
+    installFceApi({ releaseMediaFile });
+    const asset = makeAsset({
+      sourceToken: undefined,
+      path: undefined,
+      file: undefined,
+    });
+
+    await expect(
+      prepareNativeExportRequest(makeInput([makeClip()], [asset]), makeOptions()),
+    ).rejects.toThrow('「ファイルを追加」ボタンで元ファイルを選び直してください');
   });
 
   it('sends validation metadata without registering hidden or muted sources', async () => {

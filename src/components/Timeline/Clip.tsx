@@ -68,7 +68,6 @@ export const Clip = memo(function Clip({
   previousClipId,
   nextClipId,
 }: ClipProps) {
-  const moveClip = useProjectStore((s) => s.moveClip);
   const trimClipStart = useProjectStore((s) => s.trimClipStart);
   const trimClipEnd = useProjectStore((s) => s.trimClipEnd);
   const selectClipAction = useProjectStore((s) => s.selectClip);
@@ -83,6 +82,9 @@ export const Clip = memo(function Clip({
 
   const dragRef = useRef<DragState | null>(null);
   const clipElementRef = useRef<HTMLDivElement>(null);
+  const pointerSelectionHandledRef = useRef(false);
+  const pendingSelectionToggleRef = useRef(false);
+  const pointerDraggedRef = useRef(false);
   const lastClientXRef = useRef(0);
   const lastShiftKeyRef = useRef(false);
   const [draggingMode, setDraggingMode] = useState<DragMode | null>(null);
@@ -134,9 +136,33 @@ export const Clip = memo(function Clip({
     if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
+    const stateBeforeSelection = useProjectStore.getState();
+    const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+    const alreadySelected = stateBeforeSelection.selectedClipIds.includes(clip.id);
+    if (!alreadySelected) selectClip(clip.id, additive);
+    pointerSelectionHandledRef.current = true;
+    pendingSelectionToggleRef.current = alreadySelected && additive;
+    pointerDraggedRef.current = false;
     if (!asset) return;
-    selectClip(clip.id, e.shiftKey);
-    if (locked) return;
+    const stateAfterSelection = useProjectStore.getState();
+    const movingIds = stateAfterSelection.selectedClipIds.includes(clip.id)
+      ? new Set(stateAfterSelection.selectedClipIds)
+      : new Set([clip.id]);
+    const hasLockedSelection = stateAfterSelection.clips.some(
+      (candidate) =>
+        movingIds.has(candidate.id) &&
+        stateAfterSelection.tracks.some(
+          (track) => track.id === candidate.trackId && track.locked,
+        ),
+    );
+    if (locked || (mode === 'move' && hasLockedSelection)) {
+      stateAfterSelection.showMessage(
+        'info',
+        '選択中トラックのロックを解除すると移動できます',
+        2200,
+      );
+      return;
+    }
     clipElementRef.current?.focus();
 
     dragRef.current = {
@@ -170,12 +196,22 @@ export const Clip = memo(function Clip({
     // moves the viewport under it.
     const scrollDelta = getScrollLeft() - drag.startScroll;
     const deltaPx = clientX - drag.startX + scrollDelta;
+    if (Math.abs(deltaPx) >= 4) pointerDraggedRef.current = true;
     const deltaSec = pxToTime(deltaPx, zoom);
 
     const state = useProjectStore.getState();
     const useSnap = state.snapEnabled && !shiftKey;
+    const movingIds = new Set(
+      drag.mode === 'move' && state.selectedClipIds.includes(clip.id)
+        ? state.selectedClipIds
+        : [clip.id],
+    );
     const points = useSnap
-      ? collectSnapPoints(state.clips, clip.id, state.playhead)
+      ? collectSnapPoints(
+          state.clips.filter((candidate) => !movingIds.has(candidate.id)),
+          clip.id,
+          state.playhead,
+        )
       : [];
 
     // Append beat positions from any audio clip on the audio track.
@@ -184,6 +220,7 @@ export const Clip = memo(function Clip({
       const audioTrackId = state.tracks.find((t) => t.kind === 'audio')?.id;
       if (audioTrackId) {
         for (const c of state.clips) {
+          if (movingIds.has(c.id)) continue;
           if (c.trackId !== audioTrackId) continue;
           const a = mediaState.assets.find((x) => x.id === c.assetId);
           if (!a?.beats) continue;
@@ -202,7 +239,7 @@ export const Clip = memo(function Clip({
       const result = useSnap
         ? snapClipMove(desired, duration, points, SNAP_THRESHOLD_PX, zoom)
         : { time: desired, snappedTo: null };
-      moveClip(clip.id, result.time);
+      state.moveSelectedClips(clip.id, result.time);
       state.setSnapIndicator(
         result.snappedTo ? { time: result.snappedTo.time, type: result.snappedTo.type } : null,
       );
@@ -270,6 +307,11 @@ export const Clip = memo(function Clip({
       setDraggingMode(null);
       stopAutoScroll();
       useProjectStore.getState().setSnapIndicator(null);
+      window.setTimeout(() => {
+        pointerSelectionHandledRef.current = false;
+        pendingSelectionToggleRef.current = false;
+        pointerDraggedRef.current = false;
+      }, 0);
     }
   };
 
@@ -278,13 +320,16 @@ export const Clip = memo(function Clip({
     if (!drag) return false;
     releasePointerCaptureIfHeld(drag.captureTarget, drag.pointerId);
     if (drag.mode === 'move') {
-      moveClip(clip.id, drag.origStart);
+      useProjectStore.getState().moveSelectedClips(clip.id, drag.origStart);
     } else if (drag.mode === 'trim-start') {
       trimClipStart(clip.id, drag.origTrimStart);
     } else {
       trimClipEnd(clip.id, drag.origTrimEnd);
     }
     dragRef.current = null;
+    pointerSelectionHandledRef.current = false;
+    pendingSelectionToggleRef.current = false;
+    pointerDraggedRef.current = false;
     setDraggingMode(null);
     stopAutoScroll();
     useProjectStore.getState().setSnapIndicator(null);
@@ -294,8 +339,23 @@ export const Clip = memo(function Clip({
     return true;
   };
 
+  const handlePointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    cancelActiveDrag();
+  };
+
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (pointerSelectionHandledRef.current) {
+      pointerSelectionHandledRef.current = false;
+      if (pendingSelectionToggleRef.current && !pointerDraggedRef.current) {
+        selectClip(clip.id, true);
+      }
+      pendingSelectionToggleRef.current = false;
+      pointerDraggedRef.current = false;
+      return;
+    }
     selectClip(clip.id, e.shiftKey);
   };
 
@@ -373,24 +433,35 @@ export const Clip = memo(function Clip({
       onPointerDown={(e) => startDrag(e, 'move')}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
       onClick={handleClick}
       onKeyDown={(event) => {
         if (event.key === 'Escape' && cancelActiveDrag()) {
           event.preventDefault();
           event.stopPropagation();
         } else if (consumeClipNudgeGesture(event)) {
-          selectClip(clip.id);
-          if (locked) {
+          const state = useProjectStore.getState();
+          if (!state.selectedClipIds.includes(clip.id)) selectClip(clip.id);
+          const movingIds = state.selectedClipIds.includes(clip.id)
+            ? new Set(state.selectedClipIds)
+            : new Set([clip.id]);
+          const hasLockedSelection = state.clips.some(
+            (candidate) =>
+              movingIds.has(candidate.id) &&
+              state.tracks.some(
+                (track) => track.id === candidate.trackId && track.locked,
+              ),
+          );
+          if (locked || hasLockedSelection) {
             useProjectStore
               .getState()
-              .showMessage('info', 'トラックのロックを解除すると移動できます');
+              .showMessage('info', '選択中トラックのロックを解除すると移動できます');
             return;
           }
           const step = event.shiftKey ? 1 : 0.1;
           const requested =
             clip.start + (event.key === 'ArrowRight' ? step : -step);
-          moveClip(clip.id, requested);
+          const changedCount = state.moveSelectedClips(clip.id, requested);
           const actual =
             useProjectStore.getState().clips.find((item) => item.id === clip.id)
               ?.start ?? clip.start;
@@ -399,7 +470,7 @@ export const Clip = memo(function Clip({
             .showMessage(
               Math.abs(actual - clip.start) > 1e-6 ? 'success' : 'info',
               Math.abs(actual - clip.start) > 1e-6
-                ? `${label}を${formatTimecode(
+                ? `${changedCount > 1 ? `${changedCount}本を` : `${label}を`}${formatTimecode(
                     actual,
                     useProjectStore.getState().fps,
                   )}へ移動`
@@ -423,10 +494,11 @@ export const Clip = memo(function Clip({
       }}
       role="group"
       data-clip-id={clip.id}
+      data-clip-asset-id={clip.assetId}
       tabIndex={keyboardTabStop ? 0 : -1}
       aria-current={isSelected ? 'true' : undefined}
       aria-roledescription="タイムラインクリップ"
-      aria-label={`${label}、${formatDuration(clipDuration(clip))}、Enterで選択、左右矢印で前後のクリップ、Alt+左右矢印で位置を移動`}
+      aria-label={`${label}、${formatDuration(clipDuration(clip))}、Enterで選択、左右矢印で前後のクリップ、Alt+左右矢印で選択クリップを移動`}
     >
       {!locked && asset ? (
         <div
@@ -434,7 +506,7 @@ export const Clip = memo(function Clip({
           onPointerDown={(e) => startDrag(e, 'trim-start')}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
           onKeyDown={(event) => handleTrimKeyDown(event, 'start')}
           role="slider"
           tabIndex={isSelected ? 0 : -1}
@@ -509,7 +581,7 @@ export const Clip = memo(function Clip({
           onPointerDown={(e) => startDrag(e, 'trim-end')}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
           onKeyDown={(event) => handleTrimKeyDown(event, 'end')}
           role="slider"
           tabIndex={isSelected ? 0 : -1}

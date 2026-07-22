@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Sparkles, Download, CheckCircle2, AlertTriangle } from 'lucide-react';
 import type { NativeExportRequest } from '../../lib/nativeExporter';
+import type {
+  NativeMediaRegistrationResult,
+  NativeMediaSelectionResult,
+  NativeLoudnessResult,
+  NativeWaveformResult,
+} from '../../lib/types';
 import styles from './UpdateBanner.module.css';
 
 type UpdaterEvent =
@@ -118,6 +124,8 @@ interface ExportAPI {
       etaSec?: number | null;
       fps?: number | null;
       totalBytes?: number | null;
+      encoderLabel?: string;
+      hardwareEncoding?: boolean;
       error?: { code: string; message: string; details?: string[] };
     }) => void,
   ): () => void;
@@ -169,10 +177,41 @@ interface FCEGlobal {
   export?: ExportAPI;
   /** Tell the main process whether there are unsaved edits (see `close` handler in electron/main.cjs). */
   setDirty?: (dirty: boolean) => void;
+  saveDiagnostics?: (projectSummary: {
+    tracks: number;
+    clips: number;
+    assets: number;
+    subtitles: number;
+    durationSeconds: number;
+  }) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+  cache?: {
+    getSummary(): Promise<{
+      ok: boolean;
+      summary?: CacheSummary;
+      error?: string;
+    }>;
+    clearUnused(): Promise<{
+      ok: boolean;
+      busy?: boolean;
+      summary?: CacheSummary;
+      removed?: CacheSummary;
+      error?: string;
+    }>;
+  };
   onSaveBeforeClose?: (cb: (id: string) => void) => () => void;
   completeSaveBeforeClose?: (id: string, success: boolean) => void;
   /** Real disk path of a File the user dropped/picked (empty string if none). */
   getPathForFile?: (file: File) => string;
+  /** Resolve and register a user-provided disk File before editing starts. */
+  registerMediaFileFromFile?: (
+    file: File,
+    kind?: 'video' | 'audio',
+  ) => Promise<NativeMediaRegistrationResult>;
+  /** Use Electron's native picker so the main process owns the selected paths. */
+  selectMediaFiles?: (options?: {
+    kind?: 'video' | 'audio';
+    multiple?: boolean;
+  }) => Promise<NativeMediaSelectionResult>;
   /** Register a saved source path and receive an opaque streaming handle. */
   registerMediaFile?: (ref: {
     path: string;
@@ -180,7 +219,7 @@ interface FCEGlobal {
     size: number;
     kind: 'video' | 'audio';
   }) => Promise<{ token: string; url: string; size: number } | null>;
-  /** Create/reuse a disk-backed H.264 preview without loading the source into renderer memory. */
+  /** Create/reuse a disk-backed H.264/AAC preview without loading the source into renderer memory. */
   createPreviewProxy?: (sourceToken: string) => Promise<{
     ok: boolean;
     token?: string;
@@ -189,6 +228,12 @@ interface FCEGlobal {
     cached?: boolean;
     error?: string;
   }>;
+  /** Generate compact peaks in the main process without decoding the whole source in renderer memory. */
+  generateMediaWaveform?: (sourceToken: string) => Promise<NativeWaveformResult>;
+  cancelMediaWaveform?: (sourceToken: string) => Promise<boolean>;
+  /** Analyze EBU R128 loudness without transferring decoded audio to the renderer. */
+  analyzeMediaLoudness?: (sourceToken: string) => Promise<NativeLoudnessResult>;
+  cancelMediaLoudness?: (sourceToken: string) => Promise<boolean>;
   /** Bounded source read used only by explicit heavyweight operations. */
   readMediaFileChunk?: (
     token: string,
@@ -196,6 +241,11 @@ interface FCEGlobal {
     length: number,
   ) => Promise<Uint8Array<ArrayBuffer> | null>;
   releaseMediaFile?: (token: string) => Promise<boolean>;
+}
+
+interface CacheSummary {
+  waveform: { files: number; bytes: number };
+  previewProxy: { files: number; bytes: number };
 }
 
 declare global {

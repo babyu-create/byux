@@ -7,12 +7,16 @@
 // generated in the main process, so renderer input can never smuggle a second
 // output, a network protocol, or a `movie=` file read into FFmpeg.
 
+const { buildVideoEncodingArgs } = require('./hardwareEncoding.cjs');
+const { buildHdrToSdrFilter } = require('./nativeFfmpeg.cjs');
+
 const MAX_CLIPS = 10_000;
 const MAX_TRACKS = 100;
 const MAX_ASSETS = 2_000;
 const MAX_OVERLAYS = 512;
 const MAX_OVERLAY_ITEMS = 5_000;
 const MAX_MARKERS = 10_000;
+const MAX_SUBTITLE_CUES = 10_000;
 const MAX_TIMELINE_SECONDS = 7 * 24 * 60 * 60;
 // FFmpeg's expression parser is recursive. Although the project schema can
 // retain larger authored arrays, emitting thousands of nested if() calls makes
@@ -32,6 +36,14 @@ const MAX_TOTAL_RAMP_AUDIO_SEGMENTS = 8_192;
 const MAX_RAMP_AUDIO_ERROR_SECONDS = 1 / 120;
 const MAX_DUCK_POINTS = 10_000;
 const EPS = 1e-4;
+// 48 kHz is the native rate used by OBS and the major GPU capture tools.
+// Normalize every clip before timeline concat so mixed-rate sources cannot
+// accumulate timestamp drift across a long project.
+const AUDIO_SAMPLE_RATE = 48_000;
+const AUDIO_NORMALIZATION_FILTERS = [
+  `aresample=${AUDIO_SAMPLE_RATE}:async=1:first_pts=0`,
+  `aformat=sample_fmts=fltp:sample_rates=${AUDIO_SAMPLE_RATE}:channel_layouts=stereo`,
+];
 
 class NativeExportPlanError extends Error {
   constructor(code, message, details = []) {
@@ -67,20 +79,23 @@ function safeId(value, label) {
 }
 
 function getResolution(resolution, aspectRatio) {
-  if (resolution !== '720p' && resolution !== '1080p') {
+  const sizes = {
+    '720p': { width: 1280, height: 720 },
+    '1080p': { width: 1920, height: 1080 },
+    '1440p': { width: 2560, height: 1440 },
+    '2160p': { width: 3840, height: 2160 },
+  };
+  const landscape = sizes[resolution];
+  if (!landscape) {
     throw new NativeExportPlanError('INVALID_OPTIONS', '解像度が不正です');
   }
   if (aspectRatio !== '16:9' && aspectRatio !== '9:16') {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'アスペクト比が不正です');
   }
   if (aspectRatio === '16:9') {
-    return resolution === '1080p'
-      ? { width: 1920, height: 1080 }
-      : { width: 1280, height: 720 };
+    return landscape;
   }
-  return resolution === '1080p'
-    ? { width: 1080, height: 1920 }
-    : { width: 720, height: 1280 };
+  return { width: landscape.height, height: landscape.width };
 }
 
 function encodingSettings(quality) {
@@ -532,17 +547,21 @@ function buildAudioFilterParts(spec) {
   const duration = clipDuration(clip);
   if (!hasAudio || volume <= EPS) {
     return [
-      `anullsrc=r=44100:cl=stereo,atrim=0:${number(duration)},` +
-      `asetpts=PTS-STARTPTS,volume=${number(volume)}${outputLabel}`,
+      `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:${number(duration)},` +
+      `asetpts=PTS-STARTPTS,volume=${number(volume)},` +
+      `${AUDIO_NORMALIZATION_FILTERS.join(',')}${outputLabel}`,
     ];
   }
+  const processingFilters = buildAudioProcessingFilters(clip.audioProcessing);
   const ramp = validateSpeedRamp(clip.speedRamp);
   if (!ramp) {
     const filters = [
       `atrim=${number(clip.trimStart)}:${number(clip.trimEnd)}`,
       'asetpts=PTS-STARTPTS',
       ...buildAtempoChain(clip.speed ?? 1),
+      ...processingFilters,
       `volume=${number(volume)}`,
+      ...AUDIO_NORMALIZATION_FILTERS,
     ];
     return [`[${inputIndex}:a]${filters.join(',')}${outputLabel}`];
   }
@@ -586,9 +605,36 @@ function buildAudioFilterParts(spec) {
   }
   parts.push(
     `${renderedLabels.join('')}concat=n=${rampAudioSegments}:v=0:a=1,` +
-    `volume=${number(volume)}${outputLabel}`,
+    `${processingFilters.length > 0 ? `${processingFilters.join(',')},` : ''}` +
+    `volume=${number(volume)},${AUDIO_NORMALIZATION_FILTERS.join(',')}${outputLabel}`,
   );
   return parts;
+}
+
+function buildAudioProcessingFilters(value) {
+  if (value === undefined) return [];
+  if (!value || typeof value !== 'object') {
+    throw new NativeExportPlanError('INVALID_PROJECT', '音声処理が不正です');
+  }
+  const highPass = finite(value.highPassHz ?? 0, 'ハイパス', 0, 300);
+  if (highPass > 0 && highPass < 40) {
+    throw new NativeExportPlanError('INVALID_PROJECT', 'ハイパスが不正です');
+  }
+  const low = finite(value.lowGainDb ?? 0, '低音EQ', -12, 12);
+  const mid = finite(value.midGainDb ?? 0, '中音EQ', -12, 12);
+  const high = finite(value.highGainDb ?? 0, '高音EQ', -12, 12);
+  if (value.compressor !== undefined && typeof value.compressor !== 'boolean') {
+    throw new NativeExportPlanError('INVALID_PROJECT', 'コンプレッサー設定が不正です');
+  }
+  const filters = [];
+  if (highPass > 0) filters.push(`highpass=f=${number(highPass)}`);
+  if (Math.abs(low) > EPS) filters.push(`equalizer=f=120:t=q:w=0.7:g=${number(low)}`);
+  if (Math.abs(mid) > EPS) filters.push(`equalizer=f=1000:t=q:w=1:g=${number(mid)}`);
+  if (Math.abs(high) > EPS) filters.push(`equalizer=f=6000:t=q:w=0.7:g=${number(high)}`);
+  if (value.compressor === true) {
+    filters.push('acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=1.2');
+  }
+  return filters;
 }
 
 function buildClipFilters(spec) {
@@ -607,6 +653,7 @@ function buildClipFilters(spec) {
     motionBlurOptions,
     flattenOnBlack,
     workPrefix,
+    hdrToneMap,
   } = spec;
   const speed = clip.speed ?? 1;
   const duration = clipDuration(clip);
@@ -622,6 +669,8 @@ function buildClipFilters(spec) {
   else if (Math.abs(speed - 1) > 1e-3) {
     videoFilters.push(`setpts=${number(1 / speed)}*PTS`);
   }
+  const hdrToSdrFilter = buildHdrToSdrFilter(hdrToneMap);
+  if (hdrToSdrFilter) videoFilters.push(hdrToSdrFilter);
 
   const sourceMatchesOutput = asset.width === width && asset.height === height;
   const sourceWidth = Number(asset.width) || 0;
@@ -976,7 +1025,13 @@ function buildOverlayParts(base, input, output, index, start, end, intro) {
   return [fade, `${base}${faded}overlay=${x}:${y}:${enable}${output}`];
 }
 
-function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, outputPath) {
+function buildNativeExportPlan(
+  request,
+  sourceByAssetId,
+  overlayPathByClipId,
+  outputPath,
+  videoEncoder = 'libx264',
+) {
   if (!request || request.version !== 1) {
     throw new NativeExportPlanError('INVALID_VERSION', '書き出しデータの形式が不正です');
   }
@@ -994,6 +1049,25 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     (!Array.isArray(request.markers) || request.markers.length > MAX_MARKERS)
   ) {
     throw new NativeExportPlanError('INVALID_PROJECT', 'マーカー数が不正です');
+  }
+  if (
+    request.subtitles !== undefined &&
+    (!Array.isArray(request.subtitles) || request.subtitles.length > MAX_SUBTITLE_CUES)
+  ) {
+    throw new NativeExportPlanError('INVALID_SUBTITLES', '字幕数が不正です');
+  }
+  for (const cue of request.subtitles ?? []) {
+    safeId(cue?.id, '字幕ID');
+    finite(cue?.start, '字幕開始位置', 0, MAX_TIMELINE_SECONDS);
+    finite(cue?.end, '字幕終了位置', 0, MAX_TIMELINE_SECONDS);
+    if (
+      cue.end <= cue.start ||
+      typeof cue.text !== 'string' ||
+      cue.text.length === 0 ||
+      cue.text.length > 2_000
+    ) {
+      throw new NativeExportPlanError('INVALID_SUBTITLES', '字幕の時刻または本文が不正です');
+    }
   }
   if (
     !(sourceByAssetId instanceof Map) ||
@@ -1016,10 +1090,16 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
   const options = request.options ?? {};
   const { width, height } = getResolution(options.resolution, options.aspectRatio);
   const fps = options.fps;
-  if (fps !== 30 && fps !== 60) {
+  if (fps !== 30 && fps !== 60 && fps !== 120) {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'フレームレートが不正です');
   }
   const encoding = encodingSettings(options.quality);
+  let videoEncodingArgs;
+  try {
+    videoEncodingArgs = buildVideoEncodingArgs(videoEncoder, options.quality);
+  } catch {
+    throw new NativeExportPlanError('INVALID_OPTIONS', '動画エンコーダー設定が不正です');
+  }
   const reframe = finite(options.verticalReframe ?? 0, '縦動画の位置', -1, 1);
   if (options.motionBlur !== undefined && typeof options.motionBlur !== 'boolean') {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'モーションブラー設定が不正です');
@@ -1135,6 +1215,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
       }
       if (effect.intensity !== undefined) finite(effect.intensity, 'ブラー強度', 0, 100);
     }
+    buildAudioProcessingFilters(clip.audioProcessing);
     if (clip.transform !== undefined) {
       if (!clip.transform || typeof clip.transform !== 'object') {
         throw new NativeExportPlanError('INVALID_PROJECT', '変形設定が不正です');
@@ -1265,6 +1346,14 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         `元素材を確認できません: ${assetById.get(assetId)?.name ?? assetId}`,
       );
     }
+    if (
+      source.hdrToneMap !== undefined &&
+      source.hdrToneMap !== null &&
+      source.hdrToneMap !== 'pq' &&
+      source.hdrToneMap !== 'hlg'
+    ) {
+      throw new NativeExportPlanError('INVALID_PROJECT', 'HDR素材情報が不正です');
+    }
     inputIndexByAssetId.set(assetId, index);
     inputArgs.push('-i', source.path);
   });
@@ -1284,7 +1373,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         `format=yuv420p,setsar=1,setpts=PTS-STARTPTS${videoLabel}`,
       );
       filters.push(
-        `anullsrc=r=44100:cl=stereo,atrim=0:${duration.toFixed(4)},` +
+        `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:${duration.toFixed(4)},` +
         `asetpts=PTS-STARTPTS${audioLabel}`,
       );
       return;
@@ -1307,6 +1396,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         motionBlurOptions: options,
         flattenOnBlack: true,
         workPrefix: `p${index}`,
+        hdrToneMap: source.hdrToneMap ?? null,
       }),
     );
   });
@@ -1337,6 +1427,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         motionBlurOptions: options,
         flattenOnBlack: false,
         workPrefix: `u${index}`,
+        hdrToneMap: source.hdrToneMap ?? null,
       }),
     );
     filters.push(
@@ -1406,6 +1497,10 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
       );
       videoOutputLabel = output;
     });
+  }
+  if ((request.subtitles?.length ?? 0) > 0) {
+    filters.push(`${videoOutputLabel}ass=filename='subtitles.ass'[vsub]`);
+    videoOutputLabel = '[vsub]';
   }
 
   let audioOutputLabel = '[abase]';
@@ -1484,20 +1579,27 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     videoOutputLabel,
     '-map',
     audioOutputLabel,
-    '-c:v',
-    'libx264',
-    '-preset',
-    encoding.preset,
-    '-crf',
-    String(encoding.crf),
+    ...videoEncodingArgs,
     '-pix_fmt',
     'yuv420p',
+    ...([...sourceByAssetId.values()].some((source) => source.hdrToneMap)
+      ? [
+          '-color_primaries',
+          'bt709',
+          '-color_trc',
+          'bt709',
+          '-colorspace',
+          'bt709',
+          '-color_range',
+          'tv',
+        ]
+      : []),
     '-c:a',
     'aac',
     '-b:a',
     encoding.audioBitrate,
     '-ar',
-    '44100',
+    String(AUDIO_SAMPLE_RATE),
     '-ac',
     '2',
     '-movflags',
@@ -1523,6 +1625,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     width,
     height,
     fps,
+    videoEncoder,
   };
 }
 

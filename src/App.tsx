@@ -56,8 +56,10 @@ import {
 import { useMediaStore } from './stores/mediaStore';
 import {
   buildAssetIdMap,
+  assetRelinkError,
   downloadProjectFile,
   parseProjectFile,
+  requiredAssetSourceDuration,
   serialiseProject,
   type ProjectAssetRef,
 } from './lib/project';
@@ -87,6 +89,8 @@ function createProjectSnapshot() {
     tracks: ps.tracks,
     clips: ps.clips,
     markers: ps.markers,
+    subtitles: ps.subtitles,
+    subtitleStyle: ps.subtitleStyle,
     ioRanges: ps.ioRanges,
     preRollSec: ps.preRollSec,
     postRollSec: ps.postRollSec,
@@ -125,6 +129,17 @@ async function relinkFromDisk(
       });
       if (!source) continue;
       const asset = await useMediaStore.getState().addRecoveredAsset(ref, source);
+      const project = useProjectStore.getState();
+      const requiredDuration = requiredAssetSourceDuration(
+        ref.id,
+        project.clips,
+        project.markers,
+        project.ioRanges,
+      );
+      if (assetRelinkError(ref, asset, requiredDuration)) {
+        useMediaStore.getState().removeAsset(asset.id);
+        continue;
+      }
       idMap[ref.id] = asset.id;
       recovered += 1;
     } catch {
@@ -809,7 +824,17 @@ function App() {
     }
     for (const ref of expectedAssets) {
       const key = `${ref.kind}\0${ref.name}\0${ref.size}`;
-      const match = availableByIdentity.get(key)?.shift();
+      const requiredDuration = requiredAssetSourceDuration(
+        ref.id,
+        projectState.clips,
+        projectState.markers,
+        projectState.ioRanges,
+      );
+      const candidates = availableByIdentity.get(key);
+      const matchIndex = candidates?.findIndex(
+        (candidate) => !assetRelinkError(ref, candidate, requiredDuration),
+      ) ?? -1;
+      const match = matchIndex >= 0 ? candidates?.splice(matchIndex, 1)[0] : undefined;
       if (match) {
         idMap[ref.id] = match.id;
         matched += 1;

@@ -14,7 +14,16 @@
 
 import { FFmpeg, FFFSType } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
-import type { Clip, KillMarker, MediaAsset, Track } from './types';
+import type {
+  Clip,
+  KillMarker,
+  MediaAsset,
+  ProjectFps,
+  ProjectResolution,
+  SubtitleCue,
+  SubtitleStyle,
+  Track,
+} from './types';
 import {
   buildDuckPoints,
   buildDuckVolumeExpr,
@@ -45,6 +54,7 @@ import {
   introForClipOverlays,
   type ClipOverlayIntro,
 } from './overlayText';
+import { ffmpegAudioProcessingFilters } from './audioProcessing';
 
 export type ExportQualityPreset = 'recommended' | 'high' | 'compact';
 
@@ -67,8 +77,8 @@ function getVideoEncodingSettings(
 }
 
 export interface ExportOptions {
-  resolution: '720p' | '1080p';
-  fps: 30 | 60;
+  resolution: ProjectResolution;
+  fps: ProjectFps;
   aspectRatio: '16:9' | '9:16';
   /** Human-facing quality/speed preset. Defaults to the balanced preset. */
   quality?: ExportQualityPreset;
@@ -118,6 +128,8 @@ export interface ExportInput {
    * ducking even if the setting is on (nothing to duck around).
    */
   markers?: KillMarker[];
+  subtitles?: SubtitleCue[];
+  subtitleStyle?: SubtitleStyle;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,13 +349,21 @@ async function execChecked(
 }
 
 export function getResolution(
-  resolution: '720p' | '1080p',
+  resolution: ProjectResolution,
   aspect: '16:9' | '9:16',
 ): { width: number; height: number } {
+  const landscape =
+    resolution === '2160p'
+      ? { width: 3840, height: 2160 }
+      : resolution === '1440p'
+        ? { width: 2560, height: 1440 }
+        : resolution === '1080p'
+          ? { width: 1920, height: 1080 }
+          : { width: 1280, height: 720 };
   if (aspect === '16:9') {
-    return resolution === '1080p' ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
+    return landscape;
   }
-  return resolution === '1080p' ? { width: 1080, height: 1920 } : { width: 720, height: 1280 };
+  return { width: landscape.height, height: landscape.width };
 }
 
 /** Build an atempo filter chain that supports any speed by chaining 0.5x or 2.0x stages. */
@@ -537,6 +557,7 @@ function buildClipFilters(spec: ClipFilterSpec): string {
     aFilters.push(`atrim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`);
     aFilters.push('asetpts=PTS-STARTPTS');
     aFilters.push(...buildAtempoChain(speed));
+    aFilters.push(...ffmpegAudioProcessingFilters(clip.audioProcessing));
     aFilters.push(`volume=${clipVolume.toFixed(3)}`);
     aChain = `[${inputIndex}:a]${aFilters.join(',')}${aOutLabel}`;
   } else {
@@ -2116,6 +2137,7 @@ export async function exportProject(
           `atrim=${clip.trimStart.toFixed(4)}:${clip.trimEnd.toFixed(4)}`,
           'asetpts=PTS-STARTPTS',
           ...buildAtempoChain(speed),
+          ...ffmpegAudioProcessingFilters(clip.audioProcessing),
           `volume=${vol.toFixed(3)}`,
         ];
         if (startMs > 0) filters.push(`adelay=${startMs}|${startMs}`);

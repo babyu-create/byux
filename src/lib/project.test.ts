@@ -4,6 +4,8 @@ import {
   serialiseProject,
   buildAssetIdMap,
   remapClipAssetIds,
+  requiredAssetSourceDuration,
+  assetRelinkError,
   type ProjectFile,
   type ProjectAssetRef,
 } from './project';
@@ -34,6 +36,13 @@ describe('parseProjectFile', () => {
     expect(parsed.name).toBe('test');
     expect(parsed.clips).toHaveLength(1);
     expect(parsed.clips[0].trimEnd).toBe(5);
+  });
+
+  it('accepts high-frame-rate 1440p and 4K projects', () => {
+    const highFps = { ...validProject(), fps: 120 as const, resolution: '1440p' as const };
+    expect(parseProjectFile(JSON.stringify(highFps)).fps).toBe(120);
+    const fourK = { ...validProject(), resolution: '2160p' as const };
+    expect(parseProjectFile(JSON.stringify(fourK)).resolution).toBe('2160p');
   });
 
   it('accepts the legacy app identifier', () => {
@@ -240,15 +249,21 @@ describe('buildAssetIdMap', () => {
     { id: 'p1', name: 'a.mp4', size: 100, kind: 'video', duration: 3 },
     { id: 'p2', name: 'b.mp3', size: 200, kind: 'audio', duration: 9 },
   ];
-  const makeAsset = (id: string, name: string, size: number): MediaAsset => ({
+  const makeAsset = (
+    id: string,
+    name: string,
+    size: number,
+    kind: MediaAsset['kind'] = 'video',
+    duration = 10,
+  ): MediaAsset => ({
     id,
     name,
-    kind: 'video',
+    kind,
     url: '',
     file: { name, size } as File,
     size,
-    mimeType: 'video/mp4',
-    duration: 0,
+    mimeType: kind === 'video' ? 'video/mp4' : 'audio/mpeg',
+    duration,
   });
 
   it('maps by name + size and reports unmatched assets', () => {
@@ -264,6 +279,20 @@ describe('buildAssetIdMap', () => {
     expect(idMap.p1).toBeUndefined();
     expect(missingAssetIds).toContain('p1');
   });
+
+  it('does not automatically relink a wrong-kind or too-short candidate', () => {
+    const wrongKind = [makeAsset('audio', 'a.mp4', 100, 'audio', 10)];
+    expect(buildAssetIdMap(projAssets, wrongKind)).toEqual({
+      idMap: {},
+      missingAssetIds: ['p1', 'p2'],
+    });
+
+    const tooShort = [makeAsset('short', 'a.mp4', 100, 'video', 2.9)];
+    expect(buildAssetIdMap(projAssets, tooShort)).toEqual({
+      idMap: {},
+      missingAssetIds: ['p1', 'p2'],
+    });
+  });
 });
 
 describe('remapClipAssetIds', () => {
@@ -275,5 +304,29 @@ describe('remapClipAssetIds', () => {
     const out = remapClipAssetIds(clips, { p1: 'cur1' });
     expect(out[0].assetId).toBe('cur1');
     expect(out[1].assetId).toBe('pX');
+  });
+});
+
+describe('manual asset relinking safety', () => {
+  it('calculates the highest source timestamp still referenced by the project', () => {
+    expect(requiredAssetSourceDuration(
+      'a1',
+      [{ id: 'c', trackId: 't', assetId: 'a1', start: 0, trimStart: 1, trimEnd: 7, effects: [] }],
+      [{ id: 'm', assetId: 'a1', time: 8 }],
+      [{ id: 'r', assetId: 'a1', inTime: 2, outTime: 9 }],
+    )).toBe(9);
+  });
+
+  it('rejects a wrong-kind or too-short replacement before remapping IDs', () => {
+    const target: ProjectAssetRef = {
+      id: 'a1',
+      name: 'source.mp4',
+      size: 100,
+      kind: 'video',
+      duration: 10,
+    };
+    expect(assetRelinkError(target, { kind: 'audio', duration: 20 }, 8)).toMatch(/動画/);
+    expect(assetRelinkError(target, { kind: 'video', duration: 7.9 }, 8)).toMatch(/短すぎ/);
+    expect(assetRelinkError(target, { kind: 'video', duration: 8 }, 8)).toBeNull();
   });
 });

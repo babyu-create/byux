@@ -10,6 +10,10 @@ import { ClipSpeedSection } from '../Properties/ClipSpeedSection';
 import {
   removeClipWithFeedback,
   splitClipWithFeedback,
+  copySelectedWithFeedback,
+  duplicateSelectedWithFeedback,
+  lastSelectedClipIdOnTrack,
+  rippleDeleteSelectedWithFeedback,
 } from './timelineCommands';
 import styles from './Track.module.css';
 
@@ -41,9 +45,10 @@ export const Track = memo(function Track({
     () => [...clips].sort((a, b) => a.start - b.start || a.id.localeCompare(b.id)),
     [clips],
   );
-  const keyboardClipId =
-    [...selectedClipIds].reverse().find((id) => orderedClips.some((clip) => clip.id === id)) ??
-    orderedClips[0]?.id;
+  const keyboardClipId = useMemo(
+    () => lastSelectedClipIdOnTrack(orderedClips, selectedClipIds),
+    [orderedClips, selectedClipIds],
+  );
 
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -87,8 +92,13 @@ export const Track = memo(function Track({
       (c) => time >= c.start - 1e-6 && time <= c.start + clipDuration(c) + 1e-6,
     );
     if (!hit) return;
-    useProjectStore.getState().selectClip(hit.id);
+    const state = useProjectStore.getState();
+    if (!state.selectedClipIds.includes(hit.id)) state.selectClip(hit.id);
     setContextMenu({ x: start.x, y: start.y, clip: hit });
+  };
+
+  const handleTrackPointerCancel = () => {
+    rightClickRef.current = null;
   };
 
   // Drop OS files straight onto any compatible track. Visible video and
@@ -106,6 +116,7 @@ export const Track = memo(function Track({
     if (!track || track.locked) return;
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
+    const requestedCount = files.length;
 
     const rect = e.currentTarget.getBoundingClientRect();
     const dropTime = Math.max(0, pxToTime(e.clientX - rect.left, zoom));
@@ -117,6 +128,8 @@ export const Track = memo(function Track({
       .then((newAssets) => {
         let cursor = dropTime;
         let skipped = 0;
+        let added = 0;
+        let placementFailed = 0;
         for (const asset of newAssets) {
           const compatible =
             asset.kind === 'audio'
@@ -127,15 +140,36 @@ export const Track = memo(function Track({
             continue;
           }
           const id = ps.addClipFromAsset(asset.id, track.id, asset.duration, cursor);
-          if (id) cursor += asset.duration;
+          if (id) {
+            cursor += asset.duration;
+            added += 1;
+          } else {
+            placementFailed += 1;
+          }
         }
-        if (skipped > 0) {
+        const importFailed = requestedCount - newAssets.length;
+        if (added === 0 && newAssets.length === 0) {
           ps.showMessage(
             'error',
-            `${skipped}個のファイルはこの種類のトラックに追加できません`,
-            3500,
+            useMediaStore.getState().importError ??
+              'ファイルを読み込めませんでした。形式または読み取り権限を確認してください',
+            6000,
+          );
+        } else if (skipped > 0 || placementFailed > 0 || importFailed > 0) {
+          const details = [
+            skipped > 0 ? `種類違い ${skipped}件` : '',
+            placementFailed > 0 ? `配置失敗 ${placementFailed}件` : '',
+            importFailed > 0 ? `読込失敗 ${importFailed}件` : '',
+          ].filter(Boolean).join(' / ');
+          ps.showMessage(
+            'error',
+            `${added}件を配置しました / ${details}`,
+            5000,
           );
         }
+      })
+      .catch(() => {
+        ps.showMessage('error', 'ファイルの読み込み中にエラーが発生しました', 5000);
       });
   };
 
@@ -151,7 +185,7 @@ export const Track = memo(function Track({
       onDrop={handleDrop}
       onPointerDown={handleTrackPointerDown}
       onPointerUp={handleTrackPointerUp}
-      onPointerCancel={handleTrackPointerUp}
+      onPointerCancel={handleTrackPointerCancel}
       onContextMenu={(e) => e.preventDefault()}
     >
       {orderedClips.map((clip, index) => {
@@ -198,6 +232,14 @@ export const Track = memo(function Track({
               }),
           },
           {
+            label: 'コピー（Ctrl+C）',
+            onSelect: copySelectedWithFeedback,
+          },
+          {
+            label: '複製（Ctrl+D）',
+            onSelect: duplicateSelectedWithFeedback,
+          },
+          {
             label: '分割（再生位置で）',
             onSelect: () => splitClipWithFeedback(contextMenu.clip.id),
           },
@@ -208,6 +250,10 @@ export const Track = memo(function Track({
           {
             label: '削除',
             onSelect: () => removeClipWithFeedback(contextMenu.clip.id),
+          },
+          {
+            label: '選択を詰めて削除（Shift+Delete）',
+            onSelect: rippleDeleteSelectedWithFeedback,
           },
         ]}
       />

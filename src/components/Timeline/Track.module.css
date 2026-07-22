@@ -1,6 +1,6 @@
 .root {
   position: relative;
-  flex: 1;
+  flex: 1 0 56px;
   border-bottom: 1px solid var(--border-soft);
   min-height: 0;
 }

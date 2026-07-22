@@ -32,6 +32,23 @@
   padding: 8px 0;
 }
 
+.lockedNotice {
+  margin: 0 10px 8px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-panel));
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.clipEditorLocked {
+  opacity: 0.52;
+  filter: saturate(0.5);
+  cursor: not-allowed;
+}
+
 .section {
   padding: 6px 0 12px;
   border-bottom: 1px solid var(--border-soft);

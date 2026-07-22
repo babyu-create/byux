@@ -15,6 +15,7 @@ import {
   prepareNativeExportRequest,
 } from '../../lib/nativeExporter';
 import { clipDuration } from '../../lib/timeline';
+import type { ProjectFps, ProjectResolution } from '../../lib/types';
 import { AccessibleDialog } from '../Common/AccessibleDialog';
 import styles from './ExportDialog.module.css';
 
@@ -168,14 +169,20 @@ function getInitialCoreLabel(): string {
 
 function estimateExportBytes(
   durationSeconds: number,
-  resolution: '720p' | '1080p',
-  fps: 30 | 60,
+  resolution: ProjectResolution,
+  fps: ProjectFps,
   quality: ExportQualityPreset,
 ): number {
+  const pixels =
+    resolution === '2160p'
+      ? 3840 * 2160
+      : resolution === '1440p'
+        ? 2560 * 1440
+        : resolution === '1080p'
+          ? 1920 * 1080
+          : 1280 * 720;
   const baseVideoBitrate =
-    resolution === '1080p'
-      ? (fps === 60 ? 16_000_000 : 10_000_000)
-      : (fps === 60 ? 9_000_000 : 6_000_000);
+    10_000_000 * (pixels / (1920 * 1080)) * (fps / 30) ** 0.72;
   const multiplier = quality === 'high' ? 1.45 : quality === 'compact' ? 0.62 : 1;
   const audioBitrate = quality === 'compact' ? 128_000 : 256_000;
   return Math.ceil(Math.max(1, durationSeconds) * (baseVideoBitrate * multiplier + audioBitrate) / 8);
@@ -232,6 +239,8 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const clips = useProjectStore((s) => s.clips);
   const tracks = useProjectStore((s) => s.tracks);
   const markers = useProjectStore((s) => s.markers);
+  const subtitles = useProjectStore((s) => s.subtitles);
+  const subtitleStyle = useProjectStore((s) => s.subtitleStyle);
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
   const projectFps = useProjectStore((s) => s.fps);
   const projectResolution = useProjectStore((s) => s.resolution);
@@ -241,9 +250,10 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
   const audioDucking = useProjectStore((s) => s.audioDucking);
   const assets = useMediaStore((s) => s.assets);
 
-  const [resolution, setResolution] = useState<'720p' | '1080p'>(projectResolution);
-  const [fps, setFps] = useState<30 | 60>(projectFps);
+  const [resolution, setResolution] = useState<ProjectResolution>(projectResolution);
+  const [fps, setFps] = useState<ProjectFps>(projectFps);
   const [quality, setQuality] = useState<ExportQualityPreset>('recommended');
+  const [useHardwareEncoding, setUseHardwareEncoding] = useState(true);
   const [motionBlur, setMotionBlur] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState(0);
@@ -404,7 +414,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
     setElapsedSec(0);
     try {
       const nativeExport = window.fce?.export;
-      const renderInput = { clips, tracks, assets, markers };
+      const renderInput = { clips, tracks, assets, markers, subtitles, subtitleStyle };
       const renderOptions: ExportOptions = {
         resolution,
         fps,
@@ -485,6 +495,7 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             setStage(progressStage);
             setProgressIndeterminate(true);
           },
+          useHardwareEncoding ? 'auto' : 'software',
         );
         throwIfCancelled();
         releasePreparedNative = prepared.release;
@@ -499,6 +510,13 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           }
           latestSequence = event.sequence;
           setStage(event.stage);
+          if (event.encoderLabel) {
+            setCoreLabel(
+              event.hardwareEncoding
+                ? `GPU / ${event.encoderLabel}`
+                : event.encoderLabel,
+            );
+          }
           if (Number.isFinite(event.overallProgress)) {
             const nextProgress = Math.max(
               0,
@@ -551,6 +569,11 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
           typeof result.size === 'number' ? result.size / (1024 * 1024) : null,
         );
       } else {
+        if (subtitles.length > 0) {
+          throw new Error(
+            '字幕付き動画にはデスクトップ版の長尺処理エンジンが必要です。アプリを再起動して再試行してください。',
+          );
+        }
         const blob = await exportProject(renderInput, {
           ...renderOptions,
           onProgress: ({ stage: progressStage, percent, log }) => {
@@ -765,7 +788,9 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
             {coreLabel ? (
               <span
                 className={
-                  coreLabel.startsWith('MT') || coreLabel.startsWith('Native')
+                  coreLabel.startsWith('MT') ||
+                  coreLabel.startsWith('Native') ||
+                  coreLabel.startsWith('GPU')
                     ? styles.badgeMt
                     : styles.badgeSt
                 }
@@ -845,45 +870,63 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
               <div className={styles.optionRow}>
                 <span className={styles.optionLabel}>解像度</span>
                 <div className={styles.btnGroup}>
-                  <button
-                    type="button"
-                    className={`${styles.optBtn} ${resolution === '720p' ? styles.optActive : ''}`}
-                    onClick={() => setResolution('720p')}
-                    aria-pressed={resolution === '720p'}
-                  >
-                    720p
-                  </button>
-                  <button
-                    type="button"
-                    className={`${styles.optBtn} ${resolution === '1080p' ? styles.optActive : ''}`}
-                    onClick={() => setResolution('1080p')}
-                    aria-pressed={resolution === '1080p'}
-                  >
-                    1080p
-                  </button>
+                  {(['720p', '1080p', '1440p', '2160p'] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`${styles.optBtn} ${resolution === value ? styles.optActive : ''}`}
+                      onClick={() => setResolution(value)}
+                      aria-pressed={resolution === value}
+                    >
+                      {value === '2160p' ? '4K' : value}
+                    </button>
+                  ))}
                 </div>
               </div>
               <div className={styles.optionRow}>
                 <span className={styles.optionLabel}>FPS</span>
                 <div className={styles.btnGroup}>
+                  {([30, 60, 120] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`${styles.optBtn} ${fps === value ? styles.optActive : ''}`}
+                      onClick={() => setFps(value)}
+                      aria-pressed={fps === value}
+                    >
+                      {value}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className={styles.optionRow}>
+                <span className={styles.optionLabel}>書き出し処理</span>
+                <div className={styles.encodingGrid}>
                   <button
                     type="button"
-                    className={`${styles.optBtn} ${fps === 30 ? styles.optActive : ''}`}
-                    onClick={() => setFps(30)}
-                    aria-pressed={fps === 30}
+                    className={`${styles.qualityBtn} ${useHardwareEncoding ? styles.qualityActive : ''}`}
+                    onClick={() => setUseHardwareEncoding(true)}
+                    aria-pressed={useHardwareEncoding}
                   >
-                    30
+                    <strong>GPU自動（おすすめ）</strong>
+                    <small>使えるGPUを実測し、非対応ならCPUへ自動切替</small>
                   </button>
                   <button
                     type="button"
-                    className={`${styles.optBtn} ${fps === 60 ? styles.optActive : ''}`}
-                    onClick={() => setFps(60)}
-                    aria-pressed={fps === 60}
+                    className={`${styles.qualityBtn} ${!useHardwareEncoding ? styles.qualityActive : ''}`}
+                    onClick={() => setUseHardwareEncoding(false)}
+                    aria-pressed={!useHardwareEncoding}
                   >
-                    60
+                    <strong>CPUのみ</strong>
+                    <small>速度より互換性を優先</small>
                   </button>
                 </div>
               </div>
+              {resolution === '2160p' || fps === 120 ? (
+                <div className={styles.renderingHint}>
+                  高解像度・120fpsはネイティブFFmpegで処理します。PC性能と動画の長さにより時間と容量が大きくなります。
+                </div>
+              ) : null}
 
               <div className={styles.optionRow}>
                 <span className={styles.optionLabel}>モーションブラー</span>

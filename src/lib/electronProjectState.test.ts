@@ -1,10 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalProject, shouldClearRecovery } from '../../electron/projectState.cjs';
+import {
+  canonicalProject,
+  maxAutosaveEnvelopeBytes,
+  projectWriteError,
+  shouldClearRecovery,
+} from '../../electron/projectState.cjs';
 
 const project = (name: string, createdAt: string) =>
   JSON.stringify({ version: 1, name, createdAt, clips: [] });
 
 describe('Electron project recovery generation', () => {
+  it('allows JSON envelope escaping overhead beyond exactly twice the project limit', () => {
+    expect(maxAutosaveEnvelopeBytes(16 * 1024 * 1024)).toBe(
+      32 * 1024 * 1024 + 64 * 1024,
+    );
+  });
+
+  it('turns disk-full and permission failures into actionable save messages', () => {
+    expect(projectWriteError({ code: 'ENOSPC' })).toMatch(/空き容量/);
+    expect(projectWriteError({ code: 'EDQUOT' })).toMatch(/空き容量/);
+    expect(projectWriteError({ code: 'EACCES' })).toMatch(/アクセス権/);
+    expect(projectWriteError({ code: 'EROFS' })).toMatch(/別のフォルダー/);
+    expect(projectWriteError({ code: 'UNKNOWN' }, '保存失敗')).toBe('保存失敗');
+  });
+
   it('ignores formatting-only and createdAt differences', () => {
     const compact = project('A', 'old');
     const pretty = JSON.stringify(

@@ -5,9 +5,10 @@ import {
 } from './exporter';
 import { rasterizeOverlays } from './overlayRaster';
 import { clipDuration } from './timeline';
-import type { Clip, KillMarker, MediaAsset, Track } from './types';
+import type { Clip, KillMarker, MediaAsset, SubtitleCue, SubtitleStyle, Track } from './types';
 
 export type NativeExportOptions = Omit<ExportOptions, 'signal' | 'onProgress'>;
+export type NativeEncodingPreference = 'auto' | 'software';
 
 export interface NativeExportAsset {
   id: string;
@@ -27,10 +28,13 @@ export interface NativeExportOverlay {
 
 export interface NativeExportRequest {
   version: 1;
+  encodingPreference: NativeEncodingPreference;
   options: NativeExportOptions;
   clips: Clip[];
   tracks: Track[];
   markers: KillMarker[];
+  subtitles: SubtitleCue[];
+  subtitleStyle?: SubtitleStyle;
   assets: NativeExportAsset[];
   overlays: NativeExportOverlay[];
 }
@@ -213,6 +217,7 @@ export async function prepareNativeExportRequest(
   input: ExportInput,
   options: ExportOptions,
   onProgress?: ExportOptions['onProgress'],
+  encodingPreference: NativeEncodingPreference = 'auto',
 ): Promise<{ request: NativeExportRequest; release(): Promise<void> }> {
   throwIfAborted(options.signal);
   const compatibility = getNativeExportCompatibility(input, options);
@@ -263,21 +268,33 @@ export async function prepareNativeExportRequest(
       let sourceToken = requiresSource ? asset.sourceToken : undefined;
       if (requiresSource && !sourceToken) {
         const registerMediaFile = window.fce?.registerMediaFile;
+        const registerMediaFileFromFile = window.fce?.registerMediaFileFromFile;
         const releaseMediaFile = window.fce?.releaseMediaFile;
-        if (!asset.path || !registerMediaFile || !releaseMediaFile) {
+        if (!releaseMediaFile) {
           throw new Error(
             `素材をネイティブ書き出し用に登録できません: ${asset.name}`,
           );
         }
-        const registered = await registerMediaFile({
-          path: asset.path,
-          name: asset.name,
-          size: asset.size,
-          kind: asset.kind,
-        });
+        let registered:
+          | { token: string; url: string; size: number }
+          | undefined;
+        if (asset.file && registerMediaFileFromFile) {
+          const result = await registerMediaFileFromFile(asset.file, asset.kind);
+          if (result.ok) registered = result.source;
+        }
+        if (!registered && asset.path && registerMediaFile) {
+          registered =
+            (await registerMediaFile({
+              path: asset.path,
+              name: asset.name,
+              size: asset.size,
+              kind: asset.kind,
+            })) ?? undefined;
+        }
         if (!registered?.token) {
           throw new Error(
-            `素材をネイティブ書き出し用に登録できません: ${asset.name}`,
+            `素材との接続が失われました: ${asset.name}。` +
+              '素材一覧から削除し、「ファイルを追加」ボタンで元ファイルを選び直してください',
           );
         }
         sourceToken = registered.token;
@@ -353,10 +370,13 @@ export async function prepareNativeExportRequest(
 
     const request: NativeExportRequest = {
       version: 1,
+      encodingPreference,
       options: serializableOptions(options),
       clips: cloneClips(input.clips),
       tracks: input.tracks.map((track) => ({ ...track })),
       markers: (input.markers ?? []).map((marker) => ({ ...marker })),
+      subtitles: (input.subtitles ?? []).map((cue) => ({ ...cue })),
+      subtitleStyle: input.subtitleStyle ? { ...input.subtitleStyle } : undefined,
       assets: requestAssets,
       overlays,
     };

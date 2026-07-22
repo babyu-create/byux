@@ -45,6 +45,41 @@
   margin-bottom: 10px;
 }
 
+.keyframeTools {
+  display: grid;
+  grid-template-columns: auto 1fr 30px;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 10px;
+}
+
+.keyframeNav {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.keyframeNav button,
+.deleteKeyframe {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: var(--text-dim);
+  background: var(--bg-panel-2);
+}
+
+.keyframeNav button:disabled,
+.deleteKeyframe:disabled { opacity: 0.35; cursor: not-allowed; }
+.keyframeNav span { padding: 0 5px; color: var(--text-muted); font-family: var(--font-mono); font-size: 9px; }
+
+.easingSelect { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 9px; }
+.easingSelect select { min-width: 0; width: 100%; height: 28px; padding: 3px 5px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-panel-2); color: var(--text); font-size: 9px; }
+.deleteKeyframe { border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.deleteKeyframe:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+
 .presetBtn {
   display: inline-flex;
   align-items: center;

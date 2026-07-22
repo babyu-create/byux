@@ -14,10 +14,16 @@ const http = require('node:http');
 const fsStream = require('node:fs');
 const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { autoUpdater } = require('electron-updater');
-const { shouldClearRecovery } = require('./projectState.cjs');
+const {
+  maxAutosaveEnvelopeBytes,
+  projectWriteError,
+  shouldClearRecovery,
+} = require('./projectState.cjs');
+const { clearOwnedCacheFiles } = require('./cacheMaintenance.cjs');
 const {
   NativeExportPlanError,
   buildNativeExportPlan,
@@ -25,13 +31,50 @@ const {
 } = require('./nativeExportPlan.cjs');
 const {
   appendTail,
+  buildHdrToSdrFilter,
+  buildBoundedSegmentPlan,
+  estimatePreviewProxyBytes,
   minimalEnvironment,
+  probeInputDuration,
   probeInputHasAudio,
+  probeInputMediaKind,
+  probeInputVideoColorMetadata,
+  probeInputVideoDecodable,
   resolveFfmpegBinary,
+  runCaptured,
   terminateProcess,
   validateOutput,
   verifyFfmpegBinary,
 } = require('./nativeFfmpeg.cjs');
+const {
+  HARDWARE_VIDEO_ENCODERS,
+  buildHardwareProbeArgs,
+  encoderLabel,
+  isHardwareEncoderFailure,
+} = require('./hardwareEncoding.cjs');
+const { renameWithRetry, syncFileForCommit } = require('./nativeFs.cjs');
+const {
+  VIDEO_EXTENSIONS,
+  AUDIO_EXTENSIONS,
+  mediaKindForPath,
+} = require('./mediaFormats.cjs');
+const {
+  WAVEFORM_PEAKS_PER_SECOND,
+  createWaveformMetadataAccumulator,
+  buildWaveformFfmpegArgs,
+} = require('./nativeWaveform.cjs');
+const {
+  MAX_LOUDNESS_LOG_BYTES,
+  buildLoudnessFfmpegArgs,
+  parseLoudnessSummary,
+} = require('./nativeLoudness.cjs');
+const { buildAssSubtitles } = require('./nativeSubtitles.cjs');
+const { encodeWaveformCache, decodeWaveformCache } = require('./waveformCache.cjs');
+const { sanitizeDiagnosticText, boundedProjectSummary, boundedCrashSummary } = require('./diagnostics.cjs');
+const {
+  canonicalMediaName,
+  revokeMediaRegistrations,
+} = require('./mediaReference.cjs');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -163,10 +206,12 @@ ipcMain.on('app:get-version-sync', (event) => {
 // all path authority in the main process: the renderer may provide contents
 // and a suggested filename, but cannot choose an arbitrary write target.
 const MAX_PROJECT_TEXT_BYTES = 16 * 1024 * 1024;
+const MAX_AUTOSAVE_BYTES = maxAutosaveEnvelopeBytes(MAX_PROJECT_TEXT_BYTES);
 const MAX_RECENT_PROJECTS = 10;
 let currentProjectPath = null;
 let pendingProjectPath = null;
 let pendingProjectSessionId = null;
+let pendingProjectText = null;
 let pendingRecovery = null;
 let documentSessionId = crypto.randomUUID();
 
@@ -196,6 +241,44 @@ function autosavePath() {
 
 function recentProjectsPath() {
   return path.join(app.getPath('userData'), 'recent-projects.json');
+}
+
+const recentDiagnosticEvents = [];
+
+function recordDiagnosticEvent(kind, message) {
+  recentDiagnosticEvents.push({
+    at: new Date().toISOString(),
+    kind: String(kind).slice(0, 64),
+    message: sanitizeDiagnosticText(message),
+  });
+  if (recentDiagnosticEvents.length > 50) recentDiagnosticEvents.shift();
+}
+
+function lastCrashPath() {
+  return path.join(app.getPath('userData'), 'last-main-crash.json');
+}
+
+async function directoryDiagnosticSummary(root, extensionPattern) {
+  try {
+    const names = await fs.readdir(root);
+    let files = 0;
+    let bytes = 0;
+    for (const name of names) {
+      if (!extensionPattern.test(name)) continue;
+      try {
+        const stat = await fs.lstat(path.join(root, name));
+        if (stat.isFile() && !stat.isSymbolicLink()) {
+          files += 1;
+          bytes += stat.size;
+        }
+      } catch {
+        // A concurrently pruned cache entry is omitted from the snapshot.
+      }
+    }
+    return { files, bytes };
+  } catch {
+    return { files: 0, bytes: 0 };
+  }
 }
 
 const atomicWriteQueues = new Map();
@@ -228,7 +311,7 @@ async function atomicWriteText(targetPath, text) {
       await handle.sync();
       await handle.close();
       handle = null;
-      await fs.rename(temporaryPath, targetPath);
+      await renameWithRetry(temporaryPath, targetPath);
     } catch (error) {
       await handle?.close().catch(() => {});
       await fs.rm(temporaryPath, { force: true }).catch(() => {});
@@ -312,6 +395,9 @@ async function clearAutosave() {
 
 ipcMain.handle('project:open-dialog', async (event) => {
   if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  pendingProjectPath = null;
+  pendingProjectSessionId = null;
+  pendingProjectText = null;
   const requestSessionId = documentSessionId;
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Byuxプロジェクトを開く',
@@ -331,6 +417,7 @@ ipcMain.handle('project:open-dialog', async (event) => {
     authorizeProjectMediaRefs(text);
     pendingProjectPath = filePath;
     pendingProjectSessionId = requestSessionId;
+    pendingProjectText = text;
     return { ok: true, canceled: false, path: filePath, text };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -381,7 +468,7 @@ ipcMain.handle('project:save', async (event, payload) => {
         warning,
       };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      return { ok: false, error: projectWriteError(error) };
     }
   } finally {
     activeProjectSaves = Math.max(0, activeProjectSaves - 1);
@@ -404,9 +491,13 @@ ipcMain.handle('project:confirm-open', async (event, openedPath) => {
     return false;
   }
   currentProjectPath = pendingProjectPath;
+  const confirmedProjectText = pendingProjectText;
   pendingProjectPath = null;
   pendingProjectSessionId = null;
+  pendingProjectText = null;
   documentSessionId = crypto.randomUUID();
+  authorizedMediaRefs.clear();
+  if (confirmedProjectText) authorizeProjectMediaRefs(confirmedProjectText);
   isDirty = false;
   await rememberRecentProject(currentProjectPath).catch(() => {});
   return true;
@@ -430,6 +521,9 @@ ipcMain.handle('project:autosave', async (event, payload) => {
       projectPath: currentProjectPath,
       text: payload.text,
     });
+    if (Buffer.byteLength(wrapper, 'utf8') > MAX_AUTOSAVE_BYTES) {
+      return { ok: false, error: '自動保存データが大きすぎます' };
+    }
     if (requestSessionId !== documentSessionId) {
       return { ok: false, stale: true, error: 'プロジェクトが切り替わりました' };
     }
@@ -439,7 +533,10 @@ ipcMain.handle('project:autosave', async (event, payload) => {
     }
     return { ok: true, generation, sessionId: requestSessionId };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return {
+      ok: false,
+      error: projectWriteError(error, '自動保存先に書き込めませんでした'),
+    };
   }
 });
 
@@ -448,7 +545,7 @@ ipcMain.handle('project:check-recovery', async (event) => {
   let recovery;
   try {
     const stat = await fs.stat(autosavePath());
-    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_PROJECT_TEXT_BYTES * 2) {
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_AUTOSAVE_BYTES) {
       await clearAutosave();
       return { ok: true, recovered: false };
     }
@@ -491,7 +588,11 @@ ipcMain.handle('project:check-recovery', async (event) => {
       : null;
   // Keep the recovery file until the renderer has parsed and applied it.
   // A malformed document or renderer crash must not destroy the only copy.
-  pendingRecovery = { id: recoveryId, projectPath: recoveredProjectPath };
+  pendingRecovery = {
+    id: recoveryId,
+    projectPath: recoveredProjectPath,
+    projectText: recovery.text,
+  };
   authorizeProjectMediaRefs(recovery.text);
   return {
     ok: true,
@@ -511,8 +612,10 @@ ipcMain.handle('project:new-session', async (event, payload) => {
   // project while the main process incorrectly considered it safe to close.
   pendingProjectPath = null;
   pendingProjectSessionId = null;
+  pendingProjectText = null;
   pendingRecovery = null;
   documentSessionId = crypto.randomUUID();
+  authorizedMediaRefs.clear();
   try {
     await clearAutosave();
     currentProjectPath = null;
@@ -573,8 +676,11 @@ ipcMain.handle('project:confirm-recovery', async (event, recoveryId) => {
     return false;
   }
   currentProjectPath = pendingRecovery.projectPath;
+  const recoveredProjectText = pendingRecovery.projectText;
   pendingRecovery = null;
   documentSessionId = crypto.randomUUID();
+  authorizedMediaRefs.clear();
+  if (recoveredProjectText) authorizeProjectMediaRefs(recoveredProjectText);
   isDirty = true;
   // Keep the recovered generation until an explicit successful save. If the
   // renderer crashes immediately after restoration, this remains the only
@@ -591,6 +697,9 @@ ipcMain.handle('project:open-recent', async (event, requestedPath) => {
   if (!isTrustedIpcEvent(event) || typeof requestedPath !== 'string') {
     return { ok: false, error: 'untrusted sender' };
   }
+  pendingProjectPath = null;
+  pendingProjectSessionId = null;
+  pendingProjectText = null;
   const requestSessionId = documentSessionId;
   const entries = await loadRecentProjects();
   const entry = entries.find(
@@ -607,6 +716,7 @@ ipcMain.handle('project:open-recent', async (event, requestedPath) => {
     authorizeProjectMediaRefs(text);
     pendingProjectPath = entry.path;
     pendingProjectSessionId = requestSessionId;
+    pendingProjectText = text;
     return { ok: true, canceled: false, path: entry.path, text };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -623,6 +733,133 @@ ipcMain.handle('project:remove-recent', async (event, requestedPath) => {
   return true;
 });
 
+ipcMain.handle('diagnostics:save', async (event, projectSummary) => {
+  if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  const now = new Date();
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: '診断情報を保存',
+    defaultPath: path.join(app.getPath('documents'), `Byux-diagnostics-${stamp}.json`),
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: true, canceled: true };
+  try {
+    const [gpuInfo, waveformCache, proxyCache, ffmpegResult, previousCrash] = await Promise.all([
+      app.getGPUInfo('basic').catch(() => null),
+      directoryDiagnosticSummary(waveformCacheRoot(), /\.wfc$/),
+      directoryDiagnosticSummary(proxyCacheRoot(), /\.mp4$/),
+      ensureNativeFfmpeg()
+        .then(() => runCaptured(ffmpegBinaryPath(), ['-hide_banner', '-version'], { timeoutMs: 10_000 }))
+        .catch(() => null),
+      fs.readFile(lastCrashPath(), 'utf8').then((text) => JSON.parse(text)).catch(() => null),
+    ]);
+    const cpu = os.cpus()[0];
+    const report = {
+      schemaVersion: 1,
+      generatedAt: now.toISOString(),
+      privacy: '素材名、プロジェクト名、ユーザー名、ローカルパス、メディアトークンは収集しません。',
+      app: {
+        name: app.getName(),
+        version: app.getVersion(),
+        packaged: app.isPackaged,
+      },
+      runtime: {
+        electron: process.versions.electron,
+        chromium: process.versions.chrome,
+        node: process.versions.node,
+        platform: process.platform,
+        arch: process.arch,
+        osRelease: os.release(),
+        systemVersion: process.getSystemVersion(),
+        locale: app.getLocale(),
+      },
+      hardware: {
+        cpuModel: sanitizeDiagnosticText(cpu?.model ?? 'unknown'),
+        logicalCpuCount: os.cpus().length,
+        totalMemoryBytes: os.totalmem(),
+        freeMemoryBytes: os.freemem(),
+        gpu: gpuInfo,
+        gpuFeatureStatus: app.getGPUFeatureStatus(),
+      },
+      ffmpeg: {
+        available: Boolean(ffmpegResult && ffmpegResult.code === 0),
+        version: sanitizeDiagnosticText(
+          ffmpegResult ? `${ffmpegResult.stdout}\n${ffmpegResult.stderr}`.split(/\r?\n/)[0] : 'unavailable',
+        ),
+      },
+      project: boundedProjectSummary(projectSummary),
+      caches: { waveform: waveformCache, previewProxy: proxyCache },
+      processes: app.getAppMetrics().map((metric) => ({
+        type: metric.type,
+        cpuPercent: metric.cpu?.percentCPUUsage,
+        memoryKb: metric.memory?.workingSetSize,
+      })),
+      recentEvents: recentDiagnosticEvents,
+      previousCrash: boundedCrashSummary(previousCrash),
+    };
+    const targetPath = result.filePath.toLowerCase().endsWith('.json')
+      ? result.filePath
+      : `${result.filePath}.json`;
+    await atomicWriteText(targetPath, JSON.stringify(report, null, 2));
+    return { ok: true, canceled: false, path: targetPath };
+  } catch (error) {
+    recordDiagnosticEvent('diagnostics-save-failed', error instanceof Error ? error.message : error);
+    return { ok: false, error: '診断情報を保存できませんでした' };
+  }
+});
+
+async function cacheSummary() {
+  const [waveform, previewProxy] = await Promise.all([
+    directoryDiagnosticSummary(waveformCacheRoot(), /^[0-9a-f]{64}\.wfc$/i),
+    directoryDiagnosticSummary(proxyCacheRoot(), /^[0-9a-f]{64}\.mp4$/i),
+  ]);
+  return { waveform, previewProxy };
+}
+
+ipcMain.handle('cache:get-summary', async (event) => {
+  if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  return { ok: true, summary: await cacheSummary() };
+});
+
+ipcMain.handle('cache:clear-unused', async (event) => {
+  if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  if (pendingProxyJobs.size > 0 || pendingWaveformJobs.size > 0) {
+    return {
+      ok: false,
+      busy: true,
+      error: '素材の変換・波形生成が終わってから再試行してください',
+    };
+  }
+  try {
+    const proxyRoot = path.resolve(proxyCacheRoot());
+    const protectedProxyPaths = [...registeredMedia.values()]
+      .map((entry) => path.resolve(entry.path))
+      .filter((entryPath) => path.dirname(entryPath) === proxyRoot);
+    const [waveform, previewProxy] = await Promise.all([
+      clearOwnedCacheFiles(
+        waveformCacheRoot(),
+        /^[0-9a-f]{64}\.wfc$/i,
+      ),
+      clearOwnedCacheFiles(
+        proxyRoot,
+        /^[0-9a-f]{64}\.mp4$/i,
+        protectedProxyPaths,
+      ),
+    ]);
+    return {
+      ok: true,
+      removed: { waveform, previewProxy },
+      summary: await cacheSummary(),
+    };
+  } catch (error) {
+    recordDiagnosticEvent(
+      'cache-clear-failed',
+      error instanceof Error ? error.message : error,
+    );
+    return { ok: false, error: 'キャッシュを削除できませんでした' };
+  }
+});
+
 // --- Native export destinations --------------------------------------------
 // Rendered MP4 data can be hundreds of MB. The renderer streams bounded chunks
 // to an opaque main-process token instead of cloning one giant ArrayBuffer over
@@ -635,8 +872,11 @@ const MAX_NATIVE_OVERLAY_DIMENSION = 8_192;
 const MAX_NATIVE_OVERLAY_DECODED_BYTES = 512 * 1024 * 1024;
 const pendingExports = new Map();
 const pendingProxyJobs = new Map();
+const pendingWaveformJobs = new Map();
+const pendingLoudnessJobs = new Map();
 let lastExportPath = null;
 let ffmpegCapabilityPromise = null;
+const hardwareEncoderProbeCache = new Map();
 let exportJournalOperation = Promise.resolve();
 
 function exportJournalPath() {
@@ -666,7 +906,7 @@ async function writeExportJournalSnapshot(snapshot) {
       encoding: 'utf8',
       mode: 0o600,
     });
-    await fs.rename(temporary, target);
+    await renameWithRetry(temporary, target);
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => {});
   }
@@ -771,6 +1011,61 @@ function ensureNativeFfmpeg() {
     });
   }
   return ffmpegCapabilityPromise;
+}
+
+const HARDWARE_PROBE_CACHE_MS = 5 * 60 * 1000;
+
+async function findHardwareVideoEncoder(binaryPath, width, height, fps, entry) {
+  const key = `${width}x${height}@${fps}`;
+  const cached = hardwareEncoderProbeCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const promise = (async () => {
+    for (const encoder of HARDWARE_VIDEO_ENCODERS) {
+      if (entry?.cancelled) throw new Error('書き出しが中止されました');
+      try {
+        let probeChild = null;
+        const result = await runCaptured(
+          binaryPath,
+          buildHardwareProbeArgs(encoder.id, width, height, fps),
+          {
+            timeoutMs: 12_000,
+            onSpawn(child) {
+              probeChild = child;
+              if (entry) entry.child = child;
+            },
+          },
+        );
+        if (entry?.child === probeChild) entry.child = null;
+        if (entry?.cancelled) throw new Error('書き出しが中止されました');
+        if (result.code === 0) return encoder;
+      } catch (error) {
+        if (entry?.cancelled) throw error;
+        if (entry) entry.child = null;
+        // A missing driver, unsupported adapter, or timed-out device is an
+        // ordinary capability miss. Continue to the next vendor backend.
+      }
+    }
+    return null;
+  })();
+  hardwareEncoderProbeCache.set(key, {
+    expiresAt: Date.now() + HARDWARE_PROBE_CACHE_MS,
+    promise,
+  });
+  void promise.catch(() => {
+    if (hardwareEncoderProbeCache.get(key)?.promise === promise) {
+      hardwareEncoderProbeCache.delete(key);
+    }
+  });
+  return promise;
+}
+
+function nativeEncodingPreference(request) {
+  const preference = request?.encodingPreference ?? 'auto';
+  if (preference !== 'auto' && preference !== 'software') {
+    throw new NativeExportPlanError('INVALID_OPTIONS', '書き出し高速化設定が不正です');
+  }
+  return preference;
 }
 
 function sendNativeExportEvent(token, payload) {
@@ -883,9 +1178,12 @@ async function failExportEntry(token, entry) {
 }
 
 function resetDocumentSession() {
+  revokeMediaRegistrations(registeredMedia);
+  authorizedMediaRefs.clear();
   currentProjectPath = null;
   pendingProjectPath = null;
   pendingProjectSessionId = null;
+  pendingProjectText = null;
   pendingRecovery = null;
   documentSessionId = crypto.randomUUID();
   isDirty = false;
@@ -895,6 +1193,8 @@ function abandonAllExports() {
   return Promise.all([
     ...[...pendingExports.keys()].map((token) => abandonExport(token)),
     ...[...pendingProxyJobs.keys()].map((token) => abandonProxyJob(token)),
+    ...[...pendingWaveformJobs.keys()].map((token) => abandonWaveformJob(token)),
+    ...[...pendingLoudnessJobs.keys()].map((token) => abandonLoudnessJob(token)),
   ]);
 }
 
@@ -907,7 +1207,11 @@ async function confirmDiscardBeforeClose() {
     // is ignored, but can no longer overwrite a project file.
     cancelPendingCloseSaveRequest();
   }
-  const hasExport = pendingExports.size > 0 || pendingProxyJobs.size > 0;
+  const hasExport =
+    pendingExports.size > 0 ||
+    pendingProxyJobs.size > 0 ||
+    pendingWaveformJobs.size > 0 ||
+    pendingLoudnessJobs.size > 0;
   const hasChanges = isDirty;
   if (!hasExport && !hasChanges && !autosaveCleanupRequired) return true;
   if (!hasExport && !hasChanges && autosaveCleanupRequired) {
@@ -922,11 +1226,11 @@ async function confirmDiscardBeforeClose() {
   }
   const buttons = hasChanges
     ? [
-        hasExport ? '保存して書き出しを中止・終了' : '保存して終了',
-        hasExport ? '書き出しと変更を破棄して終了' : '保存せずに終了',
+        hasExport ? '保存して動画処理を中止・終了' : '保存して終了',
+        hasExport ? '動画処理と変更を破棄して終了' : '保存せずに終了',
         'キャンセル',
       ]
-    : ['書き出しを中止して終了', 'キャンセル'];
+    : ['動画処理を中止して終了', 'キャンセル'];
   const choice = await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     buttons,
@@ -936,13 +1240,13 @@ async function confirmDiscardBeforeClose() {
       hasExport && hasChanges
         ? '書き出し中で、未保存の変更があります'
         : hasExport
-          ? '動画を書き出しています'
+          ? '動画処理を実行しています'
           : '未保存の変更があります',
     message: hasChanges
       ? '変更を保存してから終了できます。'
       : '書き出しを中止してアプリを終了しますか？',
     detail: hasExport
-      ? '作成途中のファイルは削除されます。'
+      ? '実行中の解析・変換・書き出しを安全に停止します。'
       : '先に「保存」(Ctrl+S) を実行すると変更を残せます。',
   });
   if (choice.response === (hasChanges ? 2 : 1)) return false;
@@ -1099,6 +1403,7 @@ async function leaseNativeSources(request, binaryPath, entry) {
       sources.set(asset.id, {
         path: source.path,
         hasAudio,
+        hdrToneMap: source.hdrToneMap ?? null,
       });
     }
     return sources;
@@ -1164,6 +1469,30 @@ async function writeNativeOverlayFiles(request, entry) {
   return result;
 }
 
+async function writeNativeSubtitleFile(request, entry, width, height) {
+  const cues = request?.subtitles;
+  if (cues === undefined || (Array.isArray(cues) && cues.length === 0)) return null;
+  let content;
+  try {
+    content = buildAssSubtitles(cues, request?.subtitleStyle, width, height);
+  } catch (error) {
+    throw new NativeExportPlanError(
+      'INVALID_SUBTITLES',
+      error instanceof Error ? error.message : '字幕が不正です',
+    );
+  }
+  if (Buffer.byteLength(content, 'utf8') > 20 * 1024 * 1024) {
+    throw new NativeExportPlanError('INVALID_SUBTITLES', '字幕データが大きすぎます');
+  }
+  const subtitlePath = path.join(entry.workDir, 'subtitles.ass');
+  await fs.writeFile(subtitlePath, content, {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600,
+  });
+  return subtitlePath;
+}
+
 function redactNativeError(error, entry) {
   if (error instanceof NativeExportPlanError) {
     return { code: error.code, message: error.message, details: error.details };
@@ -1180,10 +1509,21 @@ function redactNativeError(error, entry) {
   if (entry.cancelled) {
     return { code: 'CANCELLED', message: '書き出しを中止しました' };
   }
-  if (/Permission denied|EACCES|EPERM/i.test(diagnostic)) {
+  if (/Permission denied|EACCES|EPERM|EBUSY/i.test(diagnostic)) {
     return {
       code: 'PERMISSION',
-      message: '保存先へ書き込めません。保存先またはアクセス権を確認してください',
+      message:
+        entry.state === 'committing'
+          ? '完成ファイルの確定が一時的に拒否されました。少し待って再試行してください'
+          : '書き出し中のファイル操作が拒否されました。素材と保存先のアクセス権を確認してください',
+      details: [
+        `phase=${entry.state}`,
+        `errorCode=${
+          error && typeof error === 'object' && typeof error.code === 'string'
+            ? error.code
+            : 'unknown'
+        }`,
+      ],
     };
   }
   let message = error instanceof Error ? error.message : 'ネイティブ書き出しに失敗しました';
@@ -1286,6 +1626,35 @@ function waitForNativeChild(entry, child, totalDuration) {
   });
 }
 
+async function executeNativePlan(entry, binaryPath, plan, stage) {
+  entry.runtimeError = null;
+  sendNativeExportEvent(entry.token, {
+    phase: 'preparing',
+    stage,
+    overallProgress: entry.progress ?? 0,
+    totalSeconds: plan.totalDuration,
+    encoderLabel: encoderLabel(plan.videoEncoder),
+    hardwareEncoding: plan.videoEncoder !== 'libx264',
+  });
+  const child = spawn(binaryPath, plan.args, {
+    shell: false,
+    windowsHide: true,
+    detached: false,
+    cwd: entry.workDir,
+    stdio: ['ignore', 'ignore', 'pipe', 'pipe'],
+    env: minimalEnvironment(),
+  });
+  entry.child = child;
+  try {
+    const result = await waitForNativeChild(entry, child, plan.totalDuration);
+    if (entry.runtimeError) throw entry.runtimeError;
+    if (entry.cancelled) throw new Error('書き出しが中止されました');
+    return result;
+  } finally {
+    entry.child = null;
+  }
+}
+
 async function runNativeExport(token, entry, request) {
   let cleanupError = null;
   try {
@@ -1299,6 +1668,7 @@ async function runNativeExport(token, entry, request) {
     });
     await ensureNativeFfmpeg();
     if (entry.cancelled) throw new Error('書き出しが中止されました');
+    const preference = nativeEncodingPreference(request);
 
     const binaryPath = ffmpegBinaryPath();
     const sourceByAssetId = await leaseNativeSources(request, binaryPath, entry);
@@ -1310,12 +1680,43 @@ async function runNativeExport(token, entry, request) {
     await persistExportJournal();
     if (entry.cancelled) throw new Error('書き出しが中止されました');
     const overlayPathByClipId = await writeNativeOverlayFiles(request, entry);
-    const plan = buildNativeExportPlan(
+    const softwarePlan = buildNativeExportPlan(
       request,
       sourceByAssetId,
       overlayPathByClipId,
       entry.temporaryPath,
     );
+    await writeNativeSubtitleFile(
+      request,
+      entry,
+      softwarePlan.width,
+      softwarePlan.height,
+    );
+    let hardwareEncoder = null;
+    if (preference === 'auto') {
+      sendNativeExportEvent(token, {
+        phase: 'preflight',
+        stage: 'このPCで使えるGPUエンコーダーを確認しています',
+        overallProgress: 0,
+      });
+      hardwareEncoder = await findHardwareVideoEncoder(
+        binaryPath,
+        softwarePlan.width,
+        softwarePlan.height,
+        softwarePlan.fps,
+        entry,
+      );
+      if (entry.cancelled) throw new Error('書き出しが中止されました');
+    }
+    let plan = hardwareEncoder
+      ? buildNativeExportPlan(
+          request,
+          sourceByAssetId,
+          overlayPathByClipId,
+          entry.temporaryPath,
+          hardwareEncoder.id,
+        )
+      : softwarePlan;
     await fs.writeFile(path.join(entry.workDir, 'filter-complex.txt'), plan.filterGraph, {
       encoding: 'utf8',
       flag: 'wx',
@@ -1325,25 +1726,30 @@ async function runNativeExport(token, entry, request) {
 
     entry.state = 'encoding';
     entry.started = true;
-    sendNativeExportEvent(token, {
-      phase: 'preparing',
-      stage: 'ネイティブFFmpegを起動しています',
-      overallProgress: 0,
-      totalSeconds: plan.totalDuration,
-    });
-    const child = spawn(binaryPath, plan.args, {
-      shell: false,
-      windowsHide: true,
-      detached: false,
-      cwd: entry.workDir,
-      stdio: ['ignore', 'ignore', 'pipe', 'pipe'],
-      env: minimalEnvironment(),
-    });
-    entry.child = child;
-    const result = await waitForNativeChild(entry, child, plan.totalDuration);
-    entry.child = null;
-    if (entry.runtimeError) throw entry.runtimeError;
-    if (entry.cancelled) throw new Error('書き出しが中止されました');
+    let result = await executeNativePlan(
+      entry,
+      binaryPath,
+      plan,
+      hardwareEncoder
+        ? `GPU高速書き出しを開始しています（${hardwareEncoder.label}）`
+        : 'CPU書き出しを開始しています',
+    );
+    if (
+      result.code !== 0 &&
+      hardwareEncoder &&
+      isHardwareEncoderFailure(entry.stderrTail ?? '', hardwareEncoder.id)
+    ) {
+      await fs.rm(entry.temporaryPath, { force: true });
+      if (entry.cancelled) throw new Error('書き出しが中止されました');
+      entry.stderrTail = '';
+      plan = softwarePlan;
+      result = await executeNativePlan(
+        entry,
+        binaryPath,
+        plan,
+        'GPUを利用できないためCPUで安全に再試行しています',
+      );
+    }
     if (result.code !== 0) {
       throw new Error(`FFmpegが終了コード ${String(result.code)} で停止しました`);
     }
@@ -1364,15 +1770,14 @@ async function runNativeExport(token, entry, request) {
     });
     if (entry.cancelled) throw new Error('書き出しが中止されました');
 
-    const outputHandle = await fs.open(entry.temporaryPath, 'r');
-    try {
-      await outputHandle.sync();
-    } finally {
-      await outputHandle.close();
-    }
+    await syncFileForCommit(entry.temporaryPath, {
+      shouldAbort: () => entry.cancelled,
+    });
     if (entry.cancelled) throw new Error('書き出しが中止されました');
     entry.state = 'committing';
-    await fs.rename(entry.temporaryPath, entry.path);
+    await renameWithRetry(entry.temporaryPath, entry.path, {
+      shouldAbort: () => entry.cancelled,
+    });
     entry.committed = true;
     entry.state = 'committed';
     lastExportPath = entry.path;
@@ -1416,6 +1821,7 @@ async function runNativeExport(token, entry, request) {
       releaseExportSourceLeases(entry);
     }
     const failure = redactNativeError(error, entry);
+    recordDiagnosticEvent('native-export-failed', `${failure.code}: ${failure.message}`);
     sendNativeExportEvent(token, {
       phase: cleanupError ? 'cleanup-error' : entry.cancelled ? 'cancelled' : 'failed',
       stage: cleanupError ? '一時ファイルを削除できませんでした' : failure.message,
@@ -1652,7 +2058,10 @@ ipcMain.handle('export:write-chunk', async (event, token, offset, chunk, final) 
         assertActiveExport(token, entry);
         // Keep an existing export intact until every byte of the new one has
         // landed and been fsynced. rename replaces it only at successful commit.
-        await fs.rename(entry.temporaryPath, entry.path);
+        await renameWithRetry(entry.temporaryPath, entry.path, {
+          shouldAbort: () =>
+            entry.cancelled || pendingExports.get(token) !== entry,
+        });
         entry.committed = true;
         entry.state = 'committed';
         pendingExports.delete(token);
@@ -1689,44 +2098,60 @@ ipcMain.handle('export:show-in-folder', (event) => {
 // an opaque token + streaming custom-protocol URL. Full bytes are read in
 // bounded chunks only when an explicit operation (export/beat detection) needs
 // them.
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi']);
-const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac']);
 const registeredMedia = new Map();
 const authorizedMediaRefs = new Map();
 const MAX_MEDIA_CHUNK_BYTES = 8 * 1024 * 1024;
 
-function mediaApprovalKey(filePath, name, size) {
+function registeredMediaUrl(token) {
+  if (!isDev && prodEntryUrl) {
+    return new URL(`media/${token}`, prodEntryUrl).href;
+  }
+  return `fce-media://asset/${token}`;
+}
+
+function mediaApprovalKey(filePath, size) {
   const normalized = path.resolve(filePath);
   const platformPath = process.platform === 'win32'
     ? normalized.toLowerCase()
     : normalized;
-  return `${platformPath}\u0000${name}\u0000${size}`;
+  return `${platformPath}\u0000${size}`;
 }
 
 function authorizeMediaRef(ref) {
+  const canonicalName = canonicalMediaName(ref?.path);
   if (
     !ref ||
     typeof ref.path !== 'string' ||
     !path.isAbsolute(ref.path) ||
+    !canonicalName ||
     typeof ref.name !== 'string' ||
     ref.name.length === 0 ||
-    ref.name.length > 1_024 ||
+    ref.name.length > 32_768 ||
     typeof ref.size !== 'number' ||
     !Number.isSafeInteger(ref.size) ||
-    ref.size < 0 ||
-    path.basename(ref.path).toLowerCase() !== ref.name.toLowerCase()
+    ref.size < 0
   ) {
     return false;
   }
   const ext = path.extname(ref.path).toLowerCase();
-  if (!VIDEO_EXTENSIONS.has(ext) && !AUDIO_EXTENSIONS.has(ext)) return false;
+  const extensionKind = VIDEO_EXTENSIONS.has(ext)
+    ? 'video'
+    : AUDIO_EXTENSIONS.has(ext)
+      ? 'audio'
+      : null;
+  if (
+    ref.kind !== undefined &&
+    (ref.kind !== 'video' && ref.kind !== 'audio' ||
+      (extensionKind !== null && extensionKind !== ref.kind))
+  ) return false;
   for (const [key, approval] of authorizedMediaRefs) {
     if (approval.sessionId !== documentSessionId) authorizedMediaRefs.delete(key);
   }
-  const key = mediaApprovalKey(ref.path, ref.name, ref.size);
+  const key = mediaApprovalKey(ref.path, ref.size);
   if (!authorizedMediaRefs.has(key) && authorizedMediaRefs.size >= 4_096) return false;
   authorizedMediaRefs.set(key, {
     sessionId: documentSessionId,
+    name: canonicalName,
   });
   return true;
 }
@@ -1744,42 +2169,253 @@ function authorizeProjectMediaRefs(text) {
 }
 
 ipcMain.on('media:authorize-file-sync', (event, ref) => {
-  event.returnValue = false;
-  if (!isTrustedIpcEvent(event) || !authorizeMediaRef(ref)) return;
+  event.returnValue = { ok: false };
+  if (!isTrustedIpcEvent(event)) return;
   try {
+    const canonicalName = canonicalMediaName(ref?.path);
+    if (
+      !canonicalName ||
+      isDangerousWindowsDevicePath(ref.path) ||
+      (ref.kind !== undefined && ref.kind !== 'video' && ref.kind !== 'audio')
+    ) return;
     const stat = fsStream.statSync(ref.path);
-    if (!stat.isFile() || stat.size !== ref.size) {
-      authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.name, ref.size));
-      return;
-    }
-    event.returnValue = true;
-  } catch {
-    authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.name, ref.size));
-  }
+    if (!stat.isFile()) return;
+    const authoritativeRef = {
+      path: ref.path,
+      name: canonicalName,
+      size: stat.size,
+      ...(ref.kind ? { kind: ref.kind } : {}),
+    };
+    if (!authorizeMediaRef(authoritativeRef)) return;
+    event.returnValue = {
+      ok: true,
+      name: canonicalName,
+      size: stat.size,
+    };
+  } catch {}
 });
 
-function mediaExtensionMatchesKind(filePath, kind) {
-  const ext = path.extname(filePath).toLowerCase();
-  return kind === 'video' ? VIDEO_EXTENSIONS.has(ext) : AUDIO_EXTENSIONS.has(ext);
+function registerResolvedMedia(
+  realPath,
+  stat,
+  kind,
+  name,
+  compatibility = {},
+) {
+  const requiresPreviewProxy = compatibility.requiresPreviewProxy === true;
+  const token = crypto.randomUUID();
+  registeredMedia.set(token, {
+    path: realPath,
+    size: stat.size,
+    kind,
+    name,
+    dev: stat.dev,
+    ino: stat.ino,
+    mtimeMs: stat.mtimeMs,
+    leases: 0,
+    releaseRequested: false,
+    requiresPreviewProxy: requiresPreviewProxy === true,
+    requiresRepairProxy: compatibility.requiresRepairProxy === true,
+    hdrToneMap:
+      compatibility.hdrToneMap === 'pq' || compatibility.hdrToneMap === 'hlg'
+        ? compatibility.hdrToneMap
+        : null,
+  });
+  return {
+    token,
+    url: registeredMediaUrl(token),
+    size: stat.size,
+    kind,
+    name,
+    requiresPreviewProxy: requiresPreviewProxy === true,
+  };
 }
 
-ipcMain.handle('media:register-file', async (event, ref) => {
-  if (!isTrustedIpcEvent(event)) return null;
+async function resolveMediaKind(realPath, requestedKind = null) {
+  const extensionKind = mediaKindForPath(realPath);
+  if (extensionKind) {
+    return requestedKind && extensionKind !== requestedKind ? null : extensionKind;
+  }
+  await ensureNativeFfmpeg();
+  const probedKind = await probeInputMediaKind(ffmpegBinaryPath(), realPath);
+  return requestedKind && probedKind !== requestedKind ? null : probedKind;
+}
+
+async function inspectVideoCompatibility(realPath, kind) {
+  if (kind !== 'video') {
+    return {
+      requiresPreviewProxy: false,
+      requiresRepairProxy: false,
+      hdrToneMap: null,
+    };
+  }
+  try {
+    await ensureNativeFfmpeg();
+    const binaryPath = ffmpegBinaryPath();
+    const [decodable, colorMetadata] = await Promise.all([
+      probeInputVideoDecodable(binaryPath, realPath).catch(() => false),
+      probeInputVideoColorMetadata(binaryPath, realPath).catch(() => null),
+    ]);
+    const hdrToneMap = colorMetadata?.toneMap ?? null;
+    return {
+      requiresPreviewProxy: !decodable || hdrToneMap !== null,
+      requiresRepairProxy: !decodable,
+      hdrToneMap,
+    };
+  } catch {
+    // A timeout or probe startup failure must not send an unverified source
+    // into Chromium. The proxy path will surface a useful FFmpeg error if the
+    // bundled decoder is genuinely unavailable.
+    return {
+      requiresPreviewProxy: true,
+      requiresRepairProxy: true,
+      hdrToneMap: null,
+    };
+  }
+}
+
+/**
+ * Register a path that the sandboxed preload obtained from Electron's
+ * webUtils.getPathForFile(File). Renderer File metadata is deliberately not
+ * trusted here: Chromium can expose stale metadata while a capture is being
+ * finalized, and a synchronous renderer-metadata gate is brittle for large
+ * disk-backed videos. The main process re-resolves and stats the selected path.
+ */
+ipcMain.handle('media:register-selected-file', async (event, ref) => {
+  if (!isTrustedIpcEvent(event)) {
+    return { ok: false, code: 'NOT_AUTHORIZED' };
+  }
   if (
     typeof ref !== 'object' ||
     ref === null ||
     typeof ref.path !== 'string' ||
+    !canonicalMediaName(ref.path) ||
+    (ref.kind !== undefined && ref.kind !== 'video' && ref.kind !== 'audio') ||
+    isDangerousWindowsDevicePath(ref.path)
+  ) {
+    return { ok: false, code: 'NOT_AUTHORIZED' };
+  }
+  try {
+    const realPath = await fs.realpath(ref.path);
+    if (isDangerousWindowsDevicePath(realPath)) {
+      return { ok: false, code: 'NOT_AUTHORIZED' };
+    }
+    const stat = await fs.stat(realPath);
+    if (!stat.isFile()) return { ok: false, code: 'REGISTRATION_FAILED' };
+    const kind = await resolveMediaKind(realPath, ref.kind ?? null);
+    if (!kind) return { ok: false, code: 'INVALID_KIND' };
+    const name = path.basename(realPath);
+    const compatibility = await inspectVideoCompatibility(realPath, kind);
+    return {
+      ok: true,
+      source: {
+        ...registerResolvedMedia(realPath, stat, kind, name, compatibility),
+        path: realPath,
+        name,
+        kind,
+      },
+    };
+  } catch {
+    return { ok: false, code: 'REGISTRATION_FAILED' };
+  }
+});
+
+ipcMain.handle('media:select-files', async (event, options) => {
+  if (!isTrustedIpcEvent(event)) {
+    return { sources: [], errors: ['安全でない画面からの操作を拒否しました'], canceled: false };
+  }
+  const requestedKind =
+    options?.kind === 'video' || options?.kind === 'audio'
+      ? options.kind
+      : null;
+  const multiple = options?.multiple !== false;
+  const extensions = requestedKind === 'video'
+    ? [...VIDEO_EXTENSIONS].map((ext) => ext.slice(1))
+    : requestedKind === 'audio'
+      ? [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1))
+      : [...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS].map((ext) => ext.slice(1));
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: requestedKind === 'audio' ? '音声ファイルを追加' : '動画・音声ファイルを追加',
+    properties: multiple ? ['openFile', 'multiSelections'] : ['openFile'],
+    filters: [
+      {
+        name: requestedKind === 'video'
+          ? '動画'
+          : requestedKind === 'audio'
+            ? '音声'
+            : '動画・音声',
+        extensions,
+      },
+      { name: 'すべてのファイル', extensions: ['*'] },
+    ],
+  });
+  if (result.canceled) return { sources: [], errors: [], canceled: true };
+
+  const sources = [];
+  const errors = [];
+  for (const selectedPath of result.filePaths) {
+    const displayName = path.basename(selectedPath).slice(0, 1_024) || '選択したファイル';
+    try {
+      if (isDangerousWindowsDevicePath(selectedPath)) {
+        errors.push(`${displayName}: 安全でないパスのため追加できません`);
+        continue;
+      }
+      const realPath = await fs.realpath(selectedPath);
+      if (isDangerousWindowsDevicePath(realPath)) {
+        errors.push(`${displayName}: 安全でないパスのため追加できません`);
+        continue;
+      }
+      const stat = await fs.stat(realPath);
+      if (!stat.isFile()) {
+        errors.push(`${displayName}: 通常のファイルではありません`);
+        continue;
+      }
+      const kind = await resolveMediaKind(realPath, requestedKind);
+      if (!kind) {
+        errors.push(
+          `${displayName}: ${requestedKind === 'video' ? '動画' : requestedKind === 'audio' ? '音声' : '音声・映像'}ストリームを確認できません`,
+        );
+        continue;
+      }
+      const name = path.basename(realPath);
+      const compatibility = await inspectVideoCompatibility(realPath, kind);
+      const registered = registerResolvedMedia(
+        realPath,
+        stat,
+        kind,
+        name,
+        compatibility,
+      );
+      sources.push({
+        ...registered,
+        path: realPath,
+        name,
+        kind,
+      });
+    } catch {
+      errors.push(`${displayName}: ファイルを読み取れません`);
+    }
+  }
+  return { sources, errors, canceled: false };
+});
+
+ipcMain.handle('media:register-file', async (event, ref) => {
+  if (!isTrustedIpcEvent(event)) return null;
+  const canonicalName = canonicalMediaName(ref?.path);
+  if (
+    typeof ref !== 'object' ||
+    ref === null ||
+    typeof ref.path !== 'string' ||
+    !canonicalName ||
     typeof ref.name !== 'string' ||
     typeof ref.size !== 'number' ||
     !Number.isSafeInteger(ref.size) ||
     ref.size < 0 ||
-    (ref.kind !== 'video' && ref.kind !== 'audio') ||
-    !mediaExtensionMatchesKind(ref.path, ref.kind) ||
-    path.basename(ref.path).toLowerCase() !== ref.name.toLowerCase()
+    (ref.kind !== undefined && ref.kind !== 'video' && ref.kind !== 'audio')
   ) {
     return null;
   }
-  const approvalKey = mediaApprovalKey(ref.path, ref.name, ref.size);
+  const approvalKey = mediaApprovalKey(ref.path, ref.size);
   const approval = authorizedMediaRefs.get(approvalKey);
   if (
     !approval ||
@@ -1794,26 +2430,394 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     if (isDangerousWindowsDevicePath(realPath)) return null;
     const stat = await fs.stat(realPath);
     if (!stat.isFile() || stat.size !== ref.size) return null;
-    const token = crypto.randomUUID();
-    registeredMedia.set(token, {
-      path: realPath,
-      size: stat.size,
-      kind: ref.kind,
-      name: ref.name,
-      dev: stat.dev,
-      ino: stat.ino,
-      mtimeMs: stat.mtimeMs,
-      leases: 0,
-      releaseRequested: false,
-    });
-    return {
-      token,
-      url: `fce-media://asset/${token}`,
-      size: stat.size,
-    };
+    const kind = await resolveMediaKind(realPath, ref.kind ?? null);
+    if (!kind || (ref.kind && kind !== ref.kind)) return null;
+    const compatibility = await inspectVideoCompatibility(realPath, kind);
+    return registerResolvedMedia(
+      realPath,
+      stat,
+      kind,
+      approval.name ?? canonicalName,
+      compatibility,
+    );
   } catch {
     return null;
   }
+});
+
+function releaseWaveformSourceLease(job) {
+  if (job.sourceLeaseReleased) return;
+  job.sourceLeaseReleased = true;
+  releaseRegisteredMediaLease(job.sourceToken);
+}
+
+const MAX_WAVEFORM_CACHE_BYTES = 512 * 1024 * 1024;
+const MAX_WAVEFORM_CACHE_FILES = 512;
+
+function waveformCacheRoot() {
+  return path.join(app.getPath('userData'), 'waveforms-v1');
+}
+
+function waveformCacheKey(source) {
+  return crypto
+    .createHash('sha256')
+    .update(`${source.path}\u0000${source.size}\u0000${source.mtimeMs}`)
+    .digest('hex');
+}
+
+async function readWaveformCache(source) {
+  const cachePath = path.join(waveformCacheRoot(), `${waveformCacheKey(source)}.wfc`);
+  try {
+    const stat = await fs.lstat(cachePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024 * 1024) {
+      throw new Error('invalid waveform cache file');
+    }
+    const decoded = decodeWaveformCache(await fs.readFile(cachePath));
+    if (!decoded || decoded.peaksPerSecond !== WAVEFORM_PEAKS_PER_SECOND) {
+      throw new Error('invalid waveform cache data');
+    }
+    const now = new Date();
+    await fs.utimes(cachePath, now, now).catch(() => {});
+    return decoded;
+  } catch {
+    await fs.rm(cachePath, { force: true }).catch(() => {});
+    return null;
+  }
+}
+
+async function pruneWaveformCache() {
+  const root = waveformCacheRoot();
+  let names;
+  try {
+    names = await fs.readdir(root);
+  } catch {
+    return;
+  }
+  const entries = [];
+  for (const name of names) {
+    if (!/^[a-f0-9]{64}\.wfc$/.test(name)) continue;
+    const filePath = path.join(root, name);
+    try {
+      const stat = await fs.lstat(filePath);
+      if (stat.isFile() && !stat.isSymbolicLink()) {
+        entries.push({ filePath, size: stat.size, mtimeMs: stat.mtimeMs });
+      }
+    } catch {
+      // A concurrently removed cache entry needs no further work.
+    }
+  }
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let totalBytes = entries.reduce((total, entry) => total + entry.size, 0);
+  let fileCount = entries.length;
+  for (const entry of entries) {
+    if (totalBytes <= MAX_WAVEFORM_CACHE_BYTES && fileCount <= MAX_WAVEFORM_CACHE_FILES) break;
+    try {
+      await fs.rm(entry.filePath, { force: true });
+      totalBytes -= entry.size;
+      fileCount -= 1;
+    } catch {
+      // Antivirus can temporarily hold a cache file; a later pass retries it.
+    }
+  }
+}
+
+async function writeWaveformCache(source, peaks) {
+  const root = waveformCacheRoot();
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  const destination = path.join(root, `${waveformCacheKey(source)}.wfc`);
+  const temporary = path.join(root, `${crypto.randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(
+      temporary,
+      encodeWaveformCache(peaks, WAVEFORM_PEAKS_PER_SECOND),
+      { flag: 'wx', mode: 0o600 },
+    );
+    await fs.rename(temporary, destination);
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+  }
+  await pruneWaveformCache();
+}
+
+function waitForWaveformChild(job, accumulator) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(result);
+    };
+    job.child.stdout.on('data', (chunk) => {
+      if (job.runtimeError) return;
+      try {
+        accumulator.push(chunk);
+      } catch (error) {
+        job.runtimeError = error;
+        void terminateProcess(job.child).catch(() => {});
+      }
+    });
+    job.child.stderr.on('data', (chunk) => {
+      job.stderrTail = appendTail(job.stderrTail, chunk);
+    });
+    job.child.once('error', (error) => finish(error));
+    job.child.once('close', (code, signal) => finish(null, { code, signal }));
+  });
+}
+
+async function abandonWaveformJob(token) {
+  const job = pendingWaveformJobs.get(token);
+  if (!job) return false;
+  if (job.cleanupPromise) return job.cleanupPromise;
+  job.cancelled = true;
+  const cleanupPromise = (async () => {
+    await terminateProcess(job.child);
+    job.child = null;
+    await job.operation.catch(() => {});
+    releaseWaveformSourceLease(job);
+    if (pendingWaveformJobs.get(token) === job) pendingWaveformJobs.delete(token);
+    return true;
+  })();
+  job.cleanupPromise = cleanupPromise;
+  try {
+    return await cleanupPromise;
+  } catch (error) {
+    if (job.cleanupPromise === cleanupPromise) job.cleanupPromise = null;
+    throw error;
+  }
+}
+
+ipcMain.handle('media:generate-waveform', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') {
+    return { ok: false, error: '安全でない画面からの操作を拒否しました' };
+  }
+  const source = registeredMedia.get(sourceToken);
+  if (!source || (source.kind !== 'audio' && source.kind !== 'video')) {
+    return { ok: false, error: '素材を確認できません' };
+  }
+
+  const token = crypto.randomUUID();
+  const job = {
+    token,
+    sourceToken,
+    child: null,
+    operation: Promise.resolve(),
+    cleanupPromise: null,
+    cancelled: false,
+    sourceLeaseReleased: false,
+    runtimeError: null,
+    stderrTail: '',
+  };
+  source.leases = (source.leases ?? 0) + 1;
+  pendingWaveformJobs.set(token, job);
+
+  try {
+    await ensureNativeFfmpeg();
+    const [realPath, stat] = await Promise.all([
+      fs.realpath(source.path),
+      fs.stat(source.path),
+    ]);
+    if (
+      !stat.isFile() ||
+      realPath !== source.path ||
+      stat.size !== source.size ||
+      (source.dev !== undefined && stat.dev !== source.dev) ||
+      (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+      Math.abs(stat.mtimeMs - source.mtimeMs) > 1 ||
+      isDangerousWindowsDevicePath(realPath)
+    ) {
+      throw new Error('素材が読み込み後に変更されました');
+    }
+    if (job.cancelled) throw new Error('波形生成を中止しました');
+
+    const cached = await readWaveformCache(source);
+    if (cached) {
+      return {
+        ok: true,
+        peaks: cached.peaks,
+        peaksPerSecond: cached.peaksPerSecond,
+        cached: true,
+      };
+    }
+
+    const accumulator = createWaveformMetadataAccumulator();
+    const child = spawn(
+      ffmpegBinaryPath(),
+      buildWaveformFfmpegArgs(source.path),
+      {
+        shell: false,
+        windowsHide: true,
+        detached: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: minimalEnvironment(),
+      },
+    );
+    job.child = child;
+    const operation = waitForWaveformChild(job, accumulator);
+    job.operation = operation.then(() => undefined, () => undefined);
+    const result = await operation;
+    job.child = null;
+    if (job.runtimeError) throw job.runtimeError;
+    if (job.cancelled) throw new Error('波形生成を中止しました');
+    if (result.code !== 0) {
+      throw new Error(`波形生成に失敗しました (FFmpeg: ${String(result.code)})`);
+    }
+    const peaks = accumulator.finish();
+    if (peaks.length === 0) {
+      throw new Error('音声ストリームが見つかりません');
+    }
+    await writeWaveformCache(source, peaks).catch(() => {});
+    return {
+      ok: true,
+      peaks,
+      peaksPerSecond: WAVEFORM_PEAKS_PER_SECOND,
+      cached: false,
+    };
+  } catch (error) {
+    let message = error instanceof Error ? error.message : String(error);
+    message = message.replaceAll(source.path, '[素材]').slice(0, 500);
+    return { ok: false, error: message, canceled: job.cancelled };
+  } finally {
+    if (pendingWaveformJobs.get(token) === job) pendingWaveformJobs.delete(token);
+    releaseWaveformSourceLease(job);
+  }
+});
+
+ipcMain.handle('media:cancel-waveform', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') return false;
+  const jobs = [...pendingWaveformJobs.values()].filter(
+    (job) => job.sourceToken === sourceToken,
+  );
+  await Promise.all(jobs.map((job) => abandonWaveformJob(job.token)));
+  return jobs.length > 0;
+});
+
+function releaseLoudnessSourceLease(job) {
+  if (job.sourceLeaseReleased) return;
+  job.sourceLeaseReleased = true;
+  releaseRegisteredMediaLease(job.sourceToken);
+}
+
+function waitForLoudnessChild(job) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(result);
+    };
+    job.child.stderr.on('data', (chunk) => {
+      job.stderrTail = appendTail(
+        job.stderrTail,
+        chunk,
+        MAX_LOUDNESS_LOG_BYTES,
+      );
+    });
+    job.child.once('error', (error) => finish(error));
+    job.child.once('close', (code, signal) => finish(null, { code, signal }));
+  });
+}
+
+async function abandonLoudnessJob(token) {
+  const job = pendingLoudnessJobs.get(token);
+  if (!job) return false;
+  if (job.cleanupPromise) return job.cleanupPromise;
+  job.cancelled = true;
+  const cleanupPromise = (async () => {
+    await terminateProcess(job.child);
+    job.child = null;
+    await job.operation.catch(() => {});
+    releaseLoudnessSourceLease(job);
+    if (pendingLoudnessJobs.get(token) === job) pendingLoudnessJobs.delete(token);
+    return true;
+  })();
+  job.cleanupPromise = cleanupPromise;
+  try {
+    return await cleanupPromise;
+  } catch (error) {
+    if (job.cleanupPromise === cleanupPromise) job.cleanupPromise = null;
+    throw error;
+  }
+}
+
+ipcMain.handle('media:analyze-loudness', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') {
+    return { ok: false, error: '安全でない画面からの操作を拒否しました' };
+  }
+  const source = registeredMedia.get(sourceToken);
+  if (!source || (source.kind !== 'audio' && source.kind !== 'video')) {
+    return { ok: false, error: '素材を確認できません' };
+  }
+  const token = crypto.randomUUID();
+  const job = {
+    token,
+    sourceToken,
+    child: null,
+    operation: Promise.resolve(),
+    cleanupPromise: null,
+    cancelled: false,
+    sourceLeaseReleased: false,
+    stderrTail: '',
+  };
+  source.leases = (source.leases ?? 0) + 1;
+  pendingLoudnessJobs.set(token, job);
+
+  try {
+    await ensureNativeFfmpeg();
+    const [realPath, stat] = await Promise.all([
+      fs.realpath(source.path),
+      fs.stat(source.path),
+    ]);
+    if (
+      !stat.isFile() ||
+      realPath !== source.path ||
+      stat.size !== source.size ||
+      (source.dev !== undefined && stat.dev !== source.dev) ||
+      (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+      Math.abs(stat.mtimeMs - source.mtimeMs) > 1 ||
+      isDangerousWindowsDevicePath(realPath)
+    ) {
+      throw new Error('素材が読み込み後に変更されました');
+    }
+    if (job.cancelled) throw new Error('音量解析を中止しました');
+
+    const child = spawn(ffmpegBinaryPath(), buildLoudnessFfmpegArgs(source.path), {
+      shell: false,
+      windowsHide: true,
+      detached: false,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: minimalEnvironment(),
+    });
+    job.child = child;
+    const operation = waitForLoudnessChild(job);
+    job.operation = operation.then(() => undefined, () => undefined);
+    const result = await operation;
+    job.child = null;
+    if (job.cancelled) throw new Error('音量解析を中止しました');
+    if (result.code !== 0) {
+      throw new Error(`音量解析に失敗しました (FFmpeg: ${String(result.code)})`);
+    }
+    const analysis = parseLoudnessSummary(job.stderrTail);
+    if (!analysis) throw new Error('音声ストリームまたは音量情報を取得できません');
+    return { ok: true, ...analysis };
+  } catch (error) {
+    let message = error instanceof Error ? error.message : String(error);
+    message = message.replaceAll(source.path, '[素材]').slice(0, 500);
+    return { ok: false, error: message, canceled: job.cancelled };
+  } finally {
+    if (pendingLoudnessJobs.get(token) === job) pendingLoudnessJobs.delete(token);
+    releaseLoudnessSourceLease(job);
+  }
+});
+
+ipcMain.handle('media:cancel-loudness', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') return false;
+  const jobs = [...pendingLoudnessJobs.values()].filter(
+    (job) => job.sourceToken === sourceToken,
+  );
+  await Promise.all(jobs.map((job) => abandonLoudnessJob(job.token)));
+  return jobs.length > 0;
 });
 
 ipcMain.handle('media:read-chunk', async (event, token, offset, length) => {
@@ -1862,7 +2866,7 @@ function proxyCacheRoot() {
 
 const MAX_PROXY_CACHE_BYTES = 20 * 1024 * 1024 * 1024;
 
-async function pruneProxyCache() {
+async function pruneProxyCache(maxBytes = MAX_PROXY_CACHE_BYTES) {
   const root = path.resolve(proxyCacheRoot());
   let entries;
   try {
@@ -1897,7 +2901,7 @@ async function pruneProxyCache() {
   let totalBytes = cached.reduce((total, entry) => total + entry.size, 0);
   cached.sort((a, b) => a.mtimeMs - b.mtimeMs);
   for (const entry of cached) {
-    if (totalBytes <= MAX_PROXY_CACHE_BYTES) break;
+    if (totalBytes <= maxBytes) break;
     if (activePaths.has(path.resolve(entry.filePath))) continue;
     try {
       await fs.rm(entry.filePath, { force: true });
@@ -1917,32 +2921,39 @@ async function cleanupOrphanedProxies() {
   } catch {
     return;
   }
-  await Promise.all(
-    entries
-      .filter(
-        (entry) =>
-          entry.isFile() &&
-          /^[0-9a-f]{64}\.[0-9a-f-]{36}\.part$/i.test(entry.name),
-      )
-      .map((entry) => fs.rm(path.join(root, entry.name), { force: true }).catch(() => {})),
-  );
+  await Promise.all(entries.flatMap((entry) => {
+    const orphanPath = path.join(root, entry.name);
+    if (
+      entry.isFile() &&
+      /^[0-9a-f]{64}\.[0-9a-f-]{36}\.part$/i.test(entry.name)
+    ) {
+      return [fs.rm(orphanPath, { force: true }).catch(() => {})];
+    }
+    if (
+      entry.isDirectory() &&
+      /^[0-9a-f]{64}\.[0-9a-f-]{36}\.segments$/i.test(entry.name)
+    ) {
+      return [fs.rm(orphanPath, { recursive: true, force: true }).catch(() => {})];
+    }
+    return [];
+  }));
   await pruneProxyCache();
 }
 
-async function registerProxyFile(proxyPath) {
+async function registerProxyFile(proxyPath, kind) {
   const [realPath, stat] = await Promise.all([
     fs.realpath(proxyPath),
     fs.lstat(proxyPath),
   ]);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 12) {
-    throw new Error('プレビュー用動画が破損しています');
+    throw new Error('プレビュー素材が破損しています');
   }
   const handle = await fs.open(realPath, 'r');
   try {
     const header = Buffer.alloc(12);
     const { bytesRead } = await handle.read(header, 0, header.length, 0);
     if (bytesRead < 12 || header.toString('ascii', 4, 8) !== 'ftyp') {
-      throw new Error('プレビュー用動画が有効なMP4ではありません');
+      throw new Error('プレビュー素材が有効なMP4ではありません');
     }
   } finally {
     await handle.close();
@@ -1951,7 +2962,7 @@ async function registerProxyFile(proxyPath) {
   registeredMedia.set(token, {
     path: realPath,
     size: stat.size,
-    kind: 'video',
+    kind,
     name: path.basename(realPath),
     dev: stat.dev,
     ino: stat.ino,
@@ -1961,7 +2972,7 @@ async function registerProxyFile(proxyPath) {
   });
   return {
     token,
-    url: `fce-media://asset/${token}`,
+    url: registeredMediaUrl(token),
     size: stat.size,
   };
 }
@@ -1983,6 +2994,189 @@ function waitForProxyChild(job) {
   });
 }
 
+async function runProxyCommand(job, binaryPath, args) {
+  if (job.cancelled) throw new Error('プレビュー変換を中止しました');
+  const child = spawn(binaryPath, args, {
+    shell: false,
+    windowsHide: true,
+    detached: false,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: minimalEnvironment(),
+  });
+  job.child = child;
+  const result = await waitForProxyChild(job);
+  job.child = null;
+  if (job.cancelled) throw new Error('プレビュー変換を中止しました');
+  if (result.code !== 0) {
+    throw new Error(`プレビュー変換に失敗しました (FFmpeg: ${String(result.code)})`);
+  }
+}
+
+const REPAIR_PROXY_SEGMENT_SECONDS = 10;
+const REPAIR_PROXY_MAX_SEGMENTS = 120;
+
+function concatFileLine(filePath) {
+  return `file '${filePath.replaceAll("'", "'\\''")}'`;
+}
+
+async function createSegmentedRepairProxy(
+  job,
+  binaryPath,
+  source,
+  temporaryPath,
+  hasAudio,
+  duration,
+) {
+  if (!Number.isFinite(duration) || duration <= 0 || duration > 7 * 24 * 60 * 60) {
+    throw new Error('元素材の長さを確認できません');
+  }
+  const segments = buildBoundedSegmentPlan(
+    duration,
+    REPAIR_PROXY_SEGMENT_SECONDS,
+    REPAIR_PROXY_MAX_SEGMENTS,
+  );
+  const segmentDirectory = job.segmentDirectory;
+  await fs.mkdir(segmentDirectory, { recursive: false, mode: 0o700 });
+  const segmentPaths = [];
+  try {
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const segmentPath = path.join(
+        segmentDirectory,
+        `video-${String(index).padStart(6, '0')}.mp4`,
+      );
+      segmentPaths.push(segmentPath);
+      await runProxyCommand(job, binaryPath, [
+        '-hide_banner',
+        '-nostdin',
+        '-nostats',
+        '-loglevel',
+        'warning',
+        '-protocol_whitelist',
+        'file,pipe',
+        '-fflags',
+        '+genpts+discardcorrupt',
+        '-err_detect',
+        'ignore_err',
+        '-ss',
+        segment.start.toFixed(6),
+        '-i',
+        source.path,
+        '-t',
+        segment.duration.toFixed(6),
+        '-map',
+        '0:v:0',
+        '-an',
+        '-sn',
+        '-vf',
+        [
+          buildHdrToSdrFilter(source.hdrToneMap),
+          "scale='min(1280,iw)':-2",
+          `tpad=stop_mode=clone:stop_duration=${segment.duration.toFixed(6)}`,
+          `trim=duration=${segment.duration.toFixed(6)}`,
+          'setpts=PTS-STARTPTS',
+        ].filter(Boolean).join(','),
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '27',
+        '-pix_fmt',
+        'yuv420p',
+        ...(source.hdrToneMap
+          ? [
+              '-color_primaries',
+              'bt709',
+              '-color_trc',
+              'bt709',
+              '-colorspace',
+              'bt709',
+              '-color_range',
+              'tv',
+            ]
+          : []),
+        '-avoid_negative_ts',
+        'make_zero',
+        '-video_track_timescale',
+        '90000',
+        '-n',
+        '-f',
+        'mp4',
+        segmentPath,
+      ]);
+    }
+
+    const concatPath = path.join(segmentDirectory, 'concat.txt');
+    await fs.writeFile(
+      concatPath,
+      `${segmentPaths.map(concatFileLine).join('\n')}\n`,
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' },
+    );
+    await runProxyCommand(job, binaryPath, [
+      '-hide_banner',
+      '-nostdin',
+      '-nostats',
+      '-loglevel',
+      'warning',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-f',
+      'concat',
+      '-safe',
+      '0',
+      '-i',
+      concatPath,
+      '-i',
+      source.path,
+      '-map',
+      '0:v:0',
+      '-c:v',
+      'copy',
+      '-video_track_timescale',
+      '90000',
+      ...(source.hdrToneMap
+        ? [
+            '-color_primaries',
+            'bt709',
+            '-color_trc',
+            'bt709',
+            '-colorspace',
+            'bt709',
+            '-color_range',
+            'tv',
+          ]
+        : []),
+      ...(hasAudio
+        ? [
+            '-map',
+            '1:a:0',
+            '-af',
+            'aresample=48000:async=1:first_pts=0',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '128k',
+            '-ar',
+            '48000',
+            '-ac',
+            '2',
+          ]
+        : ['-an']),
+      '-t',
+      duration.toFixed(6),
+      '-movflags',
+      '+faststart',
+      '-n',
+      '-f',
+      'mp4',
+      temporaryPath,
+    ]);
+  } finally {
+    await fs.rm(segmentDirectory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function abandonProxyJob(token) {
   const job = pendingProxyJobs.get(token);
   if (!job) return false;
@@ -1993,6 +3187,9 @@ async function abandonProxyJob(token) {
     job.child = null;
     await job.operation.catch(() => {});
     await fs.rm(job.temporaryPath, { force: true });
+    if (job.segmentDirectory) {
+      await fs.rm(job.segmentDirectory, { recursive: true, force: true });
+    }
     if (!job.sourceLeaseReleased) {
       job.sourceLeaseReleased = true;
       releaseRegisteredMediaLease(job.sourceToken);
@@ -2014,7 +3211,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     return { ok: false, error: 'untrusted sender' };
   }
   const source = registeredMedia.get(sourceToken);
-  if (!source || source.kind !== 'video') {
+  if (!source || (source.kind !== 'video' && source.kind !== 'audio')) {
     return { ok: false, error: '元素材を確認できません' };
   }
   let job = null;
@@ -2035,16 +3232,21 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     ) {
       throw new Error('元素材が読み込み後に変更されました');
     }
+    const proxyProfile = source.kind === 'video'
+      ? source.requiresRepairProxy
+        ? `proxy-v4-repair120-1280-crf27-aac48k-${source.hdrToneMap ?? 'sdr'}`
+        : `proxy-v3-1280-crf27-aac48k-${source.hdrToneMap ?? 'sdr'}`
+      : 'audio-proxy-v2-aac160-stereo48k';
     const fingerprint = crypto
       .createHash('sha256')
-      .update(`${realPath}\0${stat.size}\0${stat.mtimeMs}\0proxy-v1-1280-crf27`)
+      .update(`${realPath}\0${stat.size}\0${stat.mtimeMs}\0${proxyProfile}`)
       .digest('hex');
     const root = proxyCacheRoot();
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
     const proxyPath = path.join(root, `${fingerprint}.mp4`);
     try {
       await fs.utimes(proxyPath, new Date(), new Date()).catch(() => {});
-      const registered = await registerProxyFile(proxyPath);
+      const registered = await registerProxyFile(proxyPath, source.kind);
       await pruneProxyCache();
       return { ok: true, ...registered, cached: true };
     } catch {
@@ -2063,74 +3265,132 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
       cancelled: false,
       sourceLeaseReleased: false,
       temporaryPath,
+      segmentDirectory: path.join(root, `${fingerprint}.${token}.segments`),
       stderrTail: '',
     };
     pendingProxyJobs.set(token, job);
     const binaryPath = ffmpegBinaryPath();
-    const child = spawn(
-      binaryPath,
-      [
-        '-hide_banner',
-        '-nostdin',
-        '-nostats',
-        '-loglevel',
-        'warning',
-        '-protocol_whitelist',
-        'file,pipe',
-        '-i',
-        source.path,
-        '-map',
-        '0:v:0',
-        '-map',
-        '0:a:0?',
-        '-vf',
-        "scale='min(1280,iw)':-2",
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-crf',
-        '27',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
-        '-ac',
-        '2',
-        '-movflags',
-        '+faststart',
-        '-n',
-        '-f',
-        'mp4',
-        temporaryPath,
-      ],
-      {
-        shell: false,
-        windowsHide: true,
-        detached: false,
-        stdio: ['ignore', 'ignore', 'pipe'],
-        env: minimalEnvironment(),
-      },
-    );
-    job.child = child;
-    const operation = waitForProxyChild(job);
+    const [hasAudio, duration] = await Promise.all([
+      source.kind === 'audio'
+        ? Promise.resolve(true)
+        : probeInputHasAudio(binaryPath, realPath),
+      probeInputDuration(binaryPath, realPath),
+    ]);
+    const expectedProxyBytes = estimatePreviewProxyBytes(source.kind, duration);
+    if (expectedProxyBytes > 0) {
+      // Make room inside the owned LRU before rejecting the user's import.
+      // Repair generation temporarily holds all encoded segments plus the
+      // final file, so its peak is about twice the completed proxy size.
+      await pruneProxyCache(
+        Math.max(0, MAX_PROXY_CACHE_BYTES - expectedProxyBytes),
+      );
+      const stats = await fs.statfs(root);
+      const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+      const workingBytes = expectedProxyBytes * (
+        source.kind === 'video' && source.requiresRepairProxy ? 2 : 1
+      );
+      if (freeBytes < workingBytes + 512 * 1024 * 1024) {
+        throw new Error(
+          'プレビュー用の空き容量が不足しています。設定からキャッシュを削除するか、空き容量を確保してください',
+        );
+      }
+    }
+    const transcodeArgs = source.kind === 'video'
+      ? [
+          '-map',
+          '0:v:0',
+          ...(hasAudio ? ['-map', '0:a:0'] : ['-an']),
+          '-vf',
+          [
+            buildHdrToSdrFilter(source.hdrToneMap),
+            "scale='min(1280,iw)':-2",
+          ].filter(Boolean).join(','),
+          '-c:v',
+          'libx264',
+          '-preset',
+          'ultrafast',
+          '-crf',
+          '27',
+          '-pix_fmt',
+          'yuv420p',
+          ...(source.hdrToneMap
+            ? [
+                '-color_primaries',
+                'bt709',
+                '-color_trc',
+                'bt709',
+                '-colorspace',
+                'bt709',
+                '-color_range',
+                'tv',
+              ]
+            : []),
+          ...(hasAudio
+            ? [
+                '-af',
+                'aresample=48000:async=1:first_pts=0',
+                '-c:a',
+                'aac',
+                '-b:a',
+                '128k',
+                '-ar',
+                '48000',
+                '-ac',
+                '2',
+              ]
+            : []),
+        ]
+      : [
+          '-map',
+          '0:a:0',
+          '-vn',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '160k',
+          '-af',
+          'aresample=48000:async=1:first_pts=0',
+          '-ar',
+          '48000',
+          '-ac',
+          '2',
+        ];
+    const operation = source.kind === 'video' && source.requiresRepairProxy
+      ? createSegmentedRepairProxy(
+          job,
+          binaryPath,
+          source,
+          temporaryPath,
+          hasAudio,
+          duration,
+        )
+      : runProxyCommand(job, binaryPath, [
+          '-hide_banner',
+          '-nostdin',
+          '-nostats',
+          '-loglevel',
+          'warning',
+          '-protocol_whitelist',
+          'file,pipe',
+          '-i',
+          source.path,
+          ...transcodeArgs,
+          '-movflags',
+          '+faststart',
+          '-n',
+          '-f',
+          'mp4',
+          temporaryPath,
+        ]);
     job.operation = operation.then(() => undefined, () => undefined);
-    const result = await operation;
-    job.child = null;
-    if (job.cancelled) throw new Error('プレビュー変換を中止しました');
-    if (result.code !== 0) {
-      throw new Error(`プレビュー変換に失敗しました (FFmpeg: ${String(result.code)})`);
-    }
-    const handle = await fs.open(temporaryPath, 'r');
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await fs.rename(temporaryPath, proxyPath);
-    const registered = await registerProxyFile(proxyPath);
+    await operation;
+    await syncFileForCommit(temporaryPath, {
+      shouldAbort: () => job.cancelled,
+    });
+    await renameWithRetry(temporaryPath, proxyPath, {
+      shouldAbort: () => job.cancelled,
+    });
+    const registered = await registerProxyFile(proxyPath, source.kind);
     pendingProxyJobs.delete(token);
     if (!job.sourceLeaseReleased) {
       job.sourceLeaseReleased = true;
@@ -2148,6 +3408,10 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
       }
     }
     let message = error instanceof Error ? error.message : String(error);
+    if (/No space left on device|not enough space|ENOSPC/i.test(`${job?.stderrTail ?? ''}\n${message}`)) {
+      message =
+        'プレビュー用の空き容量が不足しています。設定からキャッシュを削除するか、空き容量を確保してください';
+    }
     if (cleanupError) {
       message = 'プレビュー変換プロセスまたは一時ファイルを安全に片付けられませんでした';
     }
@@ -2278,6 +3542,104 @@ function writeStaticError(response, statusCode, message) {
   response.end(message);
 }
 
+const MEDIA_HTTP_MIME_TYPES = new Map([
+  ['.aac', 'audio/aac'],
+  ['.flac', 'audio/flac'],
+  ['.m4a', 'audio/mp4'],
+  ['.m4v', 'video/mp4'],
+  ['.mov', 'video/quicktime'],
+  ['.mp3', 'audio/mpeg'],
+  ['.mp4', 'video/mp4'],
+  ['.ogg', 'audio/ogg'],
+  ['.opus', 'audio/ogg'],
+  ['.wav', 'audio/wav'],
+  ['.webm', 'video/webm'],
+]);
+
+async function serveRegisteredMedia(request, response, mediaToken) {
+  const source = registeredMedia.get(mediaToken);
+  if (!source) {
+    writeStaticError(response, 404, 'Not found');
+    return;
+  }
+  let stat;
+  try {
+    stat = await fs.stat(source.path);
+  } catch {
+    writeStaticError(response, 404, 'Not found');
+    return;
+  }
+  if (
+    !stat.isFile() ||
+    stat.size !== source.size ||
+    (source.dev !== undefined && stat.dev !== source.dev) ||
+    (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+    Math.abs(stat.mtimeMs - source.mtimeMs) > 1
+  ) {
+    writeStaticError(response, 409, 'Media changed');
+    return;
+  }
+
+  let statusCode = 200;
+  let start = 0;
+  let end = Math.max(0, stat.size - 1);
+  const range = request.headers.range;
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (!match || (match[1] === '' && match[2] === '')) {
+      response.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+      response.end();
+      return;
+    }
+    if (match[1] === '') {
+      const suffixLength = Number(match[2]);
+      if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
+        response.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+        response.end();
+        return;
+      }
+      start = Math.max(0, stat.size - suffixLength);
+    } else {
+      start = Number(match[1]);
+      if (match[2] !== '') end = Number(match[2]);
+    }
+    if (
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(end) ||
+      start < 0 ||
+      start >= stat.size ||
+      end < start
+    ) {
+      response.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+      response.end();
+      return;
+    }
+    end = Math.min(end, stat.size - 1);
+    statusCode = 206;
+  }
+
+  response.writeHead(statusCode, {
+    'Content-Type': MEDIA_HTTP_MIME_TYPES.get(path.extname(source.path).toLowerCase()) ??
+      (source.kind === 'video' ? 'video/mp4' : 'application/octet-stream'),
+    'Content-Length': String(stat.size === 0 ? 0 : end - start + 1),
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'no-cache',
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Embedder-Policy': 'require-corp',
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    ...(statusCode === 206
+      ? { 'Content-Range': `bytes ${start}-${end}/${stat.size}` }
+      : null),
+  });
+  if (request.method === 'HEAD' || stat.size === 0) {
+    response.end();
+    return;
+  }
+  const stream = fsStream.createReadStream(source.path, { start, end });
+  stream.on('error', () => response.destroy());
+  stream.pipe(response);
+}
+
 async function serveAppAsset(request, response, token, expectedHost) {
   if (request.headers.host !== expectedHost) {
     writeStaticError(response, 400, 'Invalid host');
@@ -2304,6 +3666,12 @@ async function serveAppAsset(request, response, token, expectedHost) {
     relativePath = decodedPath || 'index.html';
   } catch {
     writeStaticError(response, 400, 'Invalid URL');
+    return;
+  }
+
+  const mediaMatch = /^media\/([0-9a-f-]{36})$/i.exec(relativePath);
+  if (mediaMatch) {
+    await serveRegisteredMedia(request, response, mediaMatch[1]);
     return;
   }
 
@@ -2538,6 +3906,8 @@ async function createWindow() {
     if (
       pendingExports.size === 0 &&
       pendingProxyJobs.size === 0 &&
+      pendingWaveformJobs.size === 0 &&
+      pendingLoudnessJobs.size === 0 &&
       !isDirty &&
       activeProjectSaves === 0 &&
       !pendingCloseSaveRequest &&
@@ -2576,6 +3946,8 @@ app.on('before-quit', (event) => {
   if (
     (pendingExports.size > 0 ||
       pendingProxyJobs.size > 0 ||
+      pendingWaveformJobs.size > 0 ||
+      pendingLoudnessJobs.size > 0 ||
       isDirty ||
       activeProjectSaves > 0 ||
       pendingCloseSaveRequest ||
@@ -2669,6 +4041,12 @@ process.on('exit', () => {
   for (const job of pendingProxyJobs.values()) {
     try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
   }
+  for (const job of pendingWaveformJobs.values()) {
+    try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
+  }
+  for (const job of pendingLoudnessJobs.values()) {
+    try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
+  }
 });
 process.on('uncaughtException', (err) => {
   if (fatalExceptionHandled) {
@@ -2676,6 +4054,20 @@ process.on('uncaughtException', (err) => {
     return;
   }
   fatalExceptionHandled = true;
+  try {
+    const crash = JSON.stringify({
+      at: new Date().toISOString(),
+      type: err?.name ?? 'Error',
+      message: sanitizeDiagnosticText(err?.message ?? err),
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+    }, null, 2);
+    fsStream.mkdirSync(path.dirname(lastCrashPath()), { recursive: true });
+    fsStream.writeFileSync(lastCrashPath(), crash, { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // The process is already fatal; recovery/autosave remains the priority.
+  }
   console.error('[main] uncaught', err);
   if (!isDev) {
     // Generic user-facing text — don't surface internal paths / stack details

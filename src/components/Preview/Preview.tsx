@@ -9,11 +9,14 @@ import { useMediaStore, useSelectedAsset } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { clipDuration } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
-import type { Clip, MediaAsset } from '../../lib/types';
+import type { AudioProcessing, Clip, MediaAsset } from '../../lib/types';
 import { Rewind, FastForward, Play, Pause, EyeOff, Clapperboard } from 'lucide-react';
 import { MotionBlurCanvas, type HudPreset } from './MotionBlurCanvas';
 import { shapeStrength } from '../../lib/motionBlurCore';
 import { OverlayLayer } from './OverlayLayer';
+import { SubtitleLayer } from './SubtitleLayer';
+import { activeSubtitleCues } from '../../lib/subtitles';
+import { resolveAudioProcessing } from '../../lib/audioProcessing';
 import { sampleClipTransform, transformToCss } from '../../lib/clipTransform';
 import { colorGradeFilter } from '../../lib/colorGrade';
 import { transitionModulationAt } from '../../lib/transitions';
@@ -75,8 +78,24 @@ const HUD_PRESET_ORDER: HudPreset[] = ['valorant', 'cs2', 'apex', 'none'];
 
 interface PreviewGainGraph {
   source: MediaElementAudioSourceNode;
+  highPass: BiquadFilterNode;
+  low: BiquadFilterNode;
+  mid: BiquadFilterNode;
+  high: BiquadFilterNode;
+  compressor: DynamicsCompressorNode;
   gain: GainNode;
   cleanupTimer: number | null;
+}
+
+function reportMainPlaybackFailure(): void {
+  const state = useProjectStore.getState();
+  if (!state.isPlaying) return;
+  state.setIsPlaying(false);
+  state.showMessage(
+    'error',
+    '動画を再生できませんでした。素材を再追加するか、互換プロキシの作成完了後に再試行してください',
+    6000,
+  );
 }
 
 let previewAudioContext: AudioContext | null = null;
@@ -91,6 +110,7 @@ function useMediaElementGain(
   gainValue: number,
   muted: boolean,
   isPlaying: boolean,
+  processing?: AudioProcessing,
 ) {
   useEffect(() => {
     const media = ref.current;
@@ -101,9 +121,22 @@ function useMediaElementGain(
       graph = previewGainGraphs.get(media) ?? null;
       if (!graph) {
         const source = previewAudioContext.createMediaElementSource(media);
+        const highPass = previewAudioContext.createBiquadFilter();
+        highPass.type = 'highpass';
+        const low = previewAudioContext.createBiquadFilter();
+        low.type = 'lowshelf';
+        low.frequency.value = 120;
+        const mid = previewAudioContext.createBiquadFilter();
+        mid.type = 'peaking';
+        mid.frequency.value = 1_000;
+        mid.Q.value = 1;
+        const high = previewAudioContext.createBiquadFilter();
+        high.type = 'highshelf';
+        high.frequency.value = 6_000;
+        const compressor = previewAudioContext.createDynamicsCompressor();
         const gain = previewAudioContext.createGain();
-        source.connect(gain).connect(previewAudioContext.destination);
-        graph = { source, gain, cleanupTimer: null };
+        source.connect(highPass).connect(low).connect(mid).connect(high).connect(compressor).connect(gain).connect(previewAudioContext.destination);
+        graph = { source, highPass, low, mid, high, compressor, gain, cleanupTimer: null };
         previewGainGraphs.set(media, graph);
       }
       if (graph.cleanupTimer !== null) {
@@ -112,6 +145,22 @@ function useMediaElementGain(
       }
       media.volume = 1;
       media.muted = false;
+      const resolved = resolveAudioProcessing(processing);
+      graph.highPass.frequency.setValueAtTime(
+        resolved.highPassHz > 0 ? resolved.highPassHz : 10,
+        previewAudioContext.currentTime,
+      );
+      graph.low.gain.setValueAtTime(resolved.lowGainDb, previewAudioContext.currentTime);
+      graph.mid.gain.setValueAtTime(resolved.midGainDb, previewAudioContext.currentTime);
+      graph.high.gain.setValueAtTime(resolved.highGainDb, previewAudioContext.currentTime);
+      graph.compressor.threshold.setValueAtTime(
+        resolved.compressor ? -18 : 0,
+        previewAudioContext.currentTime,
+      );
+      graph.compressor.knee.setValueAtTime(resolved.compressor ? 18 : 0, previewAudioContext.currentTime);
+      graph.compressor.ratio.setValueAtTime(resolved.compressor ? 3 : 1, previewAudioContext.currentTime);
+      graph.compressor.attack.setValueAtTime(0.02, previewAudioContext.currentTime);
+      graph.compressor.release.setValueAtTime(0.25, previewAudioContext.currentTime);
       graph.gain.gain.setValueAtTime(
         muted ? 0 : Math.max(0, Math.min(2, gainValue)),
         previewAudioContext.currentTime,
@@ -132,13 +181,18 @@ function useMediaElementGain(
         // nodes only after a real DOM removal.
         if (!media.isConnected) {
           graph?.source.disconnect();
+          graph?.highPass.disconnect();
+          graph?.low.disconnect();
+          graph?.mid.disconnect();
+          graph?.high.disconnect();
+          graph?.compressor.disconnect();
           graph?.gain.disconnect();
           previewGainGraphs.delete(media);
         }
         if (graph) graph.cleanupTimer = null;
       }, 0);
     };
-  }, [gainValue, isPlaying, muted, ref]);
+  }, [gainValue, isPlaying, muted, processing, ref]);
 }
 
 interface PreviewAudioLayerProps {
@@ -166,6 +220,7 @@ function PreviewAudioLayer({
     volume * gain,
     trackMuted || (clip.muted ?? false) || volume === 0,
     isPlaying,
+    clip.audioProcessing,
   );
 
   useEffect(() => {
@@ -244,6 +299,7 @@ function PreviewVisualLayer({
     volume,
     trackMuted || (clip.muted ?? false) || volume === 0,
     isPlaying,
+    clip.audioProcessing,
   );
   const localTime = playhead - clip.start;
   const instantaneousSpeed = rampSampler
@@ -372,7 +428,13 @@ export function Preview() {
   const verticalReframe = useProjectStore((s) => s.verticalReframe);
   const setVerticalReframe = useProjectStore((s) => s.setVerticalReframe);
   const markers = useProjectStore((s) => s.markers);
+  const subtitles = useProjectStore((s) => s.subtitles);
+  const subtitleStyle = useProjectStore((s) => s.subtitleStyle);
   const audioDucking = useProjectStore((s) => s.audioDucking);
+  const visibleSubtitles = useMemo(
+    () => activeSubtitleCues(subtitles, playhead),
+    [playhead, subtitles],
+  );
   const videoTrack = useMemo(
     () =>
       tracks.find(
@@ -679,6 +741,7 @@ export function Preview() {
       (activeClip?.muted ?? false) ||
       mainVolume === 0,
     isPlaying,
+    activeClip?.audioProcessing,
   );
   const playingRef = useRef(isPlaying);
 
@@ -774,9 +837,7 @@ export function Preview() {
     if (!isPlaying) return;
     const video = videoRef.current;
     if (!video) return;
-    video.play().catch(() => {
-      /* ignore autoplay rejection */
-    });
+    video.play().catch(reportMainPlaybackFailure);
     let rafId = 0;
     const step = () => {
       if (!playingRef.current) return;
@@ -885,9 +946,7 @@ export function Preview() {
       : activeClip.trimStart + localT * (activeClip.speed ?? 1);
     video.currentTime = Math.max(0, Math.min(activeAsset.duration, target));
     if (isPlaying) {
-      video.play().catch(() => {
-        /* ignore */
-      });
+      video.play().catch(reportMainPlaybackFailure);
     }
     // We intentionally only react to clip/asset switch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1179,6 +1238,7 @@ export function Preview() {
               />
             ) : null,
           )}
+          <SubtitleLayer cues={visibleSubtitles} style={subtitleStyle} />
         </div>
       </div>
 

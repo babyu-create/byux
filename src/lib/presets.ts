@@ -171,15 +171,17 @@ export function createPresetFromClip(clip: Clip, name: string): ClipPreset {
 const finiteNumber = z.number().refine((n) => Number.isFinite(n), {
   message: '有限の数値が必要です',
 });
+const nonNegativeNumber = finiteNumber.refine((n) => n >= 0);
+const positiveNumber = finiteNumber.refine((n) => n > 0);
 
 const easingEnum = z.enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold']);
 
 const keyframeSchema = z.object({
-  t: finiteNumber,
+  t: nonNegativeNumber,
   value: finiteNumber,
   easing: easingEnum.optional(),
 });
-const animatableSchema = z.union([finiteNumber, z.array(keyframeSchema)]);
+const animatableSchema = z.union([finiteNumber, z.array(keyframeSchema).max(2_000)]);
 
 const transformSchema = z.object({
   x: animatableSchema.optional(),
@@ -198,20 +200,20 @@ const colorGradeSchema = z.object({
 });
 
 const speedRampSchema = z.object({
-  from: finiteNumber,
-  to: finiteNumber,
+  from: positiveNumber.refine((n) => n <= 8),
+  to: positiveNumber.refine((n) => n <= 8),
   easing: easingEnum.optional(),
 });
 
 const transitionSchema = z.object({
   type: z.enum(['none', 'cut', 'fade', 'slide', 'zoom']),
-  duration: finiteNumber,
+  duration: nonNegativeNumber,
 });
 
 const effectSchema = z.object({
   type: z.enum(['fade-in', 'fade-out', 'motion-blur']),
-  duration: finiteNumber.optional(),
-  intensity: finiteNumber.optional(),
+  duration: nonNegativeNumber.optional(),
+  intensity: finiteNumber.refine((n) => n >= 0 && n <= 100).optional(),
 });
 
 const overlaySchema = z.object({
@@ -219,7 +221,7 @@ const overlaySchema = z.object({
   // (a hand-edited preset shouldn't be rejected for an odd id it won't keep).
   id: z.string().min(1),
   text: z.string(),
-  fontSize: finiteNumber,
+  fontSize: positiveNumber,
   color: z.string(),
   position: z.enum([
     'top-left', 'top-center', 'top-right',
@@ -234,22 +236,26 @@ const overlaySchema = z.object({
   background: z.string().optional(),
   decoration: z.enum(['none', 'glow', 'shadow', 'gradient']).optional(),
   decorationColor: z.string().optional(),
-  strokeWidth: finiteNumber.optional(),
+  strokeWidth: nonNegativeNumber.optional(),
   intro: z.enum(['none', 'fade', 'slide-up', 'slide-left', 'scale-in']).optional(),
-  introDuration: finiteNumber.optional(),
+  introDuration: nonNegativeNumber.optional(),
 });
 
 const lookSchema = z.object({
-  speed: finiteNumber.optional(),
+  speed: finiteNumber.refine((n) => n >= 0.0625 && n <= 4).optional(),
   speedRamp: speedRampSchema.optional(),
   stretchToFill: z.boolean().optional(),
   transform: transformSchema.optional(),
   colorGrade: colorGradeSchema.optional(),
   transitionIn: transitionSchema.optional(),
   transitionOut: transitionSchema.optional(),
-  effects: z.array(effectSchema).optional(),
-  overlays: z.array(overlaySchema).optional(),
+  effects: z.array(effectSchema).max(32).optional(),
+  overlays: z.array(overlaySchema).max(100).optional(),
 });
+
+export function isValidClipLook(value: unknown): value is ClipLook {
+  return lookSchema.safeParse(value).success;
+}
 
 const presetSchema = z.object({
   id: z.string().min(1),

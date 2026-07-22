@@ -18,9 +18,13 @@ export function collectUnsupportedFeatures(request: Record<string, unknown>): st
 
 export function buildNativeExportPlan(
   request: Record<string, unknown>,
-  sourceByAssetId: Map<string, { path: string; hasAudio: boolean }>,
+  sourceByAssetId: Map<
+    string,
+    { path: string; hasAudio: boolean; hdrToneMap?: 'pq' | 'hlg' | null }
+  >,
   overlayPathByClipId: Map<string, string>,
   outputPath: string,
+  videoEncoder?: 'libx264' | 'h264_nvenc' | 'h264_qsv' | 'h264_amf',
 ): {
   args: string[];
   filterGraph: string;
@@ -28,6 +32,7 @@ export function buildNativeExportPlan(
   width: number;
   height: number;
   fps: number;
+  videoEncoder: string;
 };
 
 export function parseProgressText(

@@ -3,6 +3,50 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const updaterListeners = new Set();
 const nativeExportListeners = new Set();
 
+function localNameFromPath(filePath, fallback) {
+  const normalized = String(filePath).replace(/[\\/]+$/, '');
+  const separator = Math.max(normalized.lastIndexOf('\\'), normalized.lastIndexOf('/'));
+  const name = normalized.slice(separator + 1);
+  return name || fallback;
+}
+
+function localMediaRef(file, kind) {
+  if (kind !== undefined && kind !== 'video' && kind !== 'audio') {
+    return { ok: false, code: 'INVALID_KIND' };
+  }
+  const filePath = webUtils.getPathForFile(file);
+  if (!filePath) return { ok: false, code: 'NOT_DISK_BACKED' };
+  const ref = {
+    path: filePath,
+    name: localNameFromPath(filePath, file?.name),
+    size: file?.size,
+    ...(kind ? { kind } : {}),
+  };
+  let approved;
+  try {
+    approved = ipcRenderer.sendSync('media:authorize-file-sync', ref);
+  } catch {
+    return { ok: false, code: 'NOT_AUTHORIZED' };
+  }
+  if (approved !== true && approved?.ok !== true) {
+    return { ok: false, code: 'NOT_AUTHORIZED' };
+  }
+  if (approved?.ok === true) {
+    if (
+      typeof approved.size !== 'number' ||
+      !Number.isSafeInteger(approved.size) ||
+      approved.size < 0 ||
+      typeof approved.name !== 'string' ||
+      approved.name.length === 0
+    ) {
+      return { ok: false, code: 'NOT_AUTHORIZED' };
+    }
+    ref.size = approved.size;
+    ref.name = approved.name;
+  }
+  return { ok: true, ref };
+}
+
 ipcRenderer.on('updater', (_event, payload) => {
   for (const cb of updaterListeners) cb(payload);
 });
@@ -26,6 +70,17 @@ contextBridge.exposeInMainWorld('fce', {
   setDirty(dirty) {
     ipcRenderer.send('app:dirty', Boolean(dirty));
   },
+  saveDiagnostics(projectSummary) {
+    return ipcRenderer.invoke('diagnostics:save', projectSummary);
+  },
+  cache: {
+    getSummary() {
+      return ipcRenderer.invoke('cache:get-summary');
+    },
+    clearUnused() {
+      return ipcRenderer.invoke('cache:clear-unused');
+    },
+  },
   onSaveBeforeClose(cb) {
     const listener = (_event, payload) => cb(payload?.id);
     ipcRenderer.on('app:save-before-close', listener);
@@ -38,20 +93,48 @@ contextBridge.exposeInMainWorld('fce', {
     });
   },
   getPathForFile(file) {
+    const local = localMediaRef(file);
+    return local.ok ? local.ref.path : '';
+  },
+  async registerMediaFileFromFile(file, kind) {
+    if (kind !== undefined && kind !== 'video' && kind !== 'audio') {
+      return { ok: false, code: 'INVALID_KIND' };
+    }
     const filePath = webUtils.getPathForFile(file);
-    if (!filePath) return '';
-    const approved = ipcRenderer.sendSync('media:authorize-file-sync', {
-      path: filePath,
-      name: file?.name,
-      size: file?.size,
-    });
-    return approved === true ? filePath : '';
+    if (!filePath) return { ok: false, code: 'NOT_DISK_BACKED' };
+    let result;
+    try {
+      result = await ipcRenderer.invoke('media:register-selected-file', {
+        path: filePath,
+        ...(kind ? { kind } : {}),
+      });
+    } catch {
+      return { ok: false, code: 'REGISTRATION_FAILED' };
+    }
+    return result?.ok === true && result.source?.token
+      ? result
+      : { ok: false, code: result?.code ?? 'REGISTRATION_FAILED' };
+  },
+  selectMediaFiles(options) {
+    return ipcRenderer.invoke('media:select-files', options);
   },
   registerMediaFile(ref) {
     return ipcRenderer.invoke('media:register-file', ref);
   },
   createPreviewProxy(sourceToken) {
     return ipcRenderer.invoke('media:create-preview-proxy', sourceToken);
+  },
+  generateMediaWaveform(sourceToken) {
+    return ipcRenderer.invoke('media:generate-waveform', sourceToken);
+  },
+  cancelMediaWaveform(sourceToken) {
+    return ipcRenderer.invoke('media:cancel-waveform', sourceToken);
+  },
+  analyzeMediaLoudness(sourceToken) {
+    return ipcRenderer.invoke('media:analyze-loudness', sourceToken);
+  },
+  cancelMediaLoudness(sourceToken) {
+    return ipcRenderer.invoke('media:cancel-loudness', sourceToken);
   },
   readMediaFileChunk(token, offset, length) {
     return ipcRenderer.invoke('media:read-chunk', token, offset, length);

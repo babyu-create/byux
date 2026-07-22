@@ -82,6 +82,38 @@ describe('native atempo precision', () => {
 });
 
 describe('nativeExportPlan', () => {
+  it('accepts 1440p, 4K and 120 fps output presets', () => {
+    const source = new Map([
+      ['asset', { path: 'source.mp4', hasAudio: false }],
+    ]);
+    const highFps = request();
+    highFps.options = { ...highFps.options, resolution: '1440p', fps: 120 };
+    const highFpsPlan = buildNativeExportPlan(
+      highFps,
+      source,
+      new Map(),
+      'output.part',
+    );
+    expect(highFpsPlan.width).toBe(2560);
+    expect(highFpsPlan.height).toBe(1440);
+    expect(highFpsPlan.fps).toBe(120);
+
+    const fourK = request();
+    fourK.options = {
+      ...fourK.options,
+      resolution: '2160p',
+      aspectRatio: '9:16',
+    };
+    const fourKPlan = buildNativeExportPlan(
+      fourK,
+      source,
+      new Map(),
+      'output.part',
+    );
+    expect(fourKPlan.width).toBe(2160);
+    expect(fourKPlan.height).toBe(3840);
+  });
+
   it('keeps authored gaps and builds a disk-backed single-pass graph', () => {
     const source = new Map([
       ['asset', { path: 'C:\\media\\source.mp4', hasAudio: false }],
@@ -95,7 +127,17 @@ describe('nativeExportPlan', () => {
 
     expect(plan.totalDuration).toBe(4);
     expect(plan.filterGraph).toContain('color=c=black:s=1280x720:r=30:d=2.0000');
-    expect(plan.filterGraph).toContain('anullsrc=r=44100:cl=stereo');
+    expect(plan.filterGraph).toContain('anullsrc=r=48000:cl=stereo');
+    expect(plan.filterGraph).toContain(
+      'aresample=48000:async=1:first_pts=0',
+    );
+    expect(plan.filterGraph).toContain(
+      'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+    );
+    expect(plan.args.slice(plan.args.indexOf('-ar'), plan.args.indexOf('-ar') + 2)).toEqual([
+      '-ar',
+      '48000',
+    ]);
     expect(plan.filterGraph).toContain('setpts=0.5*PTS');
     expect(plan.filterGraph).toContain('fade=t=in:st=0:d=0.25');
     expect(plan.filterGraph).toContain('concat=n=2:v=1:a=1[vbase0][abase]');
@@ -103,6 +145,57 @@ describe('nativeExportPlan', () => {
     expect(plan.filterGraph).not.toContain('geq=');
     expect(plan.args).toContain('-filter_complex_script');
     expect(plan.args.at(-1)).toBe('C:\\output\\.movie.part');
+  });
+
+  it('tone-maps registered PQ sources to tagged BT.709 SDR', () => {
+    const plan = buildNativeExportPlan(
+      request(),
+      new Map([
+        [
+          'asset',
+          { path: 'hdr-source.mp4', hasAudio: false, hdrToneMap: 'pq' },
+        ],
+      ]),
+      new Map(),
+      'hdr-output.part',
+    );
+
+    expect(plan.filterGraph).toContain(
+      'zscale=tin=smpte2084:t=linear:npl=100',
+    );
+    expect(plan.filterGraph).toContain('tonemap=tonemap=hable:desat=0');
+    expect(plan.filterGraph).toContain(
+      'zscale=p=bt709:t=bt709:m=bt709:r=tv',
+    );
+    expect(plan.args).toContain('-color_primaries');
+    expect(plan.args).toContain('-color_trc');
+    expect(plan.args).toContain('-colorspace');
+    expect(plan.args).toContain('bt709');
+  });
+
+  it('uses a main-process-selected hardware encoder without changing the graph', () => {
+    const source = new Map([
+      ['asset', { path: 'source.mp4', hasAudio: false }],
+    ]);
+    const software = buildNativeExportPlan(
+      request(),
+      source,
+      new Map(),
+      'software.part',
+    );
+    const hardware = buildNativeExportPlan(
+      request(),
+      source,
+      new Map(),
+      'hardware.part',
+      'h264_nvenc',
+    );
+
+    expect(software.videoEncoder).toBe('libx264');
+    expect(hardware.videoEncoder).toBe('h264_nvenc');
+    expect(hardware.args).toContain('h264_nvenc');
+    expect(hardware.args).not.toContain('libx264');
+    expect(hardware.filterGraph).toBe(software.filterGraph);
   });
 
   it('skips an empty visible video lane when selecting the base lane', () => {
