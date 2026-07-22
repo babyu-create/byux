@@ -2063,18 +2063,30 @@ function authorizeProjectMediaRefs(text) {
 }
 
 ipcMain.on('media:authorize-file-sync', (event, ref) => {
-  event.returnValue = false;
-  if (!isTrustedIpcEvent(event) || !authorizeMediaRef(ref)) return;
+  event.returnValue = { ok: false };
+  if (!isTrustedIpcEvent(event)) return;
   try {
+    const canonicalName = canonicalMediaName(ref?.path);
+    if (
+      !canonicalName ||
+      isDangerousWindowsDevicePath(ref.path) ||
+      (ref.kind !== undefined && ref.kind !== 'video' && ref.kind !== 'audio')
+    ) return;
     const stat = fsStream.statSync(ref.path);
-    if (!stat.isFile() || stat.size !== ref.size) {
-      authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.size));
-      return;
-    }
-    event.returnValue = true;
-  } catch {
-    authorizedMediaRefs.delete(mediaApprovalKey(ref.path, ref.size));
-  }
+    if (!stat.isFile()) return;
+    const authoritativeRef = {
+      path: ref.path,
+      name: canonicalName,
+      size: stat.size,
+      ...(ref.kind ? { kind: ref.kind } : {}),
+    };
+    if (!authorizeMediaRef(authoritativeRef)) return;
+    event.returnValue = {
+      ok: true,
+      name: canonicalName,
+      size: stat.size,
+    };
+  } catch {}
 });
 
 function registerResolvedMedia(realPath, stat, kind, name) {
@@ -2108,6 +2120,51 @@ async function resolveMediaKind(realPath, requestedKind = null) {
   const probedKind = await probeInputMediaKind(ffmpegBinaryPath(), realPath);
   return requestedKind && probedKind !== requestedKind ? null : probedKind;
 }
+
+/**
+ * Register a path that the sandboxed preload obtained from Electron's
+ * webUtils.getPathForFile(File). Renderer File metadata is deliberately not
+ * trusted here: Chromium can expose stale metadata while a capture is being
+ * finalized, and a synchronous renderer-metadata gate is brittle for large
+ * disk-backed videos. The main process re-resolves and stats the selected path.
+ */
+ipcMain.handle('media:register-selected-file', async (event, ref) => {
+  if (!isTrustedIpcEvent(event)) {
+    return { ok: false, code: 'NOT_AUTHORIZED' };
+  }
+  if (
+    typeof ref !== 'object' ||
+    ref === null ||
+    typeof ref.path !== 'string' ||
+    !canonicalMediaName(ref.path) ||
+    (ref.kind !== undefined && ref.kind !== 'video' && ref.kind !== 'audio') ||
+    isDangerousWindowsDevicePath(ref.path)
+  ) {
+    return { ok: false, code: 'NOT_AUTHORIZED' };
+  }
+  try {
+    const realPath = await fs.realpath(ref.path);
+    if (isDangerousWindowsDevicePath(realPath)) {
+      return { ok: false, code: 'NOT_AUTHORIZED' };
+    }
+    const stat = await fs.stat(realPath);
+    if (!stat.isFile()) return { ok: false, code: 'REGISTRATION_FAILED' };
+    const kind = await resolveMediaKind(realPath, ref.kind ?? null);
+    if (!kind) return { ok: false, code: 'INVALID_KIND' };
+    const name = path.basename(realPath);
+    return {
+      ok: true,
+      source: {
+        ...registerResolvedMedia(realPath, stat, kind, name),
+        path: realPath,
+        name,
+        kind,
+      },
+    };
+  } catch {
+    return { ok: false, code: 'REGISTRATION_FAILED' };
+  }
+});
 
 ipcMain.handle('media:select-files', async (event, options) => {
   if (!isTrustedIpcEvent(event)) {

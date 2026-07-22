@@ -22,8 +22,28 @@ function localMediaRef(file, kind) {
     size: file?.size,
     ...(kind ? { kind } : {}),
   };
-  const approved = ipcRenderer.sendSync('media:authorize-file-sync', ref);
-  if (approved !== true) return { ok: false, code: 'NOT_AUTHORIZED' };
+  let approved;
+  try {
+    approved = ipcRenderer.sendSync('media:authorize-file-sync', ref);
+  } catch {
+    return { ok: false, code: 'NOT_AUTHORIZED' };
+  }
+  if (approved !== true && approved?.ok !== true) {
+    return { ok: false, code: 'NOT_AUTHORIZED' };
+  }
+  if (approved?.ok === true) {
+    if (
+      typeof approved.size !== 'number' ||
+      !Number.isSafeInteger(approved.size) ||
+      approved.size < 0 ||
+      typeof approved.name !== 'string' ||
+      approved.name.length === 0
+    ) {
+      return { ok: false, code: 'NOT_AUTHORIZED' };
+    }
+    ref.size = approved.size;
+    ref.name = approved.name;
+  }
   return { ok: true, ref };
 }
 
@@ -65,31 +85,27 @@ contextBridge.exposeInMainWorld('fce', {
     });
   },
   getPathForFile(file) {
-    const filePath = webUtils.getPathForFile(file);
-    if (!filePath) return '';
-    const approved = ipcRenderer.sendSync('media:authorize-file-sync', {
-      path: filePath,
-      name: file?.name,
-      size: file?.size,
-    });
-    return approved === true ? filePath : '';
+    const local = localMediaRef(file);
+    return local.ok ? local.ref.path : '';
   },
   async registerMediaFileFromFile(file, kind) {
-    const local = localMediaRef(file, kind);
-    if (!local.ok) return local;
-    const registered = await ipcRenderer.invoke('media:register-file', local.ref);
-    if (!registered?.token) {
+    if (kind !== undefined && kind !== 'video' && kind !== 'audio') {
+      return { ok: false, code: 'INVALID_KIND' };
+    }
+    const filePath = webUtils.getPathForFile(file);
+    if (!filePath) return { ok: false, code: 'NOT_DISK_BACKED' };
+    let result;
+    try {
+      result = await ipcRenderer.invoke('media:register-selected-file', {
+        path: filePath,
+        ...(kind ? { kind } : {}),
+      });
+    } catch {
       return { ok: false, code: 'REGISTRATION_FAILED' };
     }
-    return {
-      ok: true,
-      source: {
-        ...registered,
-        path: local.ref.path,
-        name: registered.name ?? local.ref.name,
-        kind: registered.kind ?? local.ref.kind,
-      },
-    };
+    return result?.ok === true && result.source?.token
+      ? result
+      : { ok: false, code: result?.code ?? 'REGISTRATION_FAILED' };
   },
   selectMediaFiles(options) {
     return ipcRenderer.invoke('media:select-files', options);
