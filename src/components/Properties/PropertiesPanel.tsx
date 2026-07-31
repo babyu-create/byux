@@ -22,6 +22,7 @@ import { BeatDetectionSection } from './BeatDetectionSection';
 import { AudioDuckingSection } from './AudioDuckingSection';
 import { ClipAudioProcessingSection } from './ClipAudioProcessingSection';
 import { AudioStreamSection } from './AudioStreamSection';
+import { MotionTrackingSection } from './MotionTrackingSection';
 import { hasAudioProcessing } from '../../lib/audioProcessing';
 import styles from './PropertiesPanel.module.css';
 
@@ -174,6 +175,12 @@ export function PropertiesPanel() {
               {isVideoClip ? (
                 <CollapsibleSection id="presets" title="プリセット">
                   <ClipPresetsSection clip={selectedClip} />
+                </CollapsibleSection>
+              ) : null}
+
+              {isVideoClip && asset.kind === 'video' ? (
+                <CollapsibleSection id="motion-tracking" title="モーショントラッキング">
+                  <MotionTrackingSection clip={selectedClip} asset={asset} />
                 </CollapsibleSection>
               ) : null}
               </div>
