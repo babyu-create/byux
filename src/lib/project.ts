@@ -198,7 +198,7 @@ const clipEffectSchema = z.object({
   }).optional(),
 });
 
-const overlaySchema = z.object({
+const overlaySchemaBase = z.object({
   id: idString,
   text: z.string().max(10_000, 'テキストが長すぎます'),
   fontSize: positiveNumber,
@@ -230,6 +230,13 @@ const keyframeSchema = z.object({
   easing: z.enum(['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold']).optional(),
 });
 const animatableSchema = z.union([finiteNumber, z.array(keyframeSchema).max(2_000)]);
+
+const overlaySchema = overlaySchemaBase.extend({
+  tracking: z.object({
+    x: animatableSchema.optional(),
+    y: animatableSchema.optional(),
+  }).optional(),
+});
 
 const clipTransformSchema = z.object({
   x: animatableSchema.optional(),

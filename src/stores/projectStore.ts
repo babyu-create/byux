@@ -17,6 +17,7 @@ import type {
   TrackKind,
 } from '../lib/types';
 import { useMediaStore } from './mediaStore';
+import type { Animatable } from '../lib/keyframes';
 import type { HudPreset } from '../lib/motionBlurCore';
 import { resolveDucking, type AudioDucking } from '../lib/audioDucking';
 import { applyClipLook, isValidClipLook } from '../lib/presets';
@@ -372,6 +373,19 @@ function normalizeClipEffect(effect: ClipEffect): ClipEffect {
 
 function normalizeOverlay(overlay: OverlayText): OverlayText | null {
   if (!hasOnlyFiniteNumbers(overlay) || !Number.isFinite(overlay.fontSize)) return null;
+  const normalizeAnimatable = (value: Animatable | undefined): Animatable | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+    return value
+      .filter((keyframe) => Number.isFinite(keyframe.t) && Number.isFinite(keyframe.value))
+      .slice(0, MAX_ANIMATION_KEYFRAMES);
+  };
+  const tracking = overlay.tracking
+    ? {
+      x: normalizeAnimatable(overlay.tracking.x),
+      y: normalizeAnimatable(overlay.tracking.y),
+    }
+    : undefined;
   return {
     ...overlay,
     id: VALID_ID.test(overlay.id) ? overlay.id : crypto.randomUUID(),
@@ -399,6 +413,7 @@ function normalizeOverlay(overlay: OverlayText): OverlayText | null {
     ...(overlay.introDuration !== undefined
       ? { introDuration: Math.max(0, overlay.introDuration) }
       : null),
+    ...(tracking && (tracking.x !== undefined || tracking.y !== undefined) ? { tracking } : null),
   };
 }
 

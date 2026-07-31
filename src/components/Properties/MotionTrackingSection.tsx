@@ -15,12 +15,15 @@ const DEFAULT_REGION: TrackingRegion = { x: 0.4, y: 0.3, width: 0.2, height: 0.2
 
 export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProps) {
   const setClipTransform = useProjectStore((state) => state.setClipTransform);
+  const updateClipOverlay = useProjectStore((state) => state.updateClipOverlay);
   const showMessage = useProjectStore((state) => state.showMessage);
   const fps = useProjectStore((state) => state.fps);
   const [region, setRegion] = useState(DEFAULT_REGION);
   const [progress, setProgress] = useState<number | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
   const [cancel, setCancel] = useState<AbortController | null>(null);
+  const [target, setTarget] = useState<'clip' | 'overlays'>('clip');
+  const effectiveTarget = target === 'overlays' && (clip.overlays?.length ?? 0) > 0 ? target : 'clip';
   const duration = useMemo(() => clipDuration(clip), [clip]);
 
   const updateRegion = (key: keyof TrackingRegion, value: string) => {
@@ -59,11 +62,21 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
         onProgress: setProgress,
         signal: controller.signal,
       });
-      setClipTransform(clip.id, {
-        ...(clip.transform ?? {}),
-        x: result.x,
-        y: result.y,
-      });
+      if (effectiveTarget === 'clip') {
+        setClipTransform(clip.id, {
+          ...(clip.transform ?? {}),
+          x: result.x,
+          y: result.y,
+        });
+      } else {
+        // The native exporter rasterizes a clip's overlays into one image, so
+        // applying the same track to every overlay keeps preview/export parity.
+        for (const overlay of clip.overlays ?? []) {
+          updateClipOverlay(clip.id, overlay.id, {
+            tracking: { x: result.x, y: result.y },
+          });
+        }
+      }
       setConfidence(result.averageConfidence);
       showMessage(
         result.averageConfidence >= 0.55 ? 'success' : 'info',
@@ -90,6 +103,13 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
         <Crosshair size={14} aria-hidden="true" />
         <span>映像内の範囲を追跡し、位置キーフレームとして適用します。</span>
       </div>
+      <label className={styles.target}>
+        <span>追従先</span>
+        <select value={effectiveTarget} onChange={(event) => setTarget(event.target.value as 'clip' | 'overlays')} disabled={progress !== null}>
+          <option value="clip">映像クリップ</option>
+          <option value="overlays" disabled={!clip.overlays?.length}>テキスト／画像全体</option>
+        </select>
+      </label>
       <div className={styles.regionGrid}>
         {(['x', 'y', 'width', 'height'] as const).map((key) => (
           <label key={key}>
@@ -120,7 +140,7 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
           {confidence === null ? `範囲を追跡（${duration.toFixed(1)}秒）` : `再追跡（信頼度 ${Math.round(confidence * 100)}%）`}
         </button>
       )}
-      <p className={styles.note}>まず対象を中央付近に置き、4つの数値で囲みを合わせてください。追跡結果は横/縦位置のキーフレームになります。</p>
+      <p className={styles.note}>まず対象を中央付近に置き、4つの数値で囲みを合わせてください。追跡結果は横/縦位置のキーフレームになります。オーバーレイを選ぶと同じ動きが全テキスト／画像に適用されます。</p>
     </div>
   );
 }

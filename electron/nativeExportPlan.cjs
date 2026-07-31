@@ -1042,21 +1042,36 @@ function introForOverlays(overlays, frameHeight) {
   };
 }
 
-function buildOverlayParts(base, input, output, index, start, end, intro) {
+function overlayTrackingForOverlays(overlays, width, height, start) {
+  if (!Array.isArray(overlays) || overlays.length === 0) return null;
+  // A clip's overlays are rasterized into one full-frame PNG. We can safely
+  // move that image only when every overlay shares the same tracking result;
+  // otherwise silently moving some text would be worse than leaving it fixed.
+  const tracked = overlays.filter((overlay) => overlay?.tracking);
+  if (tracked.length === 0 || tracked.length !== overlays.length) return null;
+  const first = tracked[0].tracking ?? {};
+  const localTime = `(t-${number(start)})`;
+  const x = `(${animatableExpression(first.x, 0, '追跡X', localTime)})*${number(width / 100)}`;
+  const y = `(${animatableExpression(first.y, 0, '追跡Y', localTime)})*${number(height / 100)}`;
+  return { x, y };
+}
+
+function buildOverlayParts(base, input, output, index, start, end, intro, tracking) {
   const startText = start.toFixed(3);
   const endText = end.toFixed(3);
   const enable = `enable=between(t\\,${startText}\\,${endText})`;
-  if (!intro) return [`${base}${input}overlay=0:0:${enable}${output}`];
+  if (!intro && !tracking) return [`${base}${input}overlay=0:0:${enable}${output}`];
   const faded = `[ovf${index}]`;
-  const fade =
-    `${input}format=rgba,` +
-    `fade=t=in:st=${startText}:d=${intro.duration.toFixed(3)}:alpha=1${faded}`;
-  let x = '0';
-  let y = '0';
-  if (intro.distancePx > 0) {
+  const fade = intro
+    ? `${input}format=rgba,` +
+      `fade=t=in:st=${startText}:d=${intro.duration.toFixed(3)}:alpha=1${faded}`
+    : `${input}format=rgba${faded}`;
+  let x = tracking?.x ?? '0';
+  let y = tracking?.y ?? '0';
+  if (intro?.distancePx > 0) {
     const ramp = `max(0\\,1-(t-${startText})/${intro.duration.toFixed(3)})`;
-    if (intro.kind === 'slide-up') y = `${intro.distancePx}*${ramp}`;
-    if (intro.kind === 'slide-left') x = `${intro.distancePx}*${ramp}`;
+    if (intro.kind === 'slide-up') y = `(${y})+${intro.distancePx}*${ramp}`;
+    if (intro.kind === 'slide-left') x = `(${x})+${intro.distancePx}*${ramp}`;
   }
   return [fade, `${base}${faded}overlay=${x}:${y}:${enable}${output}`];
 }
@@ -1550,6 +1565,7 @@ function buildNativeExportPlan(
           overlay.start,
           overlay.end,
           introForOverlays(overlay.clip.overlays, height),
+          overlayTrackingForOverlays(overlay.clip.overlays, width, height, overlay.start),
         ),
       );
       videoOutputLabel = output;

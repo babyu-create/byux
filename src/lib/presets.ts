@@ -239,6 +239,10 @@ const overlaySchema = z.object({
   strokeWidth: nonNegativeNumber.optional(),
   intro: z.enum(['none', 'fade', 'slide-up', 'slide-left', 'scale-in']).optional(),
   introDuration: nonNegativeNumber.optional(),
+  tracking: z.object({
+    x: animatableSchema.optional(),
+    y: animatableSchema.optional(),
+  }).optional(),
 });
 
 const lookSchema = z.object({

@@ -240,6 +240,11 @@ export interface OverlayText {
   intro?: OverlayIntroKind;
   /** Intro animation duration in seconds (defaults to 0.4). Clamped on use. */
   introDuration?: number;
+  /** Optional motion-tracking offsets in frame-relative percent units. */
+  tracking?: {
+    x?: Animatable;
+    y?: Animatable;
+  };
 }
 
 export interface Clip {

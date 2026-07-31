@@ -437,6 +437,9 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
         .filter((asset) => clips.some((clip) => clip.assetId === asset.id))
         .reduce((total, asset) => total + asset.size, 0);
       const previewParityMemorySafe = referencedAssetBytes <= 256 * 1024 * 1024;
+      const hasTrackedOverlay = clips.some((clip) =>
+        clip.overlays?.some((overlay) => Boolean(overlay.tracking)),
+      );
       // Short clips use the same WebGL renderer as the live preview when the
       // referenced sources are small enough to stage safely. Long timelines
       // or multi-GB captures stay on native FFmpeg so the renderer never has
@@ -444,7 +447,8 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
       const preferPreviewParity =
         hasMotionBlurEffect &&
         motionBlurFrames <= exactEffectFrameLimit &&
-        previewParityMemorySafe;
+        previewParityMemorySafe &&
+        !hasTrackedOverlay;
       let useNative = false;
       let nativeUnavailableReason = '';
       if (nativeExport?.getNativeCapabilities) {

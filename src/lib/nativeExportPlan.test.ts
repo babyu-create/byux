@@ -772,6 +772,35 @@ describe('nativeExportPlan', () => {
     ).toThrow(/テキスト画像/);
   });
 
+  it('moves rasterized overlays with the authored tracking keyframes', () => {
+    const tracked = {
+      ...request(),
+      clips: request().clips.map((clip) => ({
+        ...clip,
+        overlays: [{
+          id: 'text',
+          text: 'hello',
+          fontSize: 8,
+          color: '#fff',
+          position: 'center',
+          tracking: {
+            x: [{ t: 0, value: 1 }, { t: 2, value: 4 }],
+            y: 0,
+          },
+        }],
+      })),
+    };
+    const plan = buildNativeExportPlan(
+      tracked,
+      new Map([['asset', { path: 'source.mp4', hasAudio: false }]]),
+      new Map([['clip', 'overlay.png']]),
+      'output.part',
+    );
+    expect(plan.filterGraph).toContain('[1:v]format=rgba[ovf0]');
+    expect(plan.filterGraph).toContain('overlay=(if(lte((t-2)\\,0)');
+    expect(plan.filterGraph).toContain(')*12.8:(0)*7.2');
+  });
+
   it('keeps progress monotonic and reserves one percent for validation', () => {
     const first = parseProgressText(
       'out_time_us=30000000\nspeed=2.0x\nfps=60\nprogress=continue\n',
