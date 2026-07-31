@@ -86,6 +86,7 @@ export function needsChromiumPreviewProxy(metadata: {
   toneMap?: 'pq' | 'hlg' | null;
   variableFrameRate?: boolean;
 }): boolean;
+export function buildPreviewFrameRateArgs(variableFrameRate: boolean): string[];
 export function probeInputVideoColorMetadata(
   binaryPath: string,
   sourcePath: string,

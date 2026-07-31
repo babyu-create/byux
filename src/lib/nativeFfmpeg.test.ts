@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildHdrToSdrFilter,
+  buildPreviewFrameRateArgs,
   buildBoundedSegmentPlan,
   buildSegmentPlan,
   buildVideoDecodeProbePlan,
@@ -142,6 +143,11 @@ describe('native media stream probing', () => {
     }
     expect(buildHdrToSdrFilter(null)).toBe('');
     expect(buildHdrToSdrFilter('unsafe' as never)).toBe('');
+  });
+
+  it('normalises only VFR preview proxies to a seekable CFR stream', () => {
+    expect(buildPreviewFrameRateArgs(true)).toEqual(['-fps_mode', 'cfr', '-r', '60']);
+    expect(buildPreviewFrameRateArgs(false)).toEqual([]);
   });
 });
 

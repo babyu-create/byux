@@ -31,6 +31,7 @@ const {
 } = require('./nativeExportPlan.cjs');
 const {
   appendTail,
+  buildPreviewFrameRateArgs,
   buildHdrToSdrFilter,
   buildBoundedSegmentPlan,
   estimatePreviewProxyBytes,
@@ -3335,8 +3336,8 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     }
     const proxyProfile = source.kind === 'video'
       ? source.requiresRepairProxy
-        ? `proxy-v4-repair120-1280-crf27-aac48k-${source.hdrToneMap ?? 'sdr'}`
-        : `proxy-v3-1280-crf27-aac48k-${source.hdrToneMap ?? 'sdr'}`
+        ? `proxy-v5-repair120-1280-crf27-aac48k-${source.hdrToneMap ?? 'sdr'}-vfr${source.variableFrameRate ? '1' : '0'}`
+        : `proxy-v4-1280-crf27-aac48k-${source.hdrToneMap ?? 'sdr'}-vfr${source.variableFrameRate ? '1' : '0'}`
       : 'audio-proxy-v2-aac160-stereo48k';
     const fingerprint = crypto
       .createHash('sha256')
@@ -3403,6 +3404,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
             buildHdrToSdrFilter(source.hdrToneMap),
             "scale='min(1280,iw)':-2",
           ].filter(Boolean).join(','),
+          ...buildPreviewFrameRateArgs(source.variableFrameRate),
           '-c:v',
           'libx264',
           '-preset',

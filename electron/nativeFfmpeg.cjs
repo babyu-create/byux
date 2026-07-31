@@ -301,6 +301,14 @@ function needsChromiumPreviewProxy(metadata) {
   return browserCodec || browserPixelFormat || metadata?.toneMap !== null || metadata?.variableFrameRate === true;
 }
 
+/** Keep VFR captures seekable in Chromium by making only their editing proxy
+ * CFR. The original remains untouched and is always used for final export. */
+function buildPreviewFrameRateArgs(variableFrameRate) {
+  return variableFrameRate === true
+    ? ['-fps_mode', 'cfr', '-r', '60']
+    : [];
+}
+
 async function probeInputVideoColorMetadata(binaryPath, sourcePath) {
   const result = await runCaptured(
     binaryPath,
@@ -677,6 +685,7 @@ module.exports = {
   parseInputVideoColorMetadata,
   parseInputVideoCompatibility,
   needsChromiumPreviewProxy,
+  buildPreviewFrameRateArgs,
   probeInputDuration,
   probeInputHasAudio,
   probePreferredAudioStreamIndex,
