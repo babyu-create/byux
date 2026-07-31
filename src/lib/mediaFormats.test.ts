@@ -7,6 +7,9 @@ import {
 } from '../../electron/mediaFormats.cjs'
 import {
   SUPPORTED_AUDIO_EXTENSIONS,
+  SUPPORTED_AUDIO_ACCEPT,
+  SUPPORTED_MEDIA_ACCEPT,
+  SUPPORTED_VIDEO_ACCEPT,
   SUPPORTED_VIDEO_EXTENSIONS,
   guessMimeType,
   isAudioFile,
@@ -24,6 +27,17 @@ describe('media format support', () => {
     expect(AUDIO_EXTENSION_LIST.map((ext) => ext.slice(1))).toEqual(
       SUPPORTED_AUDIO_EXTENSIONS,
     )
+  })
+
+  it('keeps file-picker filters aligned with every supported extension', () => {
+    for (const extension of SUPPORTED_VIDEO_EXTENSIONS) {
+      expect(SUPPORTED_VIDEO_ACCEPT).toContain(`.${extension}`)
+      expect(SUPPORTED_MEDIA_ACCEPT).toContain(`.${extension}`)
+    }
+    for (const extension of SUPPORTED_AUDIO_EXTENSIONS) {
+      expect(SUPPORTED_AUDIO_ACCEPT).toContain(`.${extension}`)
+      expect(SUPPORTED_MEDIA_ACCEPT).toContain(`.${extension}`)
+    }
   })
 
   it.each(['clip.m4v', 'clip.m2ts', 'clip.wmv', 'clip.mxf', 'clip.3gp'])(

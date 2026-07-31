@@ -50,6 +50,24 @@ export const SUPPORTED_AUDIO_EXTENSIONS = [
   'amr',
 ] as const;
 
+/**
+ * Keep the native file picker in sync with the actual importer allowlist.
+ * Relying on only `video/*,audio/*` makes Windows hide containers whose MIME
+ * association is missing (notably MKV/AVI/TS and DVR captures), even though
+ * FFmpeg can import them safely.
+ */
+export const SUPPORTED_VIDEO_ACCEPT = [
+  'video/*',
+  ...SUPPORTED_VIDEO_EXTENSIONS.map((extension) => `.${extension}`),
+].join(',');
+
+export const SUPPORTED_AUDIO_ACCEPT = [
+  'audio/*',
+  ...SUPPORTED_AUDIO_EXTENSIONS.map((extension) => `.${extension}`),
+].join(',');
+
+export const SUPPORTED_MEDIA_ACCEPT = `${SUPPORTED_VIDEO_ACCEPT},${SUPPORTED_AUDIO_ACCEPT}`;
+
 const VIDEO_EXTENSIONS = new Set<string>(SUPPORTED_VIDEO_EXTENSIONS);
 const AUDIO_EXTENSIONS = new Set<string>(SUPPORTED_AUDIO_EXTENSIONS);
 const MEDIA_METADATA_TIMEOUT_MS = 20_000;

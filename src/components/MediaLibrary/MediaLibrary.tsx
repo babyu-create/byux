@@ -2,7 +2,13 @@ import { useEffect, useRef, useState, type DragEvent, type ChangeEvent } from 'r
 import { AlertTriangle, Link2, Music, PanelLeftClose, PanelLeftOpen, Plus } from 'lucide-react';
 import { useMediaStore } from '../../stores/mediaStore';
 import { clearHistory, useProjectStore } from '../../stores/projectStore';
-import { formatDuration, formatFileSize } from '../../lib/media';
+import {
+  formatDuration,
+  formatFileSize,
+  SUPPORTED_AUDIO_ACCEPT,
+  SUPPORTED_MEDIA_ACCEPT,
+  SUPPORTED_VIDEO_ACCEPT,
+} from '../../lib/media';
 import type { MediaAsset } from '../../lib/types';
 import {
   assetRelinkError,
@@ -306,7 +312,7 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
         <input
           ref={fileInputRef}
           type="file"
-          accept="video/*,audio/*"
+          accept={SUPPORTED_MEDIA_ACCEPT}
           multiple
           onChange={handleChange}
           aria-label="動画または音声ファイルを選択"
@@ -353,7 +359,7 @@ export function MediaLibrary({ collapsed, onToggleCollapse }: MediaLibraryProps)
           <input
             ref={relinkInputRef}
             type="file"
-            accept={relinkTarget?.kind === 'audio' ? 'audio/*' : 'video/*'}
+            accept={relinkTarget?.kind === 'audio' ? SUPPORTED_AUDIO_ACCEPT : SUPPORTED_VIDEO_ACCEPT}
             onChange={(event) => void handleRelinkChange(event)}
             className={styles.fileInput}
             aria-label="再リンクする元ファイルを選択"
