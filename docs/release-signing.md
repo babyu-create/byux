@@ -11,6 +11,21 @@ electron-builder が参照する CI secret を設定します。
 
 `WIN_CSC_LINK` と `WIN_CSC_KEY_PASSWORD` も利用できます。値そのものはログに出さないでください。
 
+### GitHub Actionsでの公開（推奨）
+
+リポジトリの Settings → Secrets and variables → Actions に次を登録します。
+
+- `CSC_LINK`: `.pfx` / `.p12` ファイルを Base64 化した文字列
+- `CSC_KEY_PASSWORD`: 証明書のパスワード
+
+Base64 は、証明書をリポジトリへ置かずにPowerShellで作成できます。
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\secure\byux-signing.pfx'))
+```
+
+`v*` タグをpushすると [`.github/workflows/release-windows.yml`](../.github/workflows/release-windows.yml) がテスト、署名、署名検証、GitHub Release公開まで実行します。手動実行も可能です。秘密鍵やパスワードをソースコード、Issue、ログへ貼り付けないでください。
+
 公開前に次を実行します。
 
 ```powershell
