@@ -13,6 +13,11 @@ describe('native loudness analysis', () => {
     expect(args).not.toContain('pipe:1');
   });
 
+  it('analyzes the same preferred stream used by preview and export', () => {
+    expect(buildLoudnessFfmpegArgs('source.mkv', 1)).toContain('0:a:1');
+    expect(() => buildLoudnessFfmpegArgs('source.mkv', 128)).toThrow(/stream index/i);
+  });
+
   it('parses the final summary instead of an earlier measurement', () => {
     const parsed = parseLoudnessSummary(`
       I: -70.0 LUFS

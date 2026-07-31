@@ -26,6 +26,11 @@ export function runCaptured(
 }>;
 export function verifyFfmpegBinary(binaryPath: string): Promise<boolean>;
 export function probeInputHasAudio(binaryPath: string, sourcePath: string): Promise<boolean>;
+export function parsePreferredAudioStreamIndex(stderr: string): number | null;
+export function probePreferredAudioStreamIndex(
+  binaryPath: string,
+  sourcePath: string,
+): Promise<number | null>;
 export function probeInputDuration(
   binaryPath: string,
   sourcePath: string,

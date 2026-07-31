@@ -7,6 +7,15 @@ export const MAX_OVERLAYS: number;
 
 export function buildAtempoChain(speed: number): string[];
 
+export function buildHudMaskFilterChain(
+  preset: 'valorant' | 'cs2' | 'apex',
+  strength: number,
+  width: number,
+  height: number,
+  fps: number,
+  duration: number,
+): string;
+
 export function buildTimeline(
   clips: Array<Record<string, unknown>>,
 ): Array<
@@ -20,7 +29,12 @@ export function buildNativeExportPlan(
   request: Record<string, unknown>,
   sourceByAssetId: Map<
     string,
-    { path: string; hasAudio: boolean; hdrToneMap?: 'pq' | 'hlg' | null }
+    {
+      path: string;
+      hasAudio: boolean;
+      audioStreamIndex?: number;
+      hdrToneMap?: 'pq' | 'hlg' | null;
+    }
   >,
   overlayPathByClipId: Map<string, string>,
   outputPath: string,

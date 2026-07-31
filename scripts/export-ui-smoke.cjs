@@ -8,8 +8,11 @@ const path = require('node:path');
 const executableArg = process.argv[2];
 const fixtureArg = process.argv[3];
 const expectedVersion = process.argv[4];
+const motionBlurSmoke = process.argv.includes('--motion-blur');
 if (!executableArg || !fixtureArg || !expectedVersion) {
-  throw new Error('usage: node export-ui-smoke.cjs <Byux.exe> <video-file> <version>');
+  throw new Error(
+    'usage: node export-ui-smoke.cjs <Byux.exe> <video-file> <version> [--motion-blur]',
+  );
 }
 // Node's Windows spawn does not consistently resolve a relative executable
 // containing path separators. Resolve both inputs once so the smoke test works
@@ -162,7 +165,9 @@ async function writeProjectFixture() {
       start: 0,
       trimStart: 0,
       trimEnd: 1,
-      effects: [],
+      effects: motionBlurSmoke
+        ? [{ type: 'motion-blur', intensity: 65 }]
+        : [],
     }],
     markers: [],
     ioRanges: [],
@@ -458,6 +463,23 @@ async function main() {
     if (initial.modalWidth > initial.viewportWidth || initial.modalHeight > initial.viewportHeight) {
       throw new Error(`export dialog overflowed the viewport: ${JSON.stringify(initial)}`);
     }
+    if (motionBlurSmoke) {
+      const blurToggled = await evaluate(
+        page,
+        `(() => {
+          const buttons = [...document.querySelectorAll('button')];
+          const on = buttons.find((button) => button.innerText.trim() === 'ON（低速）');
+          on?.click();
+          return new Promise((resolve) => requestAnimationFrame(() => resolve({
+            found: Boolean(on),
+            pressed: on?.getAttribute('aria-pressed') ?? null,
+          })));
+        })()`,
+      );
+      if (!blurToggled?.found || blurToggled.pressed !== 'true') {
+        throw new Error(`motion blur did not toggle: ${JSON.stringify(blurToggled)}`);
+      }
+    }
     const filenameSet = await evaluate(
       page,
       `(() => {
@@ -544,6 +566,7 @@ async function main() {
       ...initial,
       toggled,
       encoderBadge: completed.badge,
+      motionBlur: motionBlurSmoke,
       outputBytes: output.size,
     })}`);
   } finally {

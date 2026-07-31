@@ -62,4 +62,9 @@ describe('native waveform metadata accumulator', () => {
     expect(filter).toContain('asetnsamples=n=2400')
     expect(filter).toContain('Overall.Peak_level')
   })
+
+  it('maps the preferred audio stream consistently', () => {
+    expect(buildWaveformFfmpegArgs('source.mkv', 2)).toContain('0:a:2')
+    expect(() => buildWaveformFfmpegArgs('source.mkv', -1)).toThrow(/stream index/i)
+  })
 })

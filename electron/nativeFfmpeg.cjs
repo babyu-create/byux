@@ -101,33 +101,65 @@ async function verifyFfmpegBinary(binaryPath) {
   return true;
 }
 
-async function probeInputHasAudio(binaryPath, sourcePath) {
+const INPUT_STREAM_PATTERN =
+  /Stream #\d+:\d+(?:\[[^\]\r\n]+\])?(?:\([^\)\r\n]*\))?:\s*(Video|Audio):([^\r\n]*)/gi;
+
+/**
+ * Pick one stable audio stream for the whole editor pipeline. Recording tools
+ * commonly write game/mix and microphone as separate tracks. Honour the
+ * container's default disposition when present, then fall back to the first
+ * audio stream for OBS/capture-file compatibility.
+ *
+ * The returned index is the audio ordinal used by FFmpeg's `0:a:N` syntax,
+ * not the container-wide stream index.
+ */
+function parsePreferredAudioStreamIndex(stderr) {
+  const text = String(stderr);
+  const matches = [...text.matchAll(INPUT_STREAM_PATTERN)];
+  let audioOrdinal = 0;
+  let firstAudio = null;
+  for (const match of matches) {
+    if (match[1].toLowerCase() !== 'audio') continue;
+    if (firstAudio === null) firstAudio = audioOrdinal;
+    if (/\(default\)/i.test(match[2])) return audioOrdinal;
+    audioOrdinal += 1;
+  }
+  return firstAudio;
+}
+
+async function probePreferredAudioStreamIndex(binaryPath, sourcePath) {
   const result = await runCaptured(
     binaryPath,
     [
       '-hide_banner',
       '-nostdin',
+      '-loglevel',
+      'info',
       '-protocol_whitelist',
       'file,pipe',
       '-i',
       sourcePath,
-      '-map',
-      '0:a:0?',
-      '-t',
-      '0.001',
-      '-f',
-      'null',
-      '-',
     ],
     { timeoutMs: 30_000 },
   );
-  return /Stream #\d+:\d+(?:\([^)]*\))?: Audio:/i.test(result.stderr);
+  const media = parseInputMediaStreams(result.stderr);
+  if (!media.hasVideo && !media.hasAudio) {
+    throw new Error('素材の音声・映像ストリームを確認できません');
+  }
+  return parsePreferredAudioStreamIndex(result.stderr);
+}
+
+async function probeInputHasAudio(binaryPath, sourcePath) {
+  return (await probePreferredAudioStreamIndex(binaryPath, sourcePath)) !== null;
 }
 
 function parseInputMediaStreams(stderr) {
   const text = String(stderr);
-  const hasVideo = /Stream #\d+:\d+(?:\([^)]*\))?: Video:/i.test(text);
-  const hasAudio = /Stream #\d+:\d+(?:\([^)]*\))?: Audio:/i.test(text);
+  const streamKinds = [...text.matchAll(INPUT_STREAM_PATTERN)].map((match) =>
+    match[1].toLowerCase(),
+  );
+  const hasVideo = streamKinds.includes('video');
+  const hasAudio = streamKinds.includes('audio');
   return {
     hasVideo,
     hasAudio,
@@ -536,10 +568,12 @@ module.exports = {
   estimatePreviewProxyBytes,
   minimalEnvironment,
   parseDuration,
+  parsePreferredAudioStreamIndex,
   parseInputMediaStreams,
   parseInputVideoColorMetadata,
   probeInputDuration,
   probeInputHasAudio,
+  probePreferredAudioStreamIndex,
   probeInputMediaKind,
   probeInputVideoColorMetadata,
   probeInputVideoDecodable,

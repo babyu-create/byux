@@ -76,6 +76,7 @@ describe('timelineEditFeedback', () => {
 
     expect(lastSelectedClipIdOnTrack(clips, selected)).toBe('clip-42');
     expect(lastSelectedClipIdOnTrack(clips, ['other'])).toBe('clip-0');
+    expect(lastSelectedClipIdOnTrack(clips, ['other'], null)).toBeUndefined();
     expect(lastSelectedClipIdOnTrack([], selected)).toBeUndefined();
   });
 

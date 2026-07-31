@@ -415,7 +415,12 @@ function PreviewVisualLayer({
   );
 }
 
-export function Preview() {
+interface PreviewProps {
+  /** Pause expensive preview media/WebGL work while a modal owns the UI. */
+  suspended?: boolean;
+}
+
+export function Preview({ suspended = false }: PreviewProps) {
   const fallbackAsset = useSelectedAsset();
   const assets = useMediaStore((s) => s.assets);
   const clips = useProjectStore((s) => s.clips);
@@ -423,6 +428,7 @@ export function Preview() {
   const playhead = useProjectStore((s) => s.playhead);
   const setPlayhead = useProjectStore((s) => s.setPlayhead);
   const isPlaying = useProjectStore((s) => s.isPlaying);
+  const previewPlaying = isPlaying && !suspended;
   const togglePlay = useProjectStore((s) => s.togglePlay);
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
   const verticalReframe = useProjectStore((s) => s.verticalReframe);
@@ -740,14 +746,14 @@ export function Preview() {
     videoTrackMuted ||
       (activeClip?.muted ?? false) ||
       mainVolume === 0,
-    isPlaying,
+    previewPlaying,
     activeClip?.audioProcessing,
   );
-  const playingRef = useRef(isPlaying);
+  const playingRef = useRef(previewPlaying);
 
   useEffect(() => {
-    playingRef.current = isPlaying;
-  }, [isPlaying]);
+    playingRef.current = previewPlaying;
+  }, [previewPlaying]);
 
   // HUD preset for the motion blur canvas. Each preset wraps a per-game
   // set of view-locked UI zones. 'valorant' (default) preserves the
@@ -765,7 +771,7 @@ export function Preview() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !displayAsset) return;
-    if (isPlaying) return;
+    if (previewPlaying) return;
     let target = 0;
     if (activeClip) {
       const localT = playhead - activeClip.start;
@@ -786,13 +792,13 @@ export function Preview() {
         video.currentTime = target;
       }
     }
-  }, [playhead, activeClip, activeRampSampler, displayAsset, isPlaying]);
+  }, [playhead, activeClip, activeRampSampler, displayAsset, previewPlaying]);
 
   // Preserve authored black gaps and upper-only intervals. When there is no
   // base <video> to drive the clock, wall time advances the same continuous
   // timeline that native export renders.
   useEffect(() => {
-    if (!isPlaying || activeClip) return;
+    if (!previewPlaying || activeClip) return;
     let rafId = 0;
     let previous = performance.now();
     const step = (now: number) => {
@@ -828,13 +834,13 @@ export function Preview() {
     };
     rafId = requestAnimationFrame(step);
     return () => cancelAnimationFrame(rafId);
-  }, [activeClip, isPlaying]);
+  }, [activeClip, previewPlaying]);
 
   // Drive playback. Video element is the source of truth; playhead follows
   // its currentTime each animation frame, ensuring zero drift between the
   // displayed frame and the timeline cursor.
   useEffect(() => {
-    if (!isPlaying) return;
+    if (!previewPlaying) return;
     const video = videoRef.current;
     if (!video) return;
     video.play().catch(reportMainPlaybackFailure);
@@ -934,7 +940,7 @@ export function Preview() {
       cancelAnimationFrame(rafId);
       video.pause();
     };
-  }, [activeClip?.id, isPlaying, videoTrackId]);
+  }, [activeClip?.id, previewPlaying, videoTrackId]);
 
   // When the active asset changes mid-play, jump the video to the right local time.
   useEffect(() => {
@@ -945,7 +951,7 @@ export function Preview() {
       ? activeRampSampler.sourceTimeAtLocalTime(localT)
       : activeClip.trimStart + localT * (activeClip.speed ?? 1);
     video.currentTime = Math.max(0, Math.min(activeAsset.duration, target));
-    if (isPlaying) {
+    if (previewPlaying) {
       video.play().catch(reportMainPlaybackFailure);
     }
     // We intentionally only react to clip/asset switch.
@@ -1121,7 +1127,7 @@ export function Preview() {
           clip={clip}
           asset={asset}
           playhead={playhead}
-          isPlaying={isPlaying}
+        isPlaying={previewPlaying}
           trackMuted={track.muted}
           gain={track.id === bgmTrackId && duckActive ? duckGain : 1}
         />
@@ -1159,8 +1165,8 @@ export function Preview() {
               />
               <MotionBlurCanvas
                 videoRef={videoRef}
-                isPlaying={isPlaying}
-                active={motionBlur !== null && motionBlurStrength > 0}
+                isPlaying={previewPlaying}
+                active={!suspended && motionBlur !== null && motionBlurStrength > 0}
                 strength={motionBlurStrength}
                 hudPreset={hudPreset}
                 hudMaskStrength={hudPreset === 'none' ? 0 : 1}
@@ -1198,7 +1204,7 @@ export function Preview() {
               clip={clip}
               asset={asset}
               playhead={playhead}
-              isPlaying={isPlaying}
+              isPlaying={previewPlaying}
               trackMuted={track.muted}
               aspectRatio={aspectRatio}
               verticalReframe={verticalReframe}

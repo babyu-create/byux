@@ -1,4 +1,4 @@
-import { useState, type MouseEvent } from 'react';
+import { memo, useState, type MouseEvent } from 'react';
 import { Captions, Scissors, Trash2, Magnet, ZoomIn, ZoomOut, ListPlus, ListX } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
@@ -14,7 +14,7 @@ import type { TrackKind } from '../../lib/types';
 import { SubtitleDialog } from './SubtitleDialog';
 import { clipDuration } from '../../lib/timeline';
 
-export function TimelineToolbar() {
+export const TimelineToolbar = memo(function TimelineToolbar() {
   const [trackMenu, setTrackMenu] = useState<{ x: number; y: number } | null>(null);
   const [subtitleDialogOpen, setSubtitleDialogOpen] = useState(false);
   const zoom = useProjectStore((s) => s.zoom);
@@ -194,4 +194,4 @@ export function TimelineToolbar() {
       </div>
     </div>
   );
-}
+});

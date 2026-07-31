@@ -6,6 +6,7 @@ import {
   buildVideoDecodeProbePlan,
   estimatePreviewProxyBytes,
   parseDuration,
+  parsePreferredAudioStreamIndex,
   parseInputMediaStreams,
   parseInputVideoColorMetadata,
 } from '../../electron/nativeFfmpeg.cjs';
@@ -29,6 +30,27 @@ describe('native media stream probing', () => {
 
   it('rejects files with no media streams', () => {
     expect(parseInputMediaStreams('Invalid data found when processing input').kind).toBeNull();
+  });
+
+  it('prefers the default recording audio stream and supports MPEG-TS stream ids', () => {
+    const probe = [
+      'Stream #0:0[0x100]: Video: h264',
+      'Stream #0:1[0x101](eng): Audio: aac, 48000 Hz, stereo',
+      'Stream #0:2[0x102](jpn): Audio: aac, 48000 Hz, stereo (default)',
+    ].join('\n');
+    expect(parsePreferredAudioStreamIndex(probe)).toBe(1);
+    expect(parseInputMediaStreams(probe)).toEqual({
+      hasVideo: true,
+      hasAudio: true,
+      kind: 'video',
+    });
+  });
+
+  it('falls back to the first audio stream when no default is declared', () => {
+    expect(parsePreferredAudioStreamIndex(
+      'Stream #0:3: Audio: opus\nStream #0:5: Audio: aac',
+    )).toBe(0);
+    expect(parsePreferredAudioStreamIndex('Stream #0:0: Video: h264')).toBeNull();
   });
 
   it('classifies PQ and HLG only from video color metadata', () => {

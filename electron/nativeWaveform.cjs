@@ -73,7 +73,10 @@ function createWaveformMetadataAccumulator(options = {}) {
   }
 }
 
-function buildWaveformFfmpegArgs(sourcePath) {
+function buildWaveformFfmpegArgs(sourcePath, audioStreamIndex = 0) {
+  if (!Number.isSafeInteger(audioStreamIndex) || audioStreamIndex < 0 || audioStreamIndex > 127) {
+    throw new Error('Audio stream index is invalid')
+  }
   const analysisFilter = [
     `aresample=${WAVEFORM_SAMPLE_RATE}`,
     `asetnsamples=n=${SAMPLES_PER_PEAK}:p=1`,
@@ -91,7 +94,7 @@ function buildWaveformFfmpegArgs(sourcePath) {
     '-i',
     sourcePath,
     '-map',
-    '0:a:0',
+    `0:a:${audioStreamIndex}`,
     '-vn',
     '-af',
     analysisFilter,

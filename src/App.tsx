@@ -1086,7 +1086,7 @@ function App() {
           ariaLabel="メディアライブラリの幅"
         />
         <section className={styles.panelCenter}>
-          <Preview />
+          <Preview suspended={exportOpen} />
         </section>
         <Splitter
           orientation="vertical"

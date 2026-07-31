@@ -100,7 +100,7 @@ function getResolution(resolution, aspectRatio) {
 
 function encodingSettings(quality) {
   if (quality === 'high') return { preset: 'veryfast', crf: 16, audioBitrate: '256k' };
-  if (quality === 'compact') return { preset: 'superfast', crf: 27, audioBitrate: '256k' };
+  if (quality === 'compact') return { preset: 'superfast', crf: 27, audioBitrate: '128k' };
   if (quality !== undefined && quality !== 'recommended') {
     throw new NativeExportPlanError('INVALID_OPTIONS', '画質設定が不正です');
   }
@@ -468,7 +468,7 @@ function animatableHasChange(value, identity) {
   );
 }
 
-function motionBlurSpec(clip, options) {
+function motionBlurSpec(clip, options, fps) {
   if (options?.motionBlur !== true) return null;
   const effect = Array.isArray(clip.effects)
     ? clip.effects.find((candidate) => candidate?.type === 'motion-blur')
@@ -488,16 +488,21 @@ function motionBlurSpec(clip, options) {
     : authoredStrength;
   if (strength <= EPS || intensity <= EPS) return null;
   const amount = clamp(strength / 1.25, 0, 1);
-  // Keep one fixed four-frame window and fade older taps in continuously.
-  // Changing the frame count at thresholds makes the visible blur jump while
-  // dragging the strength slider.
-  const frames = 4;
+  // Bound history to roughly 1/60 second. The previous fixed four-tap window
+  // retained 50 ms at 60 fps, producing long ghost trails while doing twice
+  // the useful mixing work. 120 fps keeps one extra tap for a similar window.
+  const maxFrames = fps >= 100 ? 3 : 2;
+  // At 24/30 fps the nearest previous sample is farther than the desired
+  // shutter window. Fade its contribution by frame rate to avoid a strong
+  // one-frame double image while preserving normalized constant brightness.
+  const temporalScale = clamp(fps / 60, 0, 1);
   const weights = [
     1,
-    amount,
+    amount * temporalScale,
     clamp((amount - 1 / 3) * 1.5, 0, 1),
-    clamp((amount - 2 / 3) * 3, 0, 1),
-  ];
+  ].slice(0, maxFrames);
+  while (weights.length > 2 && weights.at(-1) <= EPS) weights.pop();
+  const frames = weights.length;
   const preset = ['valorant', 'cs2', 'apex', 'none'].includes(options.motionBlurHudPreset)
     ? options.motionBlurHudPreset
     : 'valorant';
@@ -513,31 +518,50 @@ function motionBlurSpec(clip, options) {
   return { frames, weights, preset, hudStrength };
 }
 
-function hudRegionExpression(preset) {
+function hudMaskDrawboxFilters(preset) {
+  // Red gives drawbox geometry distinct values on every Y/U/V plane
+  // (approximately 81/90/240 versus black 16/128/128). The following LUT can
+  // therefore build one identical full-range mask on all subsampled planes.
+  const color = 'red';
   if (preset === 'cs2') {
-    return (
-      'lte(Y\\,H*0.09)+' +
-      'lte(X\\,W*0.18)*lte(Y\\,H*0.26)+' +
-      'lte(X\\,W*0.28)*gte(Y\\,H*0.88)+' +
-      'gte(X\\,W*0.78)*gte(Y\\,H*0.88)'
-    );
+    return [
+      `drawbox=x=0:y=0:w=iw:h=ih*0.09:color=${color}:t=fill`,
+      `drawbox=x=0:y=0:w=iw*0.18:h=ih*0.26:color=${color}:t=fill`,
+      `drawbox=x=0:y=ih*0.88:w=iw*0.28:h=ih*0.12:color=${color}:t=fill`,
+      `drawbox=x=iw*0.78:y=ih*0.88:w=iw*0.22:h=ih*0.12:color=${color}:t=fill`,
+    ];
   }
   if (preset === 'apex') {
-    return (
-      'gte(Y\\,H*0.62)+' +
-      'lte(X\\,W*0.20)*lte(Y\\,H*0.28)'
-    );
+    return [
+      `drawbox=x=0:y=ih*0.62:w=iw:h=ih*0.38:color=${color}:t=fill`,
+      `drawbox=x=0:y=0:w=iw*0.20:h=ih*0.28:color=${color}:t=fill`,
+    ];
   }
+  return [
+    `drawbox=x=0:y=ih*0.58:w=iw:h=ih*0.42:color=${color}:t=fill`,
+    `drawbox=x=0:y=0:w=iw:h=ih*0.10:color=${color}:t=fill`,
+    `drawbox=x=0:y=0:w=iw*0.22:h=ih*0.32:color=${color}:t=fill`,
+  ];
+}
+
+function buildHudMaskFilterChain(preset, strength, width, height, fps, duration) {
+  const level = Math.round(clamp(strength, 0, 1) * 255);
   return (
-    'gte(Y\\,H*0.58)+' +
-    'lte(Y\\,H*0.10)+' +
-    'lte(X\\,W*0.22)*lte(Y\\,H*0.32)'
+    `color=c=black:s=${width}x${height}:r=${fps}:d=${number(duration)},` +
+    `format=yuv420p,${hudMaskDrawboxFilters(preset).join(',')},` +
+    // Convert black/red limited-range samples into an identical full-range
+    // merge weight on Y, U and V. This protects colored HUD edges without an
+    // expensive RGB/4:4:4 round-trip or a per-pixel blend expression.
+    `lut=y='if(gt(val\\,40)\\,${level}\\,0)':` +
+    `u='if(lt(val\\,110)\\,${level}\\,0)':` +
+    `v='if(gt(val\\,180)\\,${level}\\,0)'`
   );
 }
 
 function buildAudioFilterParts(spec) {
   const {
     inputIndex,
+    audioStreamIndex = 0,
     clip,
     hasAudio,
     volume,
@@ -563,7 +587,7 @@ function buildAudioFilterParts(spec) {
       `volume=${number(volume)}`,
       ...AUDIO_NORMALIZATION_FILTERS,
     ];
-    return [`[${inputIndex}:a]${filters.join(',')}${outputLabel}`];
+    return [`[${inputIndex}:a:${audioStreamIndex}]${filters.join(',')}${outputLabel}`];
   }
 
   const sourceSpan = clip.trimEnd - clip.trimStart;
@@ -580,7 +604,9 @@ function buildAudioFilterParts(spec) {
     { length: rampAudioSegments },
     (_, index) => `[${prefix}ar${index}]`,
   );
-  const parts = [`[${inputIndex}:a]asplit=${rampAudioSegments}${splitLabels.join('')}`];
+  const parts = [
+    `[${inputIndex}:a:${audioStreamIndex}]asplit=${rampAudioSegments}${splitLabels.join('')}`,
+  ];
   const timelineSegment = duration / rampAudioSegments;
   for (let index = 0; index < rampAudioSegments; index += 1) {
     const p0 = index / rampAudioSegments;
@@ -640,6 +666,7 @@ function buildAudioProcessingFilters(value) {
 function buildClipFilters(spec) {
   const {
     inputIndex,
+    audioStreamIndex,
     clip,
     asset,
     width,
@@ -693,12 +720,13 @@ function buildClipFilters(spec) {
 
   const parts = [];
   let videoInput = `[${inputIndex}:v]`;
-  const blur = motionBlurSpec(clip, motionBlurOptions);
+  const blur = motionBlurSpec(clip, motionBlurOptions, fps);
   if (blur?.hudStrength > EPS) {
     const preLabel = `[${workPrefix}pre]`;
     const sharpLabel = `[${workPrefix}sharp]`;
     const blurInputLabel = `[${workPrefix}blurin]`;
     const blurredLabel = `[${workPrefix}blurred]`;
+    const maskLabel = `[${workPrefix}hudmask]`;
     const protectedLabel = `[${workPrefix}protected]`;
     parts.push(`${videoInput}${videoFilters.join(',')}${preLabel}`);
     parts.push(`${preLabel}split=2${sharpLabel}${blurInputLabel}`);
@@ -706,11 +734,18 @@ function buildClipFilters(spec) {
       `${blurInputLabel}tmix=frames=${blur.frames}:` +
       `weights='${blur.weights.map(number).join(' ')}'${blurredLabel}`,
     );
-    const mask =
-      `${number(blur.hudStrength)}*gt(${hudRegionExpression(blur.preset)}\\,0)`;
     parts.push(
-      `${blurredLabel}${sharpLabel}blend=all_expr='A*(1-(${mask}))+B*(${mask})'` +
-      protectedLabel,
+      `${buildHudMaskFilterChain(
+        blur.preset,
+        blur.hudStrength,
+        width,
+        height,
+        fps,
+        duration,
+      )}${maskLabel}`,
+    );
+    parts.push(
+      `${blurredLabel}${sharpLabel}${maskLabel}maskedmerge=planes=7${protectedLabel}`,
     );
     videoInput = protectedLabel;
     videoFilters.length = 0;
@@ -845,6 +880,7 @@ function buildClipFilters(spec) {
   if (audioLabel) {
     parts.push(...buildAudioFilterParts({
       inputIndex,
+      audioStreamIndex,
       clip,
       hasAudio,
       volume: clipVolume,
@@ -1347,6 +1383,14 @@ function buildNativeExportPlan(
       );
     }
     if (
+      source.audioStreamIndex !== undefined &&
+      (!Number.isSafeInteger(source.audioStreamIndex) ||
+        source.audioStreamIndex < 0 ||
+        source.audioStreamIndex > 127)
+    ) {
+      throw new NativeExportPlanError('INVALID_PROJECT', '音声ストリーム番号が不正です');
+    }
+    if (
       source.hdrToneMap !== undefined &&
       source.hdrToneMap !== null &&
       source.hdrToneMap !== 'pq' &&
@@ -1355,7 +1399,18 @@ function buildNativeExportPlan(
       throw new NativeExportPlanError('INVALID_PROJECT', 'HDR素材情報が不正です');
     }
     inputIndexByAssetId.set(assetId, index);
-    inputArgs.push('-i', source.path);
+    // Final export always decodes the original source, never the lower-quality
+    // preview proxy. Salvage damaged DVR packets in-place: corrupt video is
+    // dropped/concealed, fps restores timeline cadence, and async audio
+    // resampling keeps the authored duration synchronized.
+    inputArgs.push(
+      '-fflags',
+      '+genpts+discardcorrupt',
+      '-err_detect',
+      'ignore_err',
+      '-i',
+      source.path,
+    );
   });
 
   const filters = [];
@@ -1383,6 +1438,7 @@ function buildNativeExportPlan(
     filters.push(
       buildClipFilters({
         inputIndex: inputIndexByAssetId.get(item.clip.assetId),
+        audioStreamIndex: source.audioStreamIndex ?? 0,
         clip: item.clip,
         asset,
         width,
@@ -1414,6 +1470,7 @@ function buildNativeExportPlan(
     filters.push(
       buildClipFilters({
         inputIndex: inputIndexByAssetId.get(clip.assetId),
+        audioStreamIndex: source.audioStreamIndex ?? 0,
         clip,
         asset,
         width,
@@ -1523,6 +1580,7 @@ function buildNativeExportPlan(
       const rawLabel = `[baraw${index}]`;
       filters.push(...buildAudioFilterParts({
         inputIndex: inputIndexByAssetId.get(clip.assetId),
+        audioStreamIndex: source.audioStreamIndex ?? 0,
         clip,
         hasAudio: true,
         volume: finite(clip.volume ?? 1, '音量', 0, 2),
@@ -1665,6 +1723,7 @@ module.exports = {
   MAX_OVERLAYS,
   NativeExportPlanError,
   buildAtempoChain,
+  buildHudMaskFilterChain,
   buildNativeExportPlan,
   buildTimeline,
   collectUnsupportedFeatures,

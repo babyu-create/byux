@@ -72,13 +72,14 @@ export function clipIdsIntersectingTimeRange(
 export function lastSelectedClipIdOnTrack(
   orderedClips: readonly Pick<Clip, 'id'>[],
   selectedClipIds: readonly string[],
+  fallbackId: string | null | undefined = orderedClips[0]?.id,
 ): string | undefined {
   const trackClipIds = new Set(orderedClips.map((clip) => clip.id));
   for (let index = selectedClipIds.length - 1; index >= 0; index -= 1) {
     const id = selectedClipIds[index];
     if (trackClipIds.has(id)) return id;
   }
-  return orderedClips[0]?.id;
+  return fallbackId ?? undefined;
 }
 
 export function timelineEditFeedback(

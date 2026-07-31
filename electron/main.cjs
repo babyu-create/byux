@@ -36,8 +36,8 @@ const {
   estimatePreviewProxyBytes,
   minimalEnvironment,
   probeInputDuration,
-  probeInputHasAudio,
   probeInputMediaKind,
+  probePreferredAudioStreamIndex,
   probeInputVideoColorMetadata,
   probeInputVideoDecodable,
   resolveFfmpegBinary,
@@ -1310,7 +1310,7 @@ function isDangerousWindowsDevicePath(value) {
   );
 }
 
-async function leaseNativeSources(request, binaryPath, entry) {
+async function leaseNativeSources(request, entry) {
   if (
     !Array.isArray(request?.assets) ||
     request.assets.length > 2_000 ||
@@ -1346,7 +1346,6 @@ async function leaseNativeSources(request, binaryPath, entry) {
     }
   }
   const sources = new Map();
-  const audioProbeByToken = new Map();
   try {
     for (const asset of request.assets) {
       if (!requiredAssetIds.has(asset?.id)) continue;
@@ -1391,18 +1390,17 @@ async function leaseNativeSources(request, binaryPath, entry) {
       }
       source.leases = (source.leases ?? 0) + 1;
       entry.sourceLeases.push(asset.sourceToken);
-      let audioProbe = audioProbeByToken.get(asset.sourceToken);
-      if (!audioProbe) {
-        audioProbe = probeInputHasAudio(binaryPath, source.path);
-        audioProbeByToken.set(asset.sourceToken, audioProbe);
-      }
-      const hasAudio = await audioProbe;
+      const audioStreamIndex = Number.isSafeInteger(source.audioStreamIndex)
+        ? source.audioStreamIndex
+        : null;
+      const hasAudio = audioStreamIndex !== null;
       if (entry.cancelled) {
         throw new NativeExportPlanError('CANCELLED', '書き出しを中止しました');
       }
       sources.set(asset.id, {
         path: source.path,
         hasAudio,
+        audioStreamIndex: audioStreamIndex ?? 0,
         hdrToneMap: source.hdrToneMap ?? null,
       });
     }
@@ -1671,7 +1669,7 @@ async function runNativeExport(token, entry, request) {
     const preference = nativeEncodingPreference(request);
 
     const binaryPath = ffmpegBinaryPath();
-    const sourceByAssetId = await leaseNativeSources(request, binaryPath, entry);
+    const sourceByAssetId = await leaseNativeSources(request, entry);
     if (entry.cancelled) throw new Error('書き出しが中止されました');
 
     await fs.mkdir(nativeWorkRoot(), { recursive: true, mode: 0o700 });
@@ -2203,6 +2201,11 @@ function registerResolvedMedia(
   compatibility = {},
 ) {
   const requiresPreviewProxy = compatibility.requiresPreviewProxy === true;
+  const audioStreamIndex = Number.isSafeInteger(compatibility.audioStreamIndex) &&
+    compatibility.audioStreamIndex >= 0 &&
+    compatibility.audioStreamIndex <= 127
+    ? compatibility.audioStreamIndex
+    : null;
   const token = crypto.randomUUID();
   registeredMedia.set(token, {
     path: realPath,
@@ -2214,6 +2217,7 @@ function registerResolvedMedia(
     mtimeMs: stat.mtimeMs,
     leases: 0,
     releaseRequested: false,
+    audioStreamIndex,
     requiresPreviewProxy: requiresPreviewProxy === true,
     requiresRepairProxy: compatibility.requiresRepairProxy === true,
     hdrToneMap:
@@ -2229,6 +2233,14 @@ function registerResolvedMedia(
     name,
     requiresPreviewProxy: requiresPreviewProxy === true,
   };
+}
+
+async function inspectPreferredAudioStream(realPath) {
+  // `null` is reserved for a successful probe that found no audio. Startup,
+  // timeout, and read failures must reject registration instead of silently
+  // pinning an otherwise valid recording to a permanently muted export.
+  await ensureNativeFfmpeg();
+  return probePreferredAudioStreamIndex(ffmpegBinaryPath(), realPath);
 }
 
 async function resolveMediaKind(realPath, requestedKind = null) {
@@ -2305,11 +2317,17 @@ ipcMain.handle('media:register-selected-file', async (event, ref) => {
     const kind = await resolveMediaKind(realPath, ref.kind ?? null);
     if (!kind) return { ok: false, code: 'INVALID_KIND' };
     const name = path.basename(realPath);
-    const compatibility = await inspectVideoCompatibility(realPath, kind);
+    const [compatibility, audioStreamIndex] = await Promise.all([
+      inspectVideoCompatibility(realPath, kind),
+      inspectPreferredAudioStream(realPath),
+    ]);
     return {
       ok: true,
       source: {
-        ...registerResolvedMedia(realPath, stat, kind, name, compatibility),
+        ...registerResolvedMedia(realPath, stat, kind, name, {
+          ...compatibility,
+          audioStreamIndex,
+        }),
         path: realPath,
         name,
         kind,
@@ -2378,13 +2396,16 @@ ipcMain.handle('media:select-files', async (event, options) => {
         continue;
       }
       const name = path.basename(realPath);
-      const compatibility = await inspectVideoCompatibility(realPath, kind);
+      const [compatibility, audioStreamIndex] = await Promise.all([
+        inspectVideoCompatibility(realPath, kind),
+        inspectPreferredAudioStream(realPath),
+      ]);
       const registered = registerResolvedMedia(
         realPath,
         stat,
         kind,
         name,
-        compatibility,
+        { ...compatibility, audioStreamIndex },
       );
       sources.push({
         ...registered,
@@ -2432,13 +2453,16 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     if (!stat.isFile() || stat.size !== ref.size) return null;
     const kind = await resolveMediaKind(realPath, ref.kind ?? null);
     if (!kind || (ref.kind && kind !== ref.kind)) return null;
-    const compatibility = await inspectVideoCompatibility(realPath, kind);
+    const [compatibility, audioStreamIndex] = await Promise.all([
+      inspectVideoCompatibility(realPath, kind),
+      inspectPreferredAudioStream(realPath),
+    ]);
     return registerResolvedMedia(
       realPath,
       stat,
       kind,
       approval.name ?? canonicalName,
-      compatibility,
+      { ...compatibility, audioStreamIndex },
     );
   } catch {
     return null;
@@ -2461,7 +2485,9 @@ function waveformCacheRoot() {
 function waveformCacheKey(source) {
   return crypto
     .createHash('sha256')
-    .update(`${source.path}\u0000${source.size}\u0000${source.mtimeMs}`)
+    .update(
+      `${source.path}\u0000${source.size}\u0000${source.mtimeMs}\u0000audio=${source.audioStreamIndex ?? 'none'}`,
+    )
     .digest('hex');
 }
 
@@ -2595,6 +2621,12 @@ ipcMain.handle('media:generate-waveform', async (event, sourceToken) => {
   if (!source || (source.kind !== 'audio' && source.kind !== 'video')) {
     return { ok: false, error: '素材を確認できません' };
   }
+  if (source.audioStreamIndex === null) {
+    return { ok: false, error: '音声ストリームが見つかりません' };
+  }
+  const audioStreamIndex = Number.isSafeInteger(source.audioStreamIndex)
+    ? source.audioStreamIndex
+    : 0;
 
   const token = crypto.randomUUID();
   const job = {
@@ -2643,7 +2675,7 @@ ipcMain.handle('media:generate-waveform', async (event, sourceToken) => {
     const accumulator = createWaveformMetadataAccumulator();
     const child = spawn(
       ffmpegBinaryPath(),
-      buildWaveformFfmpegArgs(source.path),
+      buildWaveformFfmpegArgs(source.path, audioStreamIndex),
       {
         shell: false,
         windowsHide: true,
@@ -2749,6 +2781,12 @@ ipcMain.handle('media:analyze-loudness', async (event, sourceToken) => {
   if (!source || (source.kind !== 'audio' && source.kind !== 'video')) {
     return { ok: false, error: '素材を確認できません' };
   }
+  if (source.audioStreamIndex === null) {
+    return { ok: false, error: '音声ストリームが見つかりません' };
+  }
+  const audioStreamIndex = Number.isSafeInteger(source.audioStreamIndex)
+    ? source.audioStreamIndex
+    : 0;
   const token = crypto.randomUUID();
   const job = {
     token,
@@ -2782,13 +2820,17 @@ ipcMain.handle('media:analyze-loudness', async (event, sourceToken) => {
     }
     if (job.cancelled) throw new Error('音量解析を中止しました');
 
-    const child = spawn(ffmpegBinaryPath(), buildLoudnessFfmpegArgs(source.path), {
-      shell: false,
-      windowsHide: true,
-      detached: false,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      env: minimalEnvironment(),
-    });
+    const child = spawn(
+      ffmpegBinaryPath(),
+      buildLoudnessFfmpegArgs(source.path, audioStreamIndex),
+      {
+        shell: false,
+        windowsHide: true,
+        detached: false,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: minimalEnvironment(),
+      },
+    );
     job.child = child;
     const operation = waitForLoudnessChild(job);
     job.operation = operation.then(() => undefined, () => undefined);
@@ -2940,7 +2982,7 @@ async function cleanupOrphanedProxies() {
   await pruneProxyCache();
 }
 
-async function registerProxyFile(proxyPath, kind) {
+async function registerProxyFile(proxyPath, kind, hasAudio) {
   const [realPath, stat] = await Promise.all([
     fs.realpath(proxyPath),
     fs.lstat(proxyPath),
@@ -2967,6 +3009,9 @@ async function registerProxyFile(proxyPath, kind) {
     dev: stat.dev,
     ino: stat.ino,
     mtimeMs: stat.mtimeMs,
+    // A proxy contains at most one explicitly selected audio stream, so its
+    // ordinal is always zero even when the source's preferred stream was not.
+    audioStreamIndex: hasAudio ? 0 : null,
     leases: 0,
     releaseRequested: false,
   });
@@ -3025,6 +3070,7 @@ async function createSegmentedRepairProxy(
   source,
   temporaryPath,
   hasAudio,
+  audioStreamIndex,
   duration,
 ) {
   if (!Number.isFinite(duration) || duration <= 0 || duration > 7 * 24 * 60 * 60) {
@@ -3150,7 +3196,7 @@ async function createSegmentedRepairProxy(
       ...(hasAudio
         ? [
             '-map',
-            '1:a:0',
+            `1:a:${audioStreamIndex}`,
             '-af',
             'aresample=48000:async=1:first_pts=0',
             '-c:a',
@@ -3232,6 +3278,13 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     ) {
       throw new Error('元素材が読み込み後に変更されました');
     }
+    const audioStreamIndex = Number.isSafeInteger(source.audioStreamIndex)
+      ? source.audioStreamIndex
+      : null;
+    const hasAudio = audioStreamIndex !== null;
+    if (source.kind === 'audio' && !hasAudio) {
+      throw new Error('音声ストリームが見つかりません');
+    }
     const proxyProfile = source.kind === 'video'
       ? source.requiresRepairProxy
         ? `proxy-v4-repair120-1280-crf27-aac48k-${source.hdrToneMap ?? 'sdr'}`
@@ -3239,14 +3292,16 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
       : 'audio-proxy-v2-aac160-stereo48k';
     const fingerprint = crypto
       .createHash('sha256')
-      .update(`${realPath}\0${stat.size}\0${stat.mtimeMs}\0${proxyProfile}`)
+      .update(
+        `${realPath}\0${stat.size}\0${stat.mtimeMs}\0${proxyProfile}\0audio=${audioStreamIndex ?? 'none'}`,
+      )
       .digest('hex');
     const root = proxyCacheRoot();
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
     const proxyPath = path.join(root, `${fingerprint}.mp4`);
     try {
       await fs.utimes(proxyPath, new Date(), new Date()).catch(() => {});
-      const registered = await registerProxyFile(proxyPath, source.kind);
+      const registered = await registerProxyFile(proxyPath, source.kind, hasAudio);
       await pruneProxyCache();
       return { ok: true, ...registered, cached: true };
     } catch {
@@ -3270,12 +3325,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     };
     pendingProxyJobs.set(token, job);
     const binaryPath = ffmpegBinaryPath();
-    const [hasAudio, duration] = await Promise.all([
-      source.kind === 'audio'
-        ? Promise.resolve(true)
-        : probeInputHasAudio(binaryPath, realPath),
-      probeInputDuration(binaryPath, realPath),
-    ]);
+    const duration = await probeInputDuration(binaryPath, realPath);
     const expectedProxyBytes = estimatePreviewProxyBytes(source.kind, duration);
     if (expectedProxyBytes > 0) {
       // Make room inside the owned LRU before rejecting the user's import.
@@ -3299,7 +3349,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
       ? [
           '-map',
           '0:v:0',
-          ...(hasAudio ? ['-map', '0:a:0'] : ['-an']),
+          ...(hasAudio ? ['-map', `0:a:${audioStreamIndex}`] : ['-an']),
           '-vf',
           [
             buildHdrToSdrFilter(source.hdrToneMap),
@@ -3342,7 +3392,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
         ]
       : [
           '-map',
-          '0:a:0',
+          `0:a:${audioStreamIndex}`,
           '-vn',
           '-c:a',
           'aac',
@@ -3362,6 +3412,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
           source,
           temporaryPath,
           hasAudio,
+          audioStreamIndex,
           duration,
         )
       : runProxyCommand(job, binaryPath, [
@@ -3390,7 +3441,7 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
     await renameWithRetry(temporaryPath, proxyPath, {
       shouldAbort: () => job.cancelled,
     });
-    const registered = await registerProxyFile(proxyPath, source.kind);
+    const registered = await registerProxyFile(proxyPath, source.kind, hasAudio);
     pendingProxyJobs.delete(token);
     if (!job.sourceLeaseReleased) {
       job.sourceLeaseReleased = true;
@@ -3430,6 +3481,9 @@ ipcMain.handle('media:create-preview-proxy', async (event, sourceToken) => {
 // renderer must call updater:download to begin the transfer.
 autoUpdater.autoDownload = false;
 autoUpdater.autoInstallOnAppQuit = false;
+let updaterDownloadAuthorized = false;
+let updaterDownloadInFlight = false;
+let updaterInstallReady = false;
 
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -3441,12 +3495,21 @@ autoUpdater.on('checking-for-update', () => {
   send('updater', { status: 'checking' });
 });
 autoUpdater.on('update-available', (info) => {
+  updaterDownloadAuthorized = false;
+  updaterDownloadInFlight = false;
+  updaterInstallReady = false;
   send('updater', { status: 'available', version: info.version });
 });
 autoUpdater.on('update-not-available', () => {
+  updaterDownloadAuthorized = false;
+  updaterDownloadInFlight = false;
+  updaterInstallReady = false;
   send('updater', { status: 'up-to-date' });
 });
 autoUpdater.on('error', (err) => {
+  updaterDownloadAuthorized = false;
+  updaterDownloadInFlight = false;
+  updaterInstallReady = false;
   send('updater', { status: 'error', message: err?.message ?? String(err) });
 });
 autoUpdater.on('download-progress', (progress) => {
@@ -3459,11 +3522,18 @@ autoUpdater.on('download-progress', (progress) => {
   });
 });
 autoUpdater.on('update-downloaded', (info) => {
+  updaterDownloadInFlight = false;
+  if (!updaterDownloadAuthorized) return;
+  updaterInstallReady = true;
   send('updater', { status: 'downloaded', version: info.version });
 });
 
 ipcMain.handle('updater:install-and-restart', (event) => {
   if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
+  if (!updaterInstallReady || !updaterDownloadAuthorized) {
+    return { ok: false, error: '明示的にダウンロードした更新だけを適用できます' };
+  }
+  updaterInstallReady = false;
   autoUpdater.quitAndInstall();
   return { ok: true };
 });
@@ -3473,10 +3543,17 @@ ipcMain.handle('updater:install-and-restart', (event) => {
 ipcMain.handle('updater:download', async (event) => {
   if (!isTrustedIpcEvent(event)) return { ok: false, error: 'untrusted sender' };
   if (isDev) return { skipped: true, reason: 'dev mode' };
+  if (updaterDownloadInFlight) return { ok: true, pending: true };
   try {
+    updaterDownloadAuthorized = true;
+    updaterDownloadInFlight = true;
+    updaterInstallReady = false;
     await autoUpdater.downloadUpdate();
     return { ok: true };
   } catch (err) {
+    updaterDownloadAuthorized = false;
+    updaterDownloadInFlight = false;
+    updaterInstallReady = false;
     return { ok: false, error: err?.message ?? String(err) };
   }
 });

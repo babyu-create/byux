@@ -2,9 +2,12 @@
 
 const MAX_LOUDNESS_LOG_BYTES = 512 * 1024;
 
-function buildLoudnessFfmpegArgs(sourcePath) {
+function buildLoudnessFfmpegArgs(sourcePath, audioStreamIndex = 0) {
   if (typeof sourcePath !== 'string' || sourcePath.length === 0) {
     throw new Error('A source path is required');
+  }
+  if (!Number.isSafeInteger(audioStreamIndex) || audioStreamIndex < 0 || audioStreamIndex > 127) {
+    throw new Error('Audio stream index is invalid');
   }
   return [
     '-hide_banner',
@@ -16,7 +19,7 @@ function buildLoudnessFfmpegArgs(sourcePath) {
     '-i',
     sourcePath,
     '-map',
-    '0:a:0',
+    `0:a:${audioStreamIndex}`,
     '-vn',
     '-sn',
     '-dn',

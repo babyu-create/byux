@@ -82,6 +82,51 @@ describe('native atempo precision', () => {
 });
 
 describe('nativeExportPlan', () => {
+  it('uses the compact audio bitrate included in the size estimate', () => {
+    const compact = request();
+    compact.options = { ...compact.options, quality: 'compact' };
+    const plan = buildNativeExportPlan(
+      compact,
+      new Map([['asset', { path: 'source.mp4', hasAudio: false }]]),
+      new Map(),
+      'output.part',
+    );
+    const audioBitrateIndex = plan.args.indexOf('-b:a');
+    expect(plan.args[audioBitrateIndex + 1]).toBe('128k');
+  });
+
+  it('uses the registered default audio ordinal throughout native export', () => {
+    const selected = buildNativeExportPlan(
+      request(),
+      new Map([
+        ['asset', { path: 'source.mp4', hasAudio: true, audioStreamIndex: 1 }],
+      ]),
+      new Map(),
+      'output.part',
+    );
+    expect(selected.filterGraph).toContain('[0:a:1]');
+    expect(selected.filterGraph).not.toContain('[0:a:0]');
+
+    const legacyDefault = buildNativeExportPlan(
+      request(),
+      new Map([['asset', { path: 'source.mp4', hasAudio: true }]]),
+      new Map(),
+      'output.part',
+    );
+    expect(legacyDefault.filterGraph).toContain('[0:a:0]');
+  });
+
+  it('rejects invalid registered audio ordinals', () => {
+    expect(() => buildNativeExportPlan(
+      request(),
+      new Map([
+        ['asset', { path: 'source.mp4', hasAudio: true, audioStreamIndex: -1 }],
+      ]),
+      new Map(),
+      'output.part',
+    )).toThrowError(NativeExportPlanError);
+  });
+
   it('accepts 1440p, 4K and 120 fps output presets', () => {
     const source = new Map([
       ['asset', { path: 'source.mp4', hasAudio: false }],
@@ -144,6 +189,8 @@ describe('nativeExportPlan', () => {
     expect(plan.filterGraph).not.toContain('perspective=');
     expect(plan.filterGraph).not.toContain('geq=');
     expect(plan.args).toContain('-filter_complex_script');
+    expect(plan.args).toContain('+genpts+discardcorrupt');
+    expect(plan.args).toContain('ignore_err');
     expect(plan.args.at(-1)).toBe('C:\\output\\.movie.part');
   });
 
@@ -285,9 +332,13 @@ describe('nativeExportPlan', () => {
     expect(plan.filterGraph).toContain('concat=n=16:v=0:a=1');
     expect(plan.filterGraph).toContain('perspective=');
     expect(plan.filterGraph).toContain('colorchannelmixer=');
-    expect(plan.filterGraph).toContain("tmix=frames=4:weights='1 0.56 0.34 0'");
-    expect(plan.filterGraph).toContain('blend=all_expr=');
-    expect(plan.filterGraph).toContain('0.85*gt(');
+    expect(plan.filterGraph).toContain("tmix=frames=2:weights='1 0.28'");
+    expect(plan.filterGraph).toContain('format=yuv420p,drawbox=');
+    expect(plan.filterGraph).toContain("lut=y='if(gt(val\\,40)\\,217\\,0)'");
+    expect(plan.filterGraph).toContain("u='if(lt(val\\,110)\\,217\\,0)'");
+    expect(plan.filterGraph).toContain("v='if(gt(val\\,180)\\,217\\,0)'");
+    expect(plan.filterGraph).toContain('maskedmerge=planes=7');
+    expect(plan.filterGraph).not.toContain('blend=all_expr=');
     expect(plan.filterGraph).toContain('overlay=0:0:eof_action=pass');
     expect(plan.filterGraph).toContain('color=c=black');
   });
@@ -507,6 +558,33 @@ describe('nativeExportPlan', () => {
       'output.part',
     );
     expect(plan.filterGraph).not.toContain('tmix=');
+  });
+
+  it('bounds blur history by output frame time at 30, 60, and 120 fps', () => {
+    const base = request();
+    const graphAt = (fps: number) => buildNativeExportPlan(
+      {
+        ...base,
+        options: {
+          ...base.options,
+          fps,
+          motionBlur: true,
+          motionBlurStrength: 1.25,
+          motionBlurHudPreset: 'none',
+        },
+        clips: base.clips.map((clip) => ({
+          ...clip,
+          effects: [{ type: 'motion-blur', intensity: 100 }],
+        })),
+      },
+      new Map([['asset', { path: 'source.mp4', hasAudio: false }]]),
+      new Map(),
+      `${fps}.part`,
+    ).filterGraph;
+
+    expect(graphAt(30)).toContain("tmix=frames=2:weights='1 0.5'");
+    expect(graphAt(60)).toContain("tmix=frames=2:weights='1 1'");
+    expect(graphAt(120)).toContain("tmix=frames=3:weights='1 1 1'");
   });
 
   it('flattens base opacity onto black while keeping the alpha expression', () => {

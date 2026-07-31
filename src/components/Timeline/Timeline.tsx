@@ -54,6 +54,8 @@ function xInTrackArea(element: HTMLDivElement, clientX: number): number {
   return Math.max(0, Math.min(rect.width, clientX - rect.left));
 }
 
+const INITIAL_VIEWPORT_END_SEC = 60;
+
 export function Timeline() {
   const tracks = useProjectStore((s) => s.tracks);
   // NOTE: playhead is NOT subscribed here — Playhead component reads it directly.
@@ -84,6 +86,10 @@ export function Timeline() {
   const headerScrollRef = useRef<HTMLDivElement>(null);
   const trackAreaRef = useRef<HTMLDivElement>(null);
   const [horizontalScrollbarHeight, setHorizontalScrollbarHeight] = useState(0);
+  const [visibleTimeline, setVisibleTimeline] = useState({
+    start: 0,
+    end: INITIAL_VIEWPORT_END_SEC,
+  });
   const marqueeRef = useRef<{
     pointerId: number;
     startX: number;
@@ -106,6 +112,50 @@ export function Timeline() {
     observer.observe(scroll);
     return () => observer.disconnect();
   }, []);
+
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      // Half a viewport on each side keeps fast wheel/drag auto-scroll smooth
+      // while avoiding thousands of off-screen Clip trees at low zoom.
+      const overscanPx = Math.max(240, scroll.clientWidth * 0.5);
+      const next = {
+        start: pxToTime(Math.max(0, scroll.scrollLeft - overscanPx), zoom),
+        end: Math.min(
+          totalSec,
+          pxToTime(
+            Math.min(
+              totalWidth,
+              scroll.scrollLeft + scroll.clientWidth + overscanPx,
+            ),
+            zoom,
+          ),
+        ),
+      };
+      setVisibleTimeline((current) =>
+        Math.abs(current.start - next.start) < 1e-4 &&
+        Math.abs(current.end - next.end) < 1e-4
+          ? current
+          : next,
+      );
+    };
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(update);
+    };
+    update();
+    scroll.addEventListener('scroll', schedule, { passive: true });
+    const observer = new ResizeObserver(schedule);
+    observer.observe(scroll);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      scroll.removeEventListener('scroll', schedule);
+      observer.disconnect();
+    };
+  }, [totalSec, totalWidth, zoom]);
 
   // Stable callbacks so the keydown effect doesn't re-register on every render
   const stableRemoveSelected = useCallback(
@@ -471,7 +521,8 @@ export function Timeline() {
                   key={track.id}
                   trackId={track.id}
                   zoom={zoom}
-                  totalSec={totalSec}
+                  visibleStartSec={visibleTimeline.start}
+                  visibleEndSec={visibleTimeline.end}
                   assetsById={assetsById}
                 />
               ))}

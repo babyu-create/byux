@@ -257,6 +257,7 @@ declare global {
 export function UpdateBanner() {
   const [event, setEvent] = useState<UpdaterEvent | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
 
   useEffect(() => {
     const updater = window.fce?.updater;
@@ -264,6 +265,7 @@ export function UpdateBanner() {
     const off = updater.onEvent((e) => {
       setEvent(e);
       setDismissed(false);
+      setActionBusy(false);
     });
     return off;
   }, []);
@@ -271,14 +273,36 @@ export function UpdateBanner() {
   if (dismissed || !event) return null;
   if (event.status === 'up-to-date' || event.status === 'checking') return null;
 
+  const runUpdaterAction = async (action: () => Promise<unknown>) => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      const result = await action();
+      if (
+        result &&
+        typeof result === 'object' &&
+        'ok' in result &&
+        (result as { ok?: unknown }).ok === false
+      ) {
+        throw new Error('updater action rejected');
+      }
+    } catch {
+      setEvent({ status: 'error', message: 'update action failed' });
+      setDismissed(false);
+      setActionBusy(false);
+    }
+  };
+
   const handleInstall = () => {
-    window.fce?.updater?.installAndRestart();
+    const updater = window.fce?.updater;
+    if (updater) void runUpdaterAction(() => updater.installAndRestart());
   };
 
   // Unsigned artifacts have no publisher verification, so the download only
   // starts when the user explicitly requests it — never automatically.
   const handleDownload = () => {
-    window.fce?.updater?.download();
+    const updater = window.fce?.updater;
+    if (updater) void runUpdaterAction(() => updater.download());
   };
 
   if (event.status === 'error') {
@@ -287,7 +311,7 @@ export function UpdateBanner() {
         <span className={styles.icon}>
           <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
         </span>
-        <span className={styles.text}>更新を確認できませんでした。通信状態を確認してください。</span>
+        <span className={styles.text}>更新処理に失敗しました。通信状態を確認して再試行してください。</span>
         <div className={styles.actions}>
           <button
             type="button"
@@ -299,9 +323,13 @@ export function UpdateBanner() {
           <button
             type="button"
             className={styles.btnPrimary}
-            onClick={() => void window.fce?.updater?.check()}
+            onClick={() => {
+              const updater = window.fce?.updater;
+              if (updater) void runUpdaterAction(() => updater.check());
+            }}
+            disabled={actionBusy}
           >
-            再試行
+            {actionBusy ? '処理中…' : '再試行'}
           </button>
         </div>
       </div>
@@ -314,6 +342,7 @@ export function UpdateBanner() {
         <span className={styles.icon}><Sparkles size={16} strokeWidth={2} aria-hidden="true" /></span>
         <span className={styles.text}>
           新しいバージョン <strong>v{event.version}</strong> が利用可能です。
+          発行元を確認できない場合は適用しないでください。
         </span>
         <div className={styles.actions}>
           <button
@@ -327,8 +356,9 @@ export function UpdateBanner() {
             type="button"
             className={styles.btnPrimary}
             onClick={handleDownload}
+            disabled={actionBusy}
           >
-            ダウンロード
+            {actionBusy ? '処理中…' : 'ダウンロード'}
           </button>
         </div>
       </div>
@@ -376,8 +406,9 @@ export function UpdateBanner() {
             type="button"
             className={styles.btnPrimary}
             onClick={handleInstall}
+            disabled={actionBusy}
           >
-            今すぐ再起動
+            {actionBusy ? '処理中…' : '今すぐ再起動'}
           </button>
         </div>
       </div>

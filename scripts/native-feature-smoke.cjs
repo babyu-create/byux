@@ -9,7 +9,13 @@ const { buildAssSubtitles } = require('../electron/nativeSubtitles.cjs');
 const { buildLoudnessFfmpegArgs, parseLoudnessSummary } = require('../electron/nativeLoudness.cjs');
 const { buildWaveformFfmpegArgs, createWaveformMetadataAccumulator } = require('../electron/nativeWaveform.cjs');
 const { encodeWaveformCache, decodeWaveformCache } = require('../electron/waveformCache.cjs');
-const { probeInputMediaKind, resolveFfmpegBinary, runCaptured, validateOutput } = require('../electron/nativeFfmpeg.cjs');
+const {
+  probeInputMediaKind,
+  probePreferredAudioStreamIndex,
+  resolveFfmpegBinary,
+  runCaptured,
+  validateOutput,
+} = require('../electron/nativeFfmpeg.cjs');
 
 function runPlan(binaryPath, args, cwd) {
   return new Promise((resolve, reject) => {
@@ -38,7 +44,10 @@ async function main() {
     const generated = await runCaptured(binaryPath, [
       '-hide_banner', '-loglevel', 'error',
       '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=30:d=3',
+      '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo:d=3',
       '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=44100:duration=3',
+      '-map', '0:v:0', '-map', '1:a:0', '-map', '2:a:0',
+      '-disposition:a:0', '0', '-disposition:a:1', 'default',
       '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-shortest', sourcePath,
     ], { timeoutMs: 60_000 });
@@ -47,6 +56,10 @@ async function main() {
     await fs.copyFile(sourcePath, unknownPath);
     const detected = await probeInputMediaKind(binaryPath, unknownPath);
     if (detected !== 'video') throw new Error(`unknown-extension probe returned ${detected}`);
+    const audioStreamIndex = await probePreferredAudioStreamIndex(binaryPath, unknownPath);
+    if (audioStreamIndex !== 1) {
+      throw new Error(`default audio probe returned ${audioStreamIndex}`);
+    }
 
     const request = {
       version: 1,
@@ -78,7 +91,7 @@ async function main() {
     };
     const plan = buildNativeExportPlan(
       request,
-      new Map([['asset', { path: unknownPath, hasAudio: true }]]),
+      new Map([['asset', { path: unknownPath, hasAudio: true, audioStreamIndex }]]),
       new Map(),
       outputPath,
     );
@@ -96,16 +109,35 @@ async function main() {
       duration: plan.totalDuration,
       maxBytes: 128 * 1024 * 1024,
     });
+    const renderedLoudnessRun = await runCaptured(
+      binaryPath,
+      buildLoudnessFfmpegArgs(outputPath),
+      { timeoutMs: 60_000 },
+    );
+    const renderedLoudness = parseLoudnessSummary(renderedLoudnessRun.stderr);
+    if (!renderedLoudness || renderedLoudness.integratedLufs < -30) {
+      throw new Error(
+        `native render used the silent non-default audio stream: ${renderedLoudness?.integratedLufs}`,
+      );
+    }
 
-    const loudnessRun = await runCaptured(binaryPath, buildLoudnessFfmpegArgs(unknownPath), {
+    const loudnessRun = await runCaptured(
+      binaryPath,
+      buildLoudnessFfmpegArgs(unknownPath, audioStreamIndex),
+      {
       timeoutMs: 60_000,
-    });
+      },
+    );
     const loudness = parseLoudnessSummary(loudnessRun.stderr);
     if (!loudness) throw new Error('LUFS summary was not parsed');
 
-    const waveformRun = await runCaptured(binaryPath, buildWaveformFfmpegArgs(unknownPath), {
+    const waveformRun = await runCaptured(
+      binaryPath,
+      buildWaveformFfmpegArgs(unknownPath, audioStreamIndex),
+      {
       timeoutMs: 60_000,
-    });
+      },
+    );
     if (waveformRun.code !== 0) throw new Error(`waveform failed: ${waveformRun.stderr}`);
     const accumulator = createWaveformMetadataAccumulator();
     accumulator.push(waveformRun.stdout);

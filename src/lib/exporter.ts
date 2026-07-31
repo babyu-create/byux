@@ -62,18 +62,19 @@ interface VideoEncodingSettings {
   preset: 'veryfast' | 'superfast';
   crf: number;
   bitrateMultiplier: number;
+  audioBitrate: '128k' | '256k';
 }
 
 function getVideoEncodingSettings(
   quality: ExportQualityPreset | undefined,
 ): VideoEncodingSettings {
   if (quality === 'high') {
-    return { preset: 'veryfast', crf: 16, bitrateMultiplier: 1.45 };
+    return { preset: 'veryfast', crf: 16, bitrateMultiplier: 1.45, audioBitrate: '256k' };
   }
   if (quality === 'compact') {
-    return { preset: 'superfast', crf: 27, bitrateMultiplier: 0.62 };
+    return { preset: 'superfast', crf: 27, bitrateMultiplier: 0.62, audioBitrate: '128k' };
   }
-  return { preset: 'superfast', crf: 20, bitrateMultiplier: 1 };
+  return { preset: 'superfast', crf: 20, bitrateMultiplier: 1, audioBitrate: '256k' };
 }
 
 export interface ExportOptions {
@@ -1894,7 +1895,7 @@ export async function exportProject(
         '-crf', String(encoding.crf),
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
-        '-b:a', '256k',
+        '-b:a', encoding.audioBitrate,
         '-ar', '44100',
         '-ac', '2',
         '-movflags', '+faststart',
@@ -2168,7 +2169,7 @@ export async function exportProject(
         '-map', '[aout]',
         '-c:v', 'copy',
         '-c:a', 'aac',
-        '-b:a', '256k',
+        '-b:a', encoding.audioBitrate,
         '-ar', '44100',
         '-ac', '2',
         '-movflags', '+faststart',

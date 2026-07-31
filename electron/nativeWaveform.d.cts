@@ -12,4 +12,7 @@ export function createWaveformMetadataAccumulator(options?: {
   maxPeaks?: number;
 }): WaveformMetadataAccumulator;
 
-export function buildWaveformFfmpegArgs(sourcePath: string): string[];
+export function buildWaveformFfmpegArgs(
+  sourcePath: string,
+  audioStreamIndex?: number,
+): string[];
