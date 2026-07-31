@@ -7,6 +7,7 @@ import {
   isVideoFile,
   needsAudioPreviewProxy,
   needsVideoPreviewProxy,
+  shouldPreferPreviewProxy,
   probeAudioUrlMetadata,
   probeVideoUrlMetadata,
   type MediaProbeResult,
@@ -43,6 +44,7 @@ interface MediaStoreState {
   clearAssets: () => void;
   selectAsset: (id: string | null) => void;
   selectAudioStream: (id: string, index: number) => Promise<boolean>;
+  promoteAssetToProxy: (id: string) => Promise<boolean>;
   clearError: () => void;
   setAssetBeats: (id: string, beats: number[]) => void;
   setAssetWaveform: (id: string, waveform: { peaks: Float32Array; peaksPerSecond: number }) => void;
@@ -146,6 +148,12 @@ async function assetFromNativeSource(
       if (previewProxy || !window.fce?.createPreviewProxy) {
         throw probeError;
       }
+      await createCompatiblePreview();
+      const probed = await probeNativeProxyMetadata(previewUrl, source.kind);
+      metadata = probed.metadata;
+      previewUrl = probed.url;
+    }
+    if (!previewProxy && source.kind === 'video' && shouldPreferPreviewProxy(source.size, metadata.duration)) {
       await createCompatiblePreview();
       const probed = await probeNativeProxyMetadata(previewUrl, source.kind);
       metadata = probed.metadata;
@@ -369,6 +377,42 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
   isImporting: false,
   importStatus: null,
   importError: null,
+
+  promoteAssetToProxy: async (id) => {
+    const asset = get().assets.find((candidate) => candidate.id === id);
+    const createPreviewProxy = window.fce?.createPreviewProxy;
+    if (!asset || asset.kind !== 'video' || asset.previewProxy || !asset.sourceToken || !createPreviewProxy) {
+      return false;
+    }
+    try {
+      const proxy = await createPreviewProxy(asset.sourceToken);
+      if (!proxy.ok || !proxy.token || !proxy.url || !proxy.size) return false;
+      const probed = await probeNativeProxyMetadata(proxy.url, 'video');
+      const current = get().assets.find((candidate) => candidate.id === id);
+      if (!current || current.sourceToken !== asset.sourceToken) {
+        await window.fce?.releaseMediaFile?.(proxy.token).catch(() => {});
+        return false;
+      }
+      set((state) => ({
+        assets: state.assets.map((candidate) =>
+          candidate.id === id
+            ? {
+                ...candidate,
+                url: probed.url,
+                previewSourceToken: proxy.token,
+                previewProxy: true,
+                duration: probed.metadata.duration,
+                width: probed.metadata.width,
+                height: probed.metadata.height,
+              }
+            : candidate,
+        ),
+      }));
+      return true;
+    } catch {
+      return false;
+    }
+  },
 
   addFiles: async (files) => {
     if (get().isImporting) return [];

@@ -13,6 +13,7 @@ import {
   isVideoFile,
   needsAudioPreviewProxy,
   needsVideoPreviewProxy,
+  shouldPreferPreviewProxy,
 } from './media'
 
 describe('media format support', () => {
@@ -50,6 +51,12 @@ describe('media format support', () => {
     expect(needsAudioPreviewProxy('soundtrack.wma')).toBe(true)
     expect(needsAudioPreviewProxy('soundtrack.m4a')).toBe(false)
     expect(guessMimeType('match.m2ts', 'video')).toBe('video/mp2t')
+  })
+
+  it('prefers a disk-backed proxy only for genuinely long, heavy captures', () => {
+    expect(shouldPreferPreviewProxy(1_500_000_000, 60)).toBe(false)
+    expect(shouldPreferPreviewProxy(500_000_000, 1800)).toBe(false)
+    expect(shouldPreferPreviewProxy(1_500_000_000, 1800)).toBe(true)
   })
 
   it('does not treat arbitrary files as media', () => {

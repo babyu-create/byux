@@ -33,6 +33,15 @@ export interface GrayFrame {
   data: Uint8Array;
 }
 
+export interface TemplateMatchOptions {
+  /** Candidate scale factors used when the regular local search loses lock. */
+  scales?: readonly number[];
+  /** Candidate clockwise angles in degrees used for recovery searches. */
+  angles?: readonly number[];
+  /** Compare contrast-normalised pixels so exposure changes do not break lock. */
+  normalised?: boolean;
+}
+
 function clampRegion(region: TrackingRegion): TrackingRegion {
   const width = Math.max(0.04, Math.min(0.8, region.width));
   const height = Math.max(0.04, Math.min(0.8, region.height));
@@ -81,33 +90,131 @@ export function templateDifference(
   return total / (template.width * template.height * 255);
 }
 
+function patchDifference(
+  frame: GrayFrame,
+  template: GrayFrame,
+  x: number,
+  y: number,
+  normalised: boolean,
+): number {
+  if (
+    x < 0 || y < 0 ||
+    x + template.width > frame.width ||
+    y + template.height > frame.height
+  ) return 1;
+  const count = template.width * template.height;
+  let frameMean = 0;
+  let templateMean = 0;
+  for (let row = 0; row < template.height; row += 1) {
+    const frameOffset = (y + row) * frame.width + x;
+    const templateOffset = row * template.width;
+    for (let col = 0; col < template.width; col += 1) {
+      frameMean += frame.data[frameOffset + col];
+      templateMean += template.data[templateOffset + col];
+    }
+  }
+  frameMean /= count;
+  templateMean /= count;
+  let difference = 0;
+  let frameVariance = 0;
+  let templateVariance = 0;
+  for (let row = 0; row < template.height; row += 1) {
+    const frameOffset = (y + row) * frame.width + x;
+    const templateOffset = row * template.width;
+    for (let col = 0; col < template.width; col += 1) {
+      const frameValue = frame.data[frameOffset + col] - frameMean;
+      const templateValue = template.data[templateOffset + col] - templateMean;
+      difference += Math.abs(frameValue - templateValue);
+      frameVariance += frameValue * frameValue;
+      templateVariance += templateValue * templateValue;
+    }
+  }
+  if (!normalised) return difference / (count * 255);
+  // Flat regions have no trackable signal. Treat them as a miss rather than
+  // allowing a random low-contrast patch to move the object across the frame.
+  if (frameVariance < 16 || templateVariance < 16) return 1;
+  const correlation = Math.max(
+    -1,
+    Math.min(1, 1 - difference / Math.max(1, 2 * Math.sqrt(frameVariance * templateVariance))),
+  );
+  return 0.5 - correlation * 0.5;
+}
+
+function transformTemplate(template: GrayFrame, scale: number, angleDegrees: number): GrayFrame {
+  const width = Math.max(2, Math.round(template.width * scale));
+  const height = Math.max(2, Math.round(template.height * scale));
+  const angle = angleDegrees * Math.PI / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const data = new Uint8Array(width * height);
+  const sourceCx = (template.width - 1) / 2;
+  const sourceCy = (template.height - 1) / 2;
+  const targetCx = (width - 1) / 2;
+  const targetCy = (height - 1) / 2;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const scaledX = (x - targetCx) / scale;
+      const scaledY = (y - targetCy) / scale;
+      const sourceX = Math.round(scaledX * cos + scaledY * sin + sourceCx);
+      const sourceY = Math.round(-scaledX * sin + scaledY * cos + sourceCy);
+      data[y * width + x] = sourceX >= 0 && sourceX < template.width && sourceY >= 0 && sourceY < template.height
+        ? template.data[sourceY * template.width + sourceX]
+        : 0;
+    }
+  }
+  return { width, height, data };
+}
+
+function blendTemplate(target: GrayFrame, patch: GrayFrame, amount: number): GrayFrame {
+  if (target.width !== patch.width || target.height !== patch.height) return target;
+  const data = new Uint8Array(target.data.length);
+  for (let i = 0; i < data.length; i += 1) {
+    data[i] = Math.round(target.data[i] * (1 - amount) + patch.data[i] * amount);
+  }
+  return { ...target, data };
+}
+
 export function findBestTemplateMatch(
   frame: GrayFrame,
   template: GrayFrame,
   previousX: number,
   previousY: number,
   radius = 0.16,
+  options: TemplateMatchOptions = {},
 ): { x: number; y: number; confidence: number } {
   const pixelRadius = Math.max(2, Math.round(Math.min(frame.width, frame.height) * radius));
   const step = Math.max(1, Math.round(Math.min(template.width, template.height) / 12));
-  let best = { x: previousX, y: previousY, difference: 1 };
-  for (let y = previousY - pixelRadius; y <= previousY + pixelRadius; y += step) {
-    for (let x = previousX - pixelRadius; x <= previousX + pixelRadius; x += step) {
-      const difference = templateDifference(frame, template, x, y);
-      if (difference < best.difference) best = { x, y, difference };
+  const scales = options.scales?.length ? options.scales : [1];
+  const angles = options.angles?.length ? options.angles : [0];
+  let best = { x: previousX, y: previousY, difference: 1, offsetX: 0, offsetY: 0, template };
+  for (const scale of scales) {
+    if (!Number.isFinite(scale) || scale < 0.5 || scale > 1.8) continue;
+    for (const angle of angles) {
+      if (!Number.isFinite(angle) || Math.abs(angle) > 30) continue;
+      const candidate = scale === 1 && angle === 0
+        ? template
+        : transformTemplate(template, scale, angle);
+      const offsetX = Math.round((candidate.width - template.width) / 2);
+      const offsetY = Math.round((candidate.height - template.height) / 2);
+      for (let y = previousY - pixelRadius - offsetY; y <= previousY + pixelRadius - offsetY; y += step) {
+        for (let x = previousX - pixelRadius - offsetX; x <= previousX + pixelRadius - offsetX; x += step) {
+          const difference = patchDifference(frame, candidate, x, y, options.normalised === true);
+          if (difference < best.difference) best = { x, y, difference, offsetX, offsetY, template: candidate };
+        }
+      }
     }
   }
   // A 3x3 local refinement makes the result stable at low resolutions without
   // multiplying the full search cost.
   for (let y = best.y - step; y <= best.y + step; y += 1) {
     for (let x = best.x - step; x <= best.x + step; x += 1) {
-      const difference = templateDifference(frame, template, x, y);
-      if (difference < best.difference) best = { x, y, difference };
+      const difference = patchDifference(frame, best.template, x, y, options.normalised === true);
+      if (difference < best.difference) best = { ...best, x, y, difference };
     }
   }
   return {
-    x: best.x,
-    y: best.y,
+    x: best.x + (best.offsetX ?? 0),
+    y: best.y + (best.offsetY ?? 0),
     confidence: Math.max(0, Math.min(1, 1 - best.difference * 2)),
   };
 }
@@ -159,7 +266,7 @@ export async function trackVideoElement(
   context.drawImage(video, 0, 0, canvas.width, canvas.height);
   const first = frameFromCanvas(context, canvas.width, canvas.height);
   const initialRegion = clampRegion(options.region);
-  const template = extractPatch(first, initialRegion);
+  let template = extractPatch(first, initialRegion);
   const initialX = Math.floor(initialRegion.x * first.width);
   const initialY = Math.floor(initialRegion.y * first.height);
   let currentX = initialX;
@@ -167,6 +274,7 @@ export async function trackVideoElement(
   const x: Keyframe[] = [];
   const y: Keyframe[] = [];
   let confidenceTotal = 0;
+  let previousConfidence = 1;
   let frameCount = 0;
   for (let time = start; time <= end + 1e-6; time += interval) {
     if (options.signal?.aborted) throw new DOMException('追跡を中止しました', 'AbortError');
@@ -175,9 +283,33 @@ export async function trackVideoElement(
     const frame = frameFromCanvas(context, canvas.width, canvas.height);
     const match = frameCount === 0
       ? { x: currentX, y: currentY, confidence: 1 }
-      : findBestTemplateMatch(frame, template, currentX, currentY, options.searchRadius ?? 0.16);
+      : findBestTemplateMatch(
+        frame,
+        template,
+        currentX,
+        currentY,
+        previousConfidence < 0.55 ? Math.max(0.24, options.searchRadius ?? 0.16) : options.searchRadius ?? 0.16,
+        previousConfidence < 0.55
+          ? {
+              scales: [0.82, 0.92, 1, 1.08, 1.2],
+              angles: [-12, -6, 0, 6, 12],
+              normalised: true,
+            }
+          : undefined,
+      );
+    const matchConfidence = match.confidence;
+    previousConfidence = matchConfidence;
     currentX = match.x;
     currentY = match.y;
+    if (matchConfidence >= 0.7) {
+      const observed = extractPatch(frame, {
+        x: currentX / first.width,
+        y: currentY / first.height,
+        width: template.width / first.width,
+        height: template.height / first.height,
+      });
+      template = blendTemplate(template, observed, 0.12);
+    }
     confidenceTotal += match.confidence;
     const localTime = time - start;
     x.push({ t: localTime, value: ((currentX - initialX) / first.width) * 100, easing: 'linear' });

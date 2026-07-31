@@ -10,6 +10,8 @@ import {
   parsePreferredAudioStreamIndex,
   parseInputMediaStreams,
   parseInputVideoColorMetadata,
+  parseInputVideoCompatibility,
+  needsChromiumPreviewProxy,
 } from '../../electron/nativeFfmpeg.cjs';
 
 describe('native media stream probing', () => {
@@ -101,6 +103,31 @@ describe('native media stream probing', () => {
           'Stream #0:1: Video: hevc, yuv420p10le(tv, bt2020nc/bt2020/smpte2084)',
       ).toneMap,
     ).toBeNull();
+  });
+
+  it('detects codecs, high-bit-depth formats and variable frame rate', () => {
+    expect(parseInputVideoCompatibility(
+      'Stream #0:0: Video: hevc, yuv420p10le(tv, bt2020nc/bt2020/smpte2084), 1920x1080, 59.94 fps, 29.97 tbr',
+    )).toMatchObject({
+      codec: 'hevc',
+      pixelFormat: 'yuv420p10le',
+      frameRate: 59.94,
+      variableFrameRate: true,
+      toneMap: 'pq',
+    });
+    expect(parseInputVideoCompatibility(
+      'Stream #0:0: Video: h264, yuv420p(tv, bt709), 1920x1080, 60 fps, 60 tbr',
+    )).toMatchObject({
+      codec: 'h264',
+      pixelFormat: 'yuv420p',
+      variableFrameRate: false,
+    });
+    expect(needsChromiumPreviewProxy({
+      codec: 'hevc', pixelFormat: 'yuv420p10le', toneMap: 'pq',
+    })).toBe(true);
+    expect(needsChromiumPreviewProxy({
+      codec: 'h264', pixelFormat: 'yuv420p', toneMap: null, variableFrameRate: false,
+    })).toBe(false);
   });
 
   it('uses one shared linear-light BT.709 tone-map chain', () => {

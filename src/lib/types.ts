@@ -138,6 +138,12 @@ export interface NativeMediaSource {
   url: string;
   /** Main-process FFmpeg found corrupt/undecodable leading video packets. */
   requiresPreviewProxy?: boolean;
+  /** First video stream codec as reported by native FFmpeg. */
+  videoCodec?: string | null;
+  /** First video stream pixel format as reported by native FFmpeg. */
+  videoPixelFormat?: string | null;
+  /** True when the source advertises materially different fps/tbr values. */
+  variableFrameRate?: boolean;
   audioStreamIndex?: number | null;
   audioStreams?: NativeAudioStream[];
 }

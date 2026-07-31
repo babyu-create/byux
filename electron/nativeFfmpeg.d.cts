@@ -71,6 +71,21 @@ export function parseInputVideoColorMetadata(stderr: string): {
   primaries: 'bt2020' | 'smpte432' | null;
   toneMap: 'pq' | 'hlg' | null;
 };
+export function parseInputVideoCompatibility(stderr: string): {
+  codec: string | null;
+  pixelFormat: string | null;
+  frameRate?: number;
+  variableFrameRate: boolean;
+  transfer: 'smpte2084' | 'arib-std-b67' | null;
+  primaries: 'bt2020' | 'smpte432' | null;
+  toneMap: 'pq' | 'hlg' | null;
+};
+export function needsChromiumPreviewProxy(metadata: {
+  codec?: string | null;
+  pixelFormat?: string | null;
+  toneMap?: 'pq' | 'hlg' | null;
+  variableFrameRate?: boolean;
+}): boolean;
 export function probeInputVideoColorMetadata(
   binaryPath: string,
   sourcePath: string,
@@ -79,6 +94,10 @@ export function probeInputVideoColorMetadata(
   primaries: 'bt2020' | 'smpte432' | null;
   toneMap: 'pq' | 'hlg' | null;
 }>;
+export function probeInputVideoCompatibility(
+  binaryPath: string,
+  sourcePath: string,
+): Promise<ReturnType<typeof parseInputVideoCompatibility>>;
 export function buildHdrToSdrFilter(toneMap: 'pq' | 'hlg' | null): string;
 export function parseInputMediaStreams(stderr: string): {
   hasVideo: boolean;

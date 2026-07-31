@@ -266,6 +266,41 @@ function parseInputVideoColorMetadata(stderr) {
   };
 }
 
+/**
+ * Extract the decoder-relevant part of the first video stream. Chromium's
+ * media stack is intentionally narrower than FFmpeg: HEVC, 10-bit/4:2:2
+ * formats and many variable-frame-rate captures need a small H.264 CFR proxy
+ * for reliable scrubbing, even when FFmpeg itself can decode them.
+ */
+function parseInputVideoCompatibility(stderr) {
+  const line = (
+    String(stderr)
+      .split(/\r?\n/)
+      .find((candidate) => /Stream #\d+:\d+.*Video:/i.test(candidate)) ?? ''
+  );
+  const codec = line.match(/Video:\s*([^,\s(]+)/i)?.[1]?.toLowerCase() ?? null;
+  const pixelFormat = line.match(/Video:\s*[^,]+,\s*([^\s(,]+)/i)?.[1]?.toLowerCase() ?? null;
+  const fps = Number(line.match(/(\d+(?:\.\d+)?)\s+fps\b/i)?.[1]);
+  const tbr = Number(line.match(/(\d+(?:\.\d+)?)\s+tbr\b/i)?.[1]);
+  const variableFrameRate = Number.isFinite(fps) && Number.isFinite(tbr) && Math.abs(fps - tbr) > 0.5;
+  const color = parseInputVideoColorMetadata(stderr);
+  return {
+    codec,
+    pixelFormat,
+    ...(Number.isFinite(fps) && fps > 0 ? { frameRate: fps } : {}),
+    variableFrameRate,
+    ...color,
+  };
+}
+
+function needsChromiumPreviewProxy(metadata) {
+  const codec = typeof metadata?.codec === 'string' ? metadata.codec.toLowerCase() : null;
+  const pixelFormat = typeof metadata?.pixelFormat === 'string' ? metadata.pixelFormat.toLowerCase() : null;
+  const browserCodec = codec === null || !new Set(['h264', 'avc1', 'vp8', 'vp9', 'av1']).has(codec);
+  const browserPixelFormat = pixelFormat !== null && !/^(yuv420p|yuvj420p|nv12)$/i.test(pixelFormat);
+  return browserCodec || browserPixelFormat || metadata?.toneMap !== null || metadata?.variableFrameRate === true;
+}
+
 async function probeInputVideoColorMetadata(binaryPath, sourcePath) {
   const result = await runCaptured(
     binaryPath,
@@ -282,6 +317,24 @@ async function probeInputVideoColorMetadata(binaryPath, sourcePath) {
     { timeoutMs: 20_000 },
   );
   return parseInputVideoColorMetadata(result.stderr);
+}
+
+async function probeInputVideoCompatibility(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'info',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+    ],
+    { timeoutMs: 20_000 },
+  );
+  return parseInputVideoCompatibility(result.stderr);
 }
 
 function buildHdrToSdrFilter(toneMap) {
@@ -622,11 +675,14 @@ module.exports = {
   probeAudioStreams,
   parseInputMediaStreams,
   parseInputVideoColorMetadata,
+  parseInputVideoCompatibility,
+  needsChromiumPreviewProxy,
   probeInputDuration,
   probeInputHasAudio,
   probePreferredAudioStreamIndex,
   probeInputMediaKind,
   probeInputVideoColorMetadata,
+  probeInputVideoCompatibility,
   probeInputVideoDecodable,
   resolveFfmpegBinary,
   runCaptured,

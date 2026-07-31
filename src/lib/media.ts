@@ -80,6 +80,17 @@ const PROXY_FIRST_AUDIO_EXTENSIONS = new Set([
   'amr',
 ]);
 
+/** Long captures benefit from a bounded 720p editing stream even when the
+ * source codec is technically playable. Short, high-bitrate highlights stay
+ * on the original so importing them never incurs a full transcode. */
+export const LONG_FORM_PROXY_MIN_BYTES = 1_000_000_000;
+export const LONG_FORM_PROXY_MIN_SECONDS = 15 * 60;
+
+export function shouldPreferPreviewProxy(size: number, duration: number): boolean {
+  return Number.isFinite(size) && size >= LONG_FORM_PROXY_MIN_BYTES &&
+    Number.isFinite(duration) && duration >= LONG_FORM_PROXY_MIN_SECONDS;
+}
+
 function fileExtension(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() ?? '';
 }

@@ -38,7 +38,8 @@ const {
   probeInputDuration,
   probeInputMediaKind,
   probeAudioStreams,
-  probeInputVideoColorMetadata,
+  probeInputVideoCompatibility,
+  needsChromiumPreviewProxy,
   probeInputVideoDecodable,
   resolveFfmpegBinary,
   runCaptured,
@@ -2232,6 +2233,9 @@ function registerResolvedMedia(
       compatibility.hdrToneMap === 'pq' || compatibility.hdrToneMap === 'hlg'
         ? compatibility.hdrToneMap
         : null,
+    videoCodec: compatibility.videoCodec ?? null,
+    videoPixelFormat: compatibility.videoPixelFormat ?? null,
+    variableFrameRate: compatibility.variableFrameRate === true,
   });
   return {
     token,
@@ -2244,6 +2248,9 @@ function registerResolvedMedia(
     audioStreams: Array.isArray(compatibility.audioStreams)
       ? compatibility.audioStreams
       : [],
+    videoCodec: compatibility.videoCodec ?? null,
+    videoPixelFormat: compatibility.videoPixelFormat ?? null,
+    variableFrameRate: compatibility.variableFrameRate === true,
   };
 }
 
@@ -2280,15 +2287,21 @@ async function inspectVideoCompatibility(realPath, kind) {
   try {
     await ensureNativeFfmpeg();
     const binaryPath = ffmpegBinaryPath();
-    const [decodable, colorMetadata] = await Promise.all([
+    const [decodable, videoMetadata] = await Promise.all([
       probeInputVideoDecodable(binaryPath, realPath).catch(() => false),
-      probeInputVideoColorMetadata(binaryPath, realPath).catch(() => null),
+      probeInputVideoCompatibility(binaryPath, realPath).catch(() => null),
     ]);
-    const hdrToneMap = colorMetadata?.toneMap ?? null;
+    const hdrToneMap = videoMetadata?.toneMap ?? null;
+    const codec = videoMetadata?.codec ?? null;
+    const pixelFormat = videoMetadata?.pixelFormat ?? null;
+    const variableFrameRate = videoMetadata?.variableFrameRate === true;
     return {
-      requiresPreviewProxy: !decodable || hdrToneMap !== null,
+      requiresPreviewProxy: !decodable || needsChromiumPreviewProxy(videoMetadata ?? {}),
       requiresRepairProxy: !decodable,
       hdrToneMap,
+      videoCodec: codec,
+      videoPixelFormat: pixelFormat,
+      variableFrameRate,
     };
   } catch {
     // A timeout or probe startup failure must not send an unverified source
@@ -2298,6 +2311,9 @@ async function inspectVideoCompatibility(realPath, kind) {
       requiresPreviewProxy: true,
       requiresRepairProxy: true,
       hdrToneMap: null,
+      videoCodec: null,
+      videoPixelFormat: null,
+      variableFrameRate: false,
     };
   }
 }

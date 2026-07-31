@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -273,6 +274,7 @@ interface PreviewVisualLayerProps {
   verticalReframe: number;
   hudPreset: HudPreset;
   onTogglePlay: () => void;
+  onPlaybackError: (asset: MediaAsset) => void;
 }
 
 /**
@@ -290,6 +292,7 @@ function PreviewVisualLayer({
   verticalReframe,
   hudPreset,
   onTogglePlay,
+  onPlaybackError,
 }: PreviewVisualLayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const rampSampler = useMemo(() => rampSamplerForClip(clip), [clip]);
@@ -400,6 +403,7 @@ function PreviewVisualLayer({
         style={videoStyle}
         playsInline
         onClick={onTogglePlay}
+        onError={() => onPlaybackError(asset)}
       />
       <MotionBlurCanvas
         videoRef={videoRef}
@@ -423,6 +427,7 @@ interface PreviewProps {
 export function Preview({ suspended = false }: PreviewProps) {
   const fallbackAsset = useSelectedAsset();
   const assets = useMediaStore((s) => s.assets);
+  const promoteAssetToProxy = useMediaStore((s) => s.promoteAssetToProxy);
   const clips = useProjectStore((s) => s.clips);
   const tracks = useProjectStore((s) => s.tracks);
   const playhead = useProjectStore((s) => s.playhead);
@@ -512,6 +517,30 @@ export function Preview({ suspended = false }: PreviewProps) {
   const activeAsset = activeClip ? (assetMap[activeClip.assetId] ?? null) : null;
   const showFallback = clips.length === 0 && fallbackAsset?.kind === 'video';
   const displayAsset: MediaAsset | null = activeAsset ?? (showFallback ? fallbackAsset : null);
+  const proxyingAssetIds = useRef(new Set<string>());
+  const handlePlaybackError = useCallback(async (asset: MediaAsset) => {
+    if (
+      asset.previewProxy ||
+      !asset.sourceToken ||
+      proxyingAssetIds.current.has(asset.id)
+    ) {
+      reportMainPlaybackFailure();
+      return;
+    }
+    proxyingAssetIds.current.add(asset.id);
+    useProjectStore.getState().setIsPlaying(false);
+    useProjectStore.getState().showMessage('info', `${asset.name} を互換プロキシへ切り替えています…`, 4000);
+    try {
+      const converted = await promoteAssetToProxy(asset.id);
+      useProjectStore.getState().showMessage(
+        converted ? 'success' : 'error',
+        converted ? '互換プロキシへ切り替えました' : '互換プロキシを作成できませんでした。素材を再追加してください',
+        5000,
+      );
+    } finally {
+      proxyingAssetIds.current.delete(asset.id);
+    }
+  }, [promoteAssetToProxy]);
 
   const activeUpperVisualLayers = useMemo(() => {
     const visualTracks = tracks.filter(
@@ -1162,6 +1191,7 @@ export function Preview({ suspended = false }: PreviewProps) {
                 playsInline
                 muted={videoTrackMuted}
                 onClick={togglePlay}
+                onError={() => { if (displayAsset) void handlePlaybackError(displayAsset); }}
               />
               <MotionBlurCanvas
                 videoRef={videoRef}
@@ -1210,6 +1240,7 @@ export function Preview({ suspended = false }: PreviewProps) {
               verticalReframe={verticalReframe}
               hudPreset={hudPreset}
               onTogglePlay={togglePlay}
+              onPlaybackError={handlePlaybackError}
             />
           ))}
           {showVideo && activeRampSampler ? (
