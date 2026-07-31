@@ -428,15 +428,34 @@ export function ExportDialog({ onClose }: ExportDialogProps) {
         signal: abortController.signal,
       };
       const compatibility = getNativeExportCompatibility(renderInput, renderOptions);
+      const exactEffectFrameLimit = 1_200;
+      const hasMotionBlurEffect = motionBlur && clips.some((clip) =>
+        clip.effects.some((effect) => effect.type === 'motion-blur'),
+      );
+      const motionBlurFrames = Math.ceil(compatibility.duration * fps);
+      const referencedAssetBytes = assets
+        .filter((asset) => clips.some((clip) => clip.assetId === asset.id))
+        .reduce((total, asset) => total + asset.size, 0);
+      const previewParityMemorySafe = referencedAssetBytes <= 256 * 1024 * 1024;
+      // Short clips use the same WebGL renderer as the live preview when the
+      // referenced sources are small enough to stage safely. Long timelines
+      // or multi-GB captures stay on native FFmpeg so the renderer never has
+      // to materialize the complete source just to render a one-second clip.
+      const preferPreviewParity =
+        hasMotionBlurEffect &&
+        motionBlurFrames <= exactEffectFrameLimit &&
+        previewParityMemorySafe;
       let useNative = false;
       let nativeUnavailableReason = '';
       if (nativeExport?.getNativeCapabilities) {
         const capabilities = await nativeExport.getNativeCapabilities();
         throwIfCancelled();
-        useNative = capabilities.available && compatibility.compatible;
+        useNative = capabilities.available && compatibility.compatible && !preferPreviewParity;
         nativeUnavailableReason = capabilities.error ?? '';
       }
-      const exactEffectFrameLimit = 1_200;
+      if (preferPreviewParity) {
+        setLiveStatus('短尺モーションブラー: プレビューと同じGPU処理を使用');
+      }
       if (
         !compatibility.compatible &&
         compatibility.duration * fps > exactEffectFrameLimit
