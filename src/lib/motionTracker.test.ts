@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { extractPatch, findBestTemplateMatch, templateDifference } from './motionTracker';
+import {
+  decideTrackingPosition,
+  extractPatch,
+  findBestTemplateMatch,
+  templateDifference,
+  transformTemplate,
+} from './motionTracker';
 
 function frame(width: number, height: number, pixels: Array<[number, number, number]>) {
   const data = new Uint8Array(width * height);
@@ -46,5 +52,43 @@ describe('motion tracker template matching', () => {
     expect(Math.abs(match.x - 11)).toBeLessThanOrEqual(1);
     expect(Math.abs(match.y - 9)).toBeLessThanOrEqual(1);
     expect(match.confidence).toBeGreaterThan(0.75);
+  });
+
+  it('recovers a scaled and rotated template when the regular match loses lock', () => {
+    const source = frame(6, 6, []);
+    for (let y = 0; y < 6; y += 1) {
+      for (let x = 0; x < 6; x += 1) {
+        source.data[y * source.width + x] = (x * 37 + y * 19 + (x === y ? 80 : 0)) % 255;
+      }
+    }
+    const variant = transformTemplate(source, 1.2, 12);
+    const next = frame(32, 24, []);
+    const placedX = 13;
+    const placedY = 8;
+    for (let y = 0; y < variant.height; y += 1) {
+      next.data.set(
+        variant.data.subarray(y * variant.width, (y + 1) * variant.width),
+        (placedY + y) * next.width + placedX,
+      );
+    }
+    const match = findBestTemplateMatch(next, source, 10, 6, 0.5, {
+      scales: [1.2],
+      angles: [12],
+      normalised: true,
+    });
+    expect(Math.abs(match.x - (placedX + 1))).toBeLessThanOrEqual(1);
+    expect(Math.abs(match.y - (placedY + 1))).toBeLessThanOrEqual(1);
+    expect(match.confidence).toBeGreaterThan(0.7);
+  });
+
+  it('holds the last good position when an occlusion match is weak', () => {
+    const held = decideTrackingPosition(12, 8, 13, 8, {
+      x: 25,
+      y: 20,
+      confidence: 0.1,
+    }, { width: 160, height: 90 }, 0.24);
+    expect(held.accepted).toBe(false);
+    expect(held.x).toBe(12);
+    expect(held.y).toBe(8);
   });
 });

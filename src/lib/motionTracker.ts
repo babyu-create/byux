@@ -27,6 +27,13 @@ export interface MotionTrackResult {
   sampledFps: number;
 }
 
+export interface TrackingPositionDecision {
+  x: number;
+  y: number;
+  confidence: number;
+  accepted: boolean;
+}
+
 export interface GrayFrame {
   width: number;
   height: number;
@@ -140,7 +147,7 @@ function patchDifference(
   return 0.5 - correlation * 0.5;
 }
 
-function transformTemplate(template: GrayFrame, scale: number, angleDegrees: number): GrayFrame {
+export function transformTemplate(template: GrayFrame, scale: number, angleDegrees: number): GrayFrame {
   const width = Math.max(2, Math.round(template.width * scale));
   const height = Math.max(2, Math.round(template.height * scale));
   const angle = angleDegrees * Math.PI / 180;
@@ -163,6 +170,34 @@ function transformTemplate(template: GrayFrame, scale: number, angleDegrees: num
     }
   }
   return { width, height, data };
+}
+
+/** Reject weak/implausibly distant matches during occlusion. */
+export function decideTrackingPosition(
+  previousX: number,
+  previousY: number,
+  predictedX: number,
+  predictedY: number,
+  match: { x: number; y: number; confidence: number },
+  frame: Pick<GrayFrame, 'width' | 'height'>,
+  radius = 0.16,
+): TrackingPositionDecision {
+  const maxDisplacement = Math.max(
+    4,
+    Math.min(frame.width, frame.height) * Math.max(0.08, radius),
+  );
+  const displacement = Math.hypot(match.x - predictedX, match.y - predictedY);
+  const accepted = Number.isFinite(match.confidence) && match.confidence >= 0.48 &&
+    displacement <= maxDisplacement * 1.35;
+  if (accepted) {
+    return { x: match.x, y: match.y, confidence: match.confidence, accepted: true };
+  }
+  return {
+    x: Math.max(0, Math.min(frame.width - 2, previousX)),
+    y: Math.max(0, Math.min(frame.height - 2, previousY)),
+    confidence: Math.max(0, Math.min(1, match.confidence)),
+    accepted: false,
+  };
 }
 
 function blendTemplate(target: GrayFrame, patch: GrayFrame, amount: number): GrayFrame {
@@ -275,20 +310,27 @@ export async function trackVideoElement(
   const y: Keyframe[] = [];
   let confidenceTotal = 0;
   let previousConfidence = 1;
+  let velocityX = 0;
+  let velocityY = 0;
   let frameCount = 0;
   for (let time = start; time <= end + 1e-6; time += interval) {
     if (options.signal?.aborted) throw new DOMException('追跡を中止しました', 'AbortError');
     await seek(video, Math.min(end, time));
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const frame = frameFromCanvas(context, canvas.width, canvas.height);
+    const predictedX = currentX + velocityX;
+    const predictedY = currentY + velocityY;
+    const searchRadius = previousConfidence < 0.55
+      ? Math.max(0.24, options.searchRadius ?? 0.16)
+      : options.searchRadius ?? 0.16;
     const match = frameCount === 0
       ? { x: currentX, y: currentY, confidence: 1 }
       : findBestTemplateMatch(
         frame,
         template,
-        currentX,
-        currentY,
-        previousConfidence < 0.55 ? Math.max(0.24, options.searchRadius ?? 0.16) : options.searchRadius ?? 0.16,
+        Math.round(predictedX),
+        Math.round(predictedY),
+        searchRadius,
         previousConfidence < 0.55
           ? {
               scales: [0.82, 0.92, 1, 1.08, 1.2],
@@ -297,10 +339,33 @@ export async function trackVideoElement(
             }
           : undefined,
       );
-    const matchConfidence = match.confidence;
+    const decision = frameCount === 0
+      ? { x: match.x, y: match.y, confidence: 1, accepted: true }
+      : decideTrackingPosition(
+        currentX,
+        currentY,
+        predictedX,
+        predictedY,
+        match,
+        first,
+        searchRadius,
+      );
+    const matchConfidence = decision.confidence;
+    if (decision.accepted) {
+      velocityX = velocityX * 0.65 + (decision.x - currentX) * 0.35;
+      velocityY = velocityY * 0.65 + (decision.y - currentY) * 0.35;
+      currentX = decision.x;
+      currentY = decision.y;
+    } else {
+      // Keep a conservative prediction during occlusion. This prevents a
+      // random background match from poisoning the adaptive template while
+      // still allowing the wider recovery search to reacquire the target.
+      currentX = Math.max(0, Math.min(first.width - template.width, Math.round(predictedX)));
+      currentY = Math.max(0, Math.min(first.height - template.height, Math.round(predictedY)));
+      velocityX *= 0.82;
+      velocityY *= 0.82;
+    }
     previousConfidence = matchConfidence;
-    currentX = match.x;
-    currentY = match.y;
     if (matchConfidence >= 0.7) {
       const observed = extractPatch(frame, {
         x: currentX / first.width,
