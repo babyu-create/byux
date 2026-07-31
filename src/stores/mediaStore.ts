@@ -35,11 +35,14 @@ interface MediaStoreState {
       url: string;
       size: number;
       requiresPreviewProxy?: boolean;
+      audioStreamIndex?: number | null;
+      audioStreams?: NativeMediaSource['audioStreams'];
     },
   ) => Promise<MediaAsset>;
   removeAsset: (id: string) => void;
   clearAssets: () => void;
   selectAsset: (id: string | null) => void;
+  selectAudioStream: (id: string, index: number) => Promise<boolean>;
   clearError: () => void;
   setAssetBeats: (id: string, beats: number[]) => void;
   setAssetWaveform: (id: string, waveform: { peaks: Float32Array; peaksPerSecond: number }) => void;
@@ -162,6 +165,8 @@ async function assetFromNativeSource(
       sourceToken: source.token,
       previewSourceToken: previewToken,
       previewProxy,
+      audioStreamIndex: source.audioStreamIndex,
+      audioStreams: source.audioStreams,
     };
   } catch (error) {
     if (previewToken) {
@@ -469,6 +474,8 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
                 sourceToken: registeredSource.token,
                 previewSourceToken: proxy.token,
                 previewProxy: true,
+                audioStreamIndex: registeredSource.audioStreamIndex,
+                audioStreams: registeredSource.audioStreams,
               };
             } catch (error) {
               if (proxyToken) {
@@ -492,8 +499,10 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
               size: file.size,
               mimeType: file.type || guessMimeType(file.name, 'video'),
               path: registeredSource?.path,
-              sourceToken: registeredSource?.token,
-              previewProxy: true,
+            sourceToken: registeredSource?.token,
+            previewProxy: true,
+            audioStreamIndex: registeredSource?.audioStreamIndex,
+            audioStreams: registeredSource?.audioStreams,
             };
           }
         }
@@ -503,6 +512,8 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
             name: registeredSource.name,
             path: registeredSource.path,
             sourceToken: registeredSource.token,
+            audioStreamIndex: registeredSource.audioStreamIndex,
+            audioStreams: registeredSource.audioStreams,
           };
         }
         if (asset) {
@@ -626,6 +637,8 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
       token: source.token,
       url: source.url,
       requiresPreviewProxy: source.requiresPreviewProxy,
+      audioStreamIndex: source.audioStreamIndex,
+      audioStreams: source.audioStreams,
     });
     // Project references already point at ref.id. Keeping that stable avoids
     // a transient split-brain state where clips still use the saved ID while
@@ -673,6 +686,23 @@ export const useMediaStore = create<MediaStoreState>((set, get) => ({
   },
 
   selectAsset: (id) => set({ selectedAssetId: id }),
+
+  selectAudioStream: async (id, index) => {
+    const asset = get().assets.find((candidate) => candidate.id === id);
+    if (!asset || !Number.isSafeInteger(index) || index < 0 || index > 127) return false;
+    if (asset.audioStreams?.length && index >= asset.audioStreams.length) return false;
+    const sourceToken = asset.sourceToken;
+    if (sourceToken && window.fce?.selectAudioStream) {
+      const result = await window.fce.selectAudioStream(sourceToken, index);
+      if (!result.ok) return false;
+    }
+    set((state) => ({
+      assets: state.assets.map((candidate) =>
+        candidate.id === id ? { ...candidate, audioStreamIndex: index } : candidate,
+      ),
+    }));
+    return true;
+  },
 
   clearError: () => set({ importError: null }),
 

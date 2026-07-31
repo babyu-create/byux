@@ -6,6 +6,7 @@ import {
   buildVideoDecodeProbePlan,
   estimatePreviewProxyBytes,
   parseDuration,
+  parseAudioStreams,
   parsePreferredAudioStreamIndex,
   parseInputMediaStreams,
   parseInputVideoColorMetadata,
@@ -51,6 +52,31 @@ describe('native media stream probing', () => {
       'Stream #0:3: Audio: opus\nStream #0:5: Audio: aac',
     )).toBe(0);
     expect(parsePreferredAudioStreamIndex('Stream #0:0: Video: h264')).toBeNull();
+  });
+
+  it('exposes selectable audio stream metadata in stable audio ordinals', () => {
+    expect(parseAudioStreams([
+      'Stream #0:0: Video: h264',
+      'Stream #0:1(eng): Audio: aac, 48000 Hz, stereo',
+      'Stream #0:2(jpn): Audio: opus, 44100 Hz, mono (default)',
+    ].join('\n'))).toEqual([
+      {
+        index: 0,
+        codec: 'aac',
+        language: 'eng',
+        sampleRate: 48000,
+        channels: 'stereo',
+        default: false,
+      },
+      {
+        index: 1,
+        codec: 'opus',
+        language: 'jpn',
+        sampleRate: 44100,
+        channels: 'mono',
+        default: true,
+      },
+    ]);
   });
 
   it('classifies PQ and HLG only from video color metadata', () => {

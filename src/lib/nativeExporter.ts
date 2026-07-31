@@ -19,6 +19,7 @@ export interface NativeExportAsset {
   height?: number;
   /** Present only when this asset is consumed by a visible/playable lane. */
   sourceToken?: string;
+  audioStreamIndex?: number | null;
 }
 
 export interface NativeExportOverlay {
@@ -311,6 +312,9 @@ export async function prepareNativeExportRequest(
         width: sourceDimensions.width,
         height: sourceDimensions.height,
         ...(sourceToken ? { sourceToken } : {}),
+        ...(asset.audioStreamIndex !== undefined
+          ? { audioStreamIndex: asset.audioStreamIndex }
+          : {}),
       });
     }
 

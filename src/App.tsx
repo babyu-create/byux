@@ -128,7 +128,10 @@ async function relinkFromDisk(
         kind: ref.kind,
       });
       if (!source) continue;
-      const asset = await useMediaStore.getState().addRecoveredAsset(ref, source);
+      const asset = await useMediaStore.getState().addRecoveredAsset(ref, {
+        ...source,
+        audioStreamIndex: ref.audioStreamIndex ?? source.audioStreamIndex,
+      });
       const project = useProjectStore.getState();
       const requiredDuration = requiredAssetSourceDuration(
         ref.id,

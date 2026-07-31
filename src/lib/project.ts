@@ -25,6 +25,7 @@ export interface ProjectAssetRef {
   duration: number;
   width?: number;
   height?: number;
+  audioStreamIndex?: number | null;
   /** Absolute disk path (Electron only) — enables auto-relink on load. */
   path?: string;
 }
@@ -145,6 +146,7 @@ export function serialiseProject(input: SerialiseInput): ProjectFile {
       duration: a.duration,
       ...(a.width !== undefined ? { width: a.width } : null),
       ...(a.height !== undefined ? { height: a.height } : null),
+      ...(a.audioStreamIndex !== undefined ? { audioStreamIndex: a.audioStreamIndex } : null),
       ...(a.path ? { path: a.path } : null),
     })),
     createdAt: new Date().toISOString(),
@@ -381,6 +383,10 @@ const assetRefSchema = z.object({
   width: positiveNumber.optional(),
   height: positiveNumber.optional(),
   path: z.string().max(32_768, 'パスが長すぎます').optional(),
+  audioStreamIndex: z.union([
+    z.number().int().safe().refine((n) => n >= 0 && n <= 127),
+    z.null(),
+  ]).optional(),
 });
 
 const projectFileSchema = z.object({

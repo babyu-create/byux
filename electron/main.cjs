@@ -37,7 +37,7 @@ const {
   minimalEnvironment,
   probeInputDuration,
   probeInputMediaKind,
-  probePreferredAudioStreamIndex,
+  probeAudioStreams,
   probeInputVideoColorMetadata,
   probeInputVideoDecodable,
   resolveFfmpegBinary,
@@ -1390,8 +1390,13 @@ async function leaseNativeSources(request, entry) {
       }
       source.leases = (source.leases ?? 0) + 1;
       entry.sourceLeases.push(asset.sourceToken);
-      const audioStreamIndex = Number.isSafeInteger(source.audioStreamIndex)
-        ? source.audioStreamIndex
+      const requestedAudioStreamIndex = Number.isSafeInteger(asset.audioStreamIndex)
+        ? asset.audioStreamIndex
+        : source.audioStreamIndex;
+      const audioStreamIndex = Number.isSafeInteger(requestedAudioStreamIndex) &&
+        requestedAudioStreamIndex >= 0 &&
+        requestedAudioStreamIndex < (source.audioStreams?.length ?? Number.MAX_SAFE_INTEGER)
+        ? requestedAudioStreamIndex
         : null;
       const hasAudio = audioStreamIndex !== null;
       if (entry.cancelled) {
@@ -2218,6 +2223,9 @@ function registerResolvedMedia(
     leases: 0,
     releaseRequested: false,
     audioStreamIndex,
+    audioStreams: Array.isArray(compatibility.audioStreams)
+      ? compatibility.audioStreams
+      : [],
     requiresPreviewProxy: requiresPreviewProxy === true,
     requiresRepairProxy: compatibility.requiresRepairProxy === true,
     hdrToneMap:
@@ -2232,15 +2240,23 @@ function registerResolvedMedia(
     kind,
     name,
     requiresPreviewProxy: requiresPreviewProxy === true,
+    audioStreamIndex,
+    audioStreams: Array.isArray(compatibility.audioStreams)
+      ? compatibility.audioStreams
+      : [],
   };
 }
 
-async function inspectPreferredAudioStream(realPath) {
+async function inspectAudioSelection(realPath) {
   // `null` is reserved for a successful probe that found no audio. Startup,
   // timeout, and read failures must reject registration instead of silently
   // pinning an otherwise valid recording to a permanently muted export.
   await ensureNativeFfmpeg();
-  return probePreferredAudioStreamIndex(ffmpegBinaryPath(), realPath);
+  const audioStreams = await probeAudioStreams(ffmpegBinaryPath(), realPath);
+  const preferredIndex = audioStreams.find((stream) => stream.default)?.index
+    ?? audioStreams[0]?.index
+    ?? null;
+  return { audioStreams, audioStreamIndex: preferredIndex };
 }
 
 async function resolveMediaKind(realPath, requestedKind = null) {
@@ -2317,16 +2333,16 @@ ipcMain.handle('media:register-selected-file', async (event, ref) => {
     const kind = await resolveMediaKind(realPath, ref.kind ?? null);
     if (!kind) return { ok: false, code: 'INVALID_KIND' };
     const name = path.basename(realPath);
-    const [compatibility, audioStreamIndex] = await Promise.all([
+    const [compatibility, audioSelection] = await Promise.all([
       inspectVideoCompatibility(realPath, kind),
-      inspectPreferredAudioStream(realPath),
+      inspectAudioSelection(realPath),
     ]);
     return {
       ok: true,
       source: {
         ...registerResolvedMedia(realPath, stat, kind, name, {
           ...compatibility,
-          audioStreamIndex,
+          ...audioSelection,
         }),
         path: realPath,
         name,
@@ -2396,16 +2412,16 @@ ipcMain.handle('media:select-files', async (event, options) => {
         continue;
       }
       const name = path.basename(realPath);
-      const [compatibility, audioStreamIndex] = await Promise.all([
+      const [compatibility, audioSelection] = await Promise.all([
         inspectVideoCompatibility(realPath, kind),
-        inspectPreferredAudioStream(realPath),
+        inspectAudioSelection(realPath),
       ]);
       const registered = registerResolvedMedia(
         realPath,
         stat,
         kind,
         name,
-        { ...compatibility, audioStreamIndex },
+        { ...compatibility, ...audioSelection },
       );
       sources.push({
         ...registered,
@@ -2453,20 +2469,36 @@ ipcMain.handle('media:register-file', async (event, ref) => {
     if (!stat.isFile() || stat.size !== ref.size) return null;
     const kind = await resolveMediaKind(realPath, ref.kind ?? null);
     if (!kind || (ref.kind && kind !== ref.kind)) return null;
-    const [compatibility, audioStreamIndex] = await Promise.all([
+    const [compatibility, audioSelection] = await Promise.all([
       inspectVideoCompatibility(realPath, kind),
-      inspectPreferredAudioStream(realPath),
+      inspectAudioSelection(realPath),
     ]);
     return registerResolvedMedia(
       realPath,
       stat,
       kind,
       approval.name ?? canonicalName,
-      { ...compatibility, audioStreamIndex },
+      { ...compatibility, ...audioSelection },
     );
   } catch {
     return null;
   }
+});
+
+ipcMain.handle('media:select-audio-stream', async (event, sourceToken, index) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string' ||
+      !Number.isSafeInteger(index) || index < 0 || index > 127) {
+    return { ok: false, error: '音声ストリームの指定が不正です' };
+  }
+  const source = registeredMedia.get(sourceToken);
+  if (!source || source.kind !== 'video' && source.kind !== 'audio') {
+    return { ok: false, error: '素材との接続が失われています' };
+  }
+  if (source.audioStreams?.length > 0 && index >= source.audioStreams.length) {
+    return { ok: false, error: '指定した音声ストリームが存在しません' };
+  }
+  source.audioStreamIndex = index;
+  return { ok: true, index };
 });
 
 function releaseWaveformSourceLease(job) {

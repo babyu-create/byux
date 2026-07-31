@@ -133,6 +133,9 @@ contextBridge.exposeInMainWorld('fce', {
   analyzeMediaLoudness(sourceToken) {
     return ipcRenderer.invoke('media:analyze-loudness', sourceToken);
   },
+  selectAudioStream(sourceToken, index) {
+    return ipcRenderer.invoke('media:select-audio-stream', sourceToken, index);
+  },
   cancelMediaLoudness(sourceToken) {
     return ipcRenderer.invoke('media:cancel-loudness', sourceToken);
   },

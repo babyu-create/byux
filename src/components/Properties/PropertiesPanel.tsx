@@ -21,6 +21,7 @@ import { ClipPresetsSection } from './ClipPresetsSection';
 import { BeatDetectionSection } from './BeatDetectionSection';
 import { AudioDuckingSection } from './AudioDuckingSection';
 import { ClipAudioProcessingSection } from './ClipAudioProcessingSection';
+import { AudioStreamSection } from './AudioStreamSection';
 import { hasAudioProcessing } from '../../lib/audioProcessing';
 import styles from './PropertiesPanel.module.css';
 
@@ -196,6 +197,16 @@ export function PropertiesPanel() {
                 <IORangeSection asset={asset} />
               </CollapsibleSection>
             </>
+          ) : null}
+          {asset.audioStreams && asset.audioStreams.length > 1 ? (
+            <CollapsibleSection
+              id="audio-stream"
+              title="音声ストリーム"
+              defaultOpen
+              badge={`${asset.audioStreams.length}本`}
+            >
+              <AudioStreamSection asset={asset} />
+            </CollapsibleSection>
           ) : null}
           {asset.kind === 'audio' ? (
             <CollapsibleSection id="beat-detection" title="ビート検出">

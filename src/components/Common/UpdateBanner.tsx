@@ -6,6 +6,7 @@ import type {
   NativeMediaSelectionResult,
   NativeLoudnessResult,
   NativeWaveformResult,
+  NativeAudioStream,
 } from '../../lib/types';
 import styles from './UpdateBanner.module.css';
 
@@ -218,7 +219,13 @@ interface FCEGlobal {
     name: string;
     size: number;
     kind: 'video' | 'audio';
-  }) => Promise<{ token: string; url: string; size: number } | null>;
+  }) => Promise<{
+    token: string;
+    url: string;
+    size: number;
+    audioStreamIndex?: number | null;
+    audioStreams?: NativeAudioStream[];
+  } | null>;
   /** Create/reuse a disk-backed H.264/AAC preview without loading the source into renderer memory. */
   createPreviewProxy?: (sourceToken: string) => Promise<{
     ok: boolean;
@@ -233,6 +240,11 @@ interface FCEGlobal {
   cancelMediaWaveform?: (sourceToken: string) => Promise<boolean>;
   /** Analyze EBU R128 loudness without transferring decoded audio to the renderer. */
   analyzeMediaLoudness?: (sourceToken: string) => Promise<NativeLoudnessResult>;
+  selectAudioStream?: (sourceToken: string, index: number) => Promise<{
+    ok: boolean;
+    index?: number;
+    error?: string;
+  }>;
   cancelMediaLoudness?: (sourceToken: string) => Promise<boolean>;
   /** Bounded source read used only by explicit heavyweight operations. */
   readMediaFileChunk?: (

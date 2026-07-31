@@ -127,6 +127,55 @@ function parsePreferredAudioStreamIndex(stderr) {
   return firstAudio;
 }
 
+/**
+ * Parse the human-readable stream list once during import.  The ordinal is
+ * intentionally the `0:a:N` ordinal (rather than the container stream ID),
+ * matching every export/waveform command in the app.
+ */
+function parseAudioStreams(stderr) {
+  const streams = [];
+  const pattern = /Stream #\d+:\d+(?:\[[^\]\r\n]+\])?(?:\(([^\)\r\n]*)\))?:\s*Audio:([^\r\n]*)/gi;
+  for (const match of String(stderr).matchAll(pattern)) {
+    const description = match[2].trim();
+    const codec = description.split(/[ ,]/, 1)[0] || 'unknown';
+    const sampleRate = Number(description.match(/\b(\d{4,6})\s*Hz\b/i)?.[1]);
+    const channelMatch = description.match(/\b(mono|stereo|(?:\d+\.\d))\b/i);
+    const language = match[1]?.trim() || undefined;
+    streams.push({
+      index: streams.length,
+      codec,
+      ...(language ? { language } : {}),
+      ...(Number.isSafeInteger(sampleRate) && sampleRate > 0 ? { sampleRate } : {}),
+      ...(channelMatch ? { channels: channelMatch[1] } : {}),
+      default: /\(default\)/i.test(description),
+    });
+  }
+  return streams;
+}
+
+async function probeAudioStreams(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'info',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+    ],
+    { timeoutMs: 30_000 },
+  );
+  const streams = parseAudioStreams(result.stderr);
+  const media = parseInputMediaStreams(result.stderr);
+  if (!media.hasVideo && !media.hasAudio) {
+    throw new Error('素材の音声・映像ストリームを確認できません');
+  }
+  return streams;
+}
+
 async function probePreferredAudioStreamIndex(binaryPath, sourcePath) {
   const result = await runCaptured(
     binaryPath,
@@ -569,6 +618,8 @@ module.exports = {
   minimalEnvironment,
   parseDuration,
   parsePreferredAudioStreamIndex,
+  parseAudioStreams,
+  probeAudioStreams,
   parseInputMediaStreams,
   parseInputVideoColorMetadata,
   probeInputDuration,

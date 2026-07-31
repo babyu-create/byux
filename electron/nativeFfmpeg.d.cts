@@ -27,6 +27,19 @@ export function runCaptured(
 export function verifyFfmpegBinary(binaryPath: string): Promise<boolean>;
 export function probeInputHasAudio(binaryPath: string, sourcePath: string): Promise<boolean>;
 export function parsePreferredAudioStreamIndex(stderr: string): number | null;
+export interface ParsedAudioStream {
+  index: number;
+  codec: string;
+  language?: string;
+  sampleRate?: number;
+  channels?: string;
+  default: boolean;
+}
+export function parseAudioStreams(stderr: string): ParsedAudioStream[];
+export function probeAudioStreams(
+  binaryPath: string,
+  sourcePath: string,
+): Promise<ParsedAudioStream[]>;
 export function probePreferredAudioStreamIndex(
   binaryPath: string,
   sourcePath: string,

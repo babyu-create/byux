@@ -113,6 +113,19 @@ export interface MediaAsset {
   previewSourceToken?: string;
   /** Preview uses a lightweight H.264 proxy while export keeps the original file. */
   previewProxy?: boolean;
+  /** Audio stream selected for export (0:a:N ordinal). */
+  audioStreamIndex?: number | null;
+  /** All audio streams discovered by the native importer. */
+  audioStreams?: NativeAudioStream[];
+}
+
+export interface NativeAudioStream {
+  index: number;
+  codec: string;
+  language?: string;
+  sampleRate?: number;
+  channels?: string;
+  default: boolean;
 }
 
 /** A disk-backed media source explicitly selected and registered by Electron. */
@@ -125,6 +138,8 @@ export interface NativeMediaSource {
   url: string;
   /** Main-process FFmpeg found corrupt/undecodable leading video packets. */
   requiresPreviewProxy?: boolean;
+  audioStreamIndex?: number | null;
+  audioStreams?: NativeAudioStream[];
 }
 
 export interface NativeMediaSelectionResult {
