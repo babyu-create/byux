@@ -801,6 +801,25 @@ describe('nativeExportPlan', () => {
     expect(plan.filterGraph).toContain(')*12.8:(0)*7.2');
   });
 
+  it('rejects divergent tracking results in one rasterized overlay group', () => {
+    const divergent = {
+      ...request(),
+      clips: request().clips.map((clip) => ({
+        ...clip,
+        overlays: [
+          { id: 'one', text: 'one', fontSize: 8, color: '#fff', position: 'center', tracking: { x: 1 } },
+          { id: 'two', text: 'two', fontSize: 8, color: '#fff', position: 'center', tracking: { x: 2 } },
+        ],
+      })),
+    };
+    expect(() => buildNativeExportPlan(
+      divergent,
+      new Map([['asset', { path: 'source.mp4', hasAudio: false }]]),
+      new Map([['clip', 'overlay.png']]),
+      'output.part',
+    )).toThrow(/追跡結果が一致しません/);
+  });
+
   it('keeps progress monotonic and reserves one percent for validation', () => {
     const first = parseProgressText(
       'out_time_us=30000000\nspeed=2.0x\nfps=60\nprogress=continue\n',

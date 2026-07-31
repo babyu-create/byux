@@ -107,7 +107,7 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
         <span>追従先</span>
         <select value={effectiveTarget} onChange={(event) => setTarget(event.target.value as 'clip' | 'overlays')} disabled={progress !== null}>
           <option value="clip">映像クリップ</option>
-          <option value="overlays" disabled={!clip.overlays?.length}>テキスト／画像全体</option>
+          <option value="overlays" disabled={!clip.overlays?.length}>テキスト全体</option>
         </select>
       </label>
       <div className={styles.regionGrid}>
@@ -140,7 +140,7 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
           {confidence === null ? `範囲を追跡（${duration.toFixed(1)}秒）` : `再追跡（信頼度 ${Math.round(confidence * 100)}%）`}
         </button>
       )}
-      <p className={styles.note}>まず対象を中央付近に置き、4つの数値で囲みを合わせてください。追跡結果は横/縦位置のキーフレームになります。オーバーレイを選ぶと同じ動きが全テキスト／画像に適用されます。</p>
+      <p className={styles.note}>まず対象を中央付近に置き、4つの数値で囲みを合わせてください。追跡結果は横/縦位置のキーフレームになります。テキスト全体を選ぶと同じ動きが全テキストに適用されます。</p>
     </div>
   );
 }

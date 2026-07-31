@@ -1050,6 +1050,13 @@ function overlayTrackingForOverlays(overlays, width, height, start) {
   const tracked = overlays.filter((overlay) => overlay?.tracking);
   if (tracked.length === 0 || tracked.length !== overlays.length) return null;
   const first = tracked[0].tracking ?? {};
+  const trackingKey = JSON.stringify(first);
+  if (tracked.some((overlay) => JSON.stringify(overlay.tracking ?? {}) !== trackingKey)) {
+    throw new NativeExportPlanError(
+      'INVALID_OVERLAY',
+      '同じクリップ内のオーバーレイ追跡結果が一致しません。全体を再追跡してください。',
+    );
+  }
   const localTime = `(t-${number(start)})`;
   const x = `(${animatableExpression(first.x, 0, '追跡X', localTime)})*${number(width / 100)}`;
   const y = `(${animatableExpression(first.y, 0, '追跡Y', localTime)})*${number(height / 100)}`;
