@@ -3171,6 +3171,7 @@ async function createSegmentedRepairProxy(
           `trim=duration=${segment.duration.toFixed(6)}`,
           'setpts=PTS-STARTPTS',
         ].filter(Boolean).join(','),
+        ...buildPreviewFrameRateArgs(source.variableFrameRate),
         '-c:v',
         'libx264',
         '-preset',
