@@ -10,8 +10,10 @@ vi.mock('./overlayRaster', () => ({
 
 import {
   getNativeExportCompatibility,
+  prepareClipsForNativeExport,
   prepareNativeExportRequest,
 } from './nativeExporter';
+import { getLegacyClipTrackingMigration } from './motionTracker';
 
 const VIDEO_TRACK: Track = {
   id: 'video',
@@ -84,6 +86,7 @@ function makeOptions(extra: Partial<ExportOptions> = {}): ExportOptions {
 
 function installFceApi(api: {
   registerMediaFile?: ReturnType<typeof vi.fn>;
+  registerMediaFileFromFile?: ReturnType<typeof vi.fn>;
   releaseMediaFile?: ReturnType<typeof vi.fn>;
 }): void {
   Object.defineProperty(globalThis, 'window', {
@@ -178,6 +181,72 @@ describe('getNativeExportCompatibility', () => {
       makeOptions(),
     );
 
+    expect(result.compatible).toBe(false);
+    expect(result.reasons.join(' ')).toContain('64');
+  });
+
+  it('does not rewrite dense clip transforms without explicit tracking provenance', () => {
+    const frames = Array.from({ length: 1_800 }, (_, index) => ({
+      t: index / 30,
+      value: index / 100,
+      easing: 'linear' as const,
+    }));
+    const clip = makeClip({
+      trimEnd: 60,
+      transform: {
+        x: frames,
+        y: frames.map((frame) => ({ ...frame, value: frame.value * -0.5 })),
+      },
+    });
+    const prepared = prepareClipsForNativeExport([clip]);
+    expect(prepared[0].transform?.x).toHaveLength(1_800);
+    expect(prepared[0].transform?.y).toHaveLength(1_800);
+    expect(getNativeExportCompatibility(makeInput([clip]), makeOptions()).compatible).toBe(false);
+  });
+
+  it('offers an explicit export-safe migration for legacy dense tracking', () => {
+    const frames = Array.from({ length: 1_800 }, (_, index) => ({
+      t: index / 30,
+      value: index / 100,
+      easing: 'linear' as const,
+    }));
+    const migration = getLegacyClipTrackingMigration(makeClip({
+      trimEnd: 60,
+      transform: {
+        x: frames,
+        y: frames.map((frame) => ({ ...frame, value: frame.value * -0.5 })),
+      },
+    }));
+    expect(migration).not.toBeNull();
+    expect(migration?.originalCount).toBe(1_800);
+    expect(migration?.keyframeCount).toBeLessThanOrEqual(64);
+    expect(migration?.maximumError).toBeLessThanOrEqual(0.15);
+    expect(migration?.transform.x).toHaveLength(2);
+    expect(migration?.transform.y).toHaveLength(2);
+  });
+
+  it('reports dense overlay tracking that cannot be simplified accurately', () => {
+    const noisy = Array.from({ length: 65 }, (_, index) => ({
+      t: index / 30,
+      value: index % 2 === 0 ? -20 : 20,
+      easing: 'linear' as const,
+    }));
+    const result = getNativeExportCompatibility(
+      makeInput([makeClip({
+        overlays: [{
+          id: 'tracked-overlay',
+          text: 'Tracked',
+          fontSize: 8,
+          color: '#fff',
+          position: 'center',
+          tracking: {
+            x: noisy,
+            y: noisy.map((frame) => ({ ...frame, value: -frame.value })),
+          },
+        }],
+      })]),
+      makeOptions(),
+    );
     expect(result.compatible).toBe(false);
     expect(result.reasons.join(' ')).toContain('64');
   });
@@ -319,6 +388,7 @@ describe('prepareNativeExportRequest', () => {
     );
 
     expect(prepared.request.version).toBe(1);
+    expect(prepared.request.encodingPreference).toBe('auto');
     expect(prepared.request.options).not.toHaveProperty('signal');
     expect(prepared.request.options).not.toHaveProperty('onProgress');
     expect(prepared.request.assets).toEqual([
@@ -335,6 +405,38 @@ describe('prepareNativeExportRequest', () => {
     expect(prepared.request.assets[0]).not.toHaveProperty('path');
     expect(prepared.request.markers).toEqual(input.markers);
     expect(progress).toHaveBeenCalled();
+    await prepared.release();
+  });
+
+  it('sends an export-safe clone for explicit overlay tracking from older versions', async () => {
+    const frames = Array.from({ length: 1_800 }, (_, index) => ({
+      t: index / 30,
+      value: Math.sin(index / 80) * 5,
+      easing: 'linear' as const,
+    }));
+    const clip = makeClip({
+      trimEnd: 60,
+      overlays: [{
+        id: 'legacy-tracked-overlay',
+        text: 'Tracked',
+        fontSize: 8,
+        color: '#fff',
+        position: 'center',
+        tracking: {
+          x: frames,
+          y: frames.map((frame) => ({ ...frame, value: frame.value * -0.5 })),
+        },
+      }],
+    });
+    const prepared = await prepareNativeExportRequest(
+      makeInput([clip]),
+      makeOptions(),
+    );
+    const exportedX = prepared.request.clips[0].overlays?.[0].tracking?.x;
+    const exportedY = prepared.request.clips[0].overlays?.[0].tracking?.y;
+    expect(Array.isArray(exportedX) && exportedX.length).toBeLessThanOrEqual(64);
+    expect(Array.isArray(exportedY) && exportedY.length).toBeLessThanOrEqual(64);
+    expect(clip.overlays?.[0].tracking?.x).toHaveLength(1_800);
     await prepared.release();
   });
 
@@ -373,6 +475,53 @@ describe('prepareNativeExportRequest', () => {
     await prepared.release();
     expect(releaseMediaFile).toHaveBeenCalledTimes(1);
     expect(releaseMediaFile).toHaveBeenCalledWith('temporary-token');
+  });
+
+  it('recovers a missing path from the original File before native export', async () => {
+    const file = new File(['video'], 'source.mp4', { type: 'video/mp4' });
+    const registerMediaFileFromFile = vi.fn().mockResolvedValue({
+      ok: true,
+      source: {
+        token: 'file-token',
+        url: 'fce-media://asset/file-token',
+        size: file.size,
+        path: 'C:\\video\\source.mp4',
+        name: file.name,
+        kind: 'video',
+      },
+    });
+    const releaseMediaFile = vi.fn().mockResolvedValue(true);
+    installFceApi({ registerMediaFileFromFile, releaseMediaFile });
+    const asset = makeAsset({
+      file,
+      size: file.size,
+      sourceToken: undefined,
+      path: undefined,
+    });
+
+    const prepared = await prepareNativeExportRequest(
+      makeInput([makeClip()], [asset]),
+      makeOptions(),
+    );
+
+    expect(registerMediaFileFromFile).toHaveBeenCalledWith(file, 'video');
+    expect(prepared.request.assets[0].sourceToken).toBe('file-token');
+    await prepared.release();
+    expect(releaseMediaFile).toHaveBeenCalledWith('file-token');
+  });
+
+  it('explains how to reconnect a source that has neither a path nor a disk-backed File', async () => {
+    const releaseMediaFile = vi.fn().mockResolvedValue(true);
+    installFceApi({ releaseMediaFile });
+    const asset = makeAsset({
+      sourceToken: undefined,
+      path: undefined,
+      file: undefined,
+    });
+
+    await expect(
+      prepareNativeExportRequest(makeInput([makeClip()], [asset]), makeOptions()),
+    ).rejects.toThrow('「ファイルを追加」ボタンで元ファイルを選び直してください');
   });
 
   it('sends validation metadata without registering hidden or muted sources', async () => {

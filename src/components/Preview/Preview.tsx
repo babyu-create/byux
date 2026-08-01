@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -9,11 +10,14 @@ import { useMediaStore, useSelectedAsset } from '../../stores/mediaStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { clipDuration } from '../../lib/timeline';
 import { formatTimecode } from '../../lib/media';
-import type { Clip, MediaAsset } from '../../lib/types';
+import type { AudioProcessing, Clip, MediaAsset } from '../../lib/types';
 import { Rewind, FastForward, Play, Pause, EyeOff, Clapperboard } from 'lucide-react';
 import { MotionBlurCanvas, type HudPreset } from './MotionBlurCanvas';
 import { shapeStrength } from '../../lib/motionBlurCore';
 import { OverlayLayer } from './OverlayLayer';
+import { SubtitleLayer } from './SubtitleLayer';
+import { activeSubtitleCues } from '../../lib/subtitles';
+import { resolveAudioProcessing } from '../../lib/audioProcessing';
 import { sampleClipTransform, transformToCss } from '../../lib/clipTransform';
 import { colorGradeFilter } from '../../lib/colorGrade';
 import { transitionModulationAt } from '../../lib/transitions';
@@ -75,8 +79,24 @@ const HUD_PRESET_ORDER: HudPreset[] = ['valorant', 'cs2', 'apex', 'none'];
 
 interface PreviewGainGraph {
   source: MediaElementAudioSourceNode;
+  highPass: BiquadFilterNode;
+  low: BiquadFilterNode;
+  mid: BiquadFilterNode;
+  high: BiquadFilterNode;
+  compressor: DynamicsCompressorNode;
   gain: GainNode;
   cleanupTimer: number | null;
+}
+
+function reportMainPlaybackFailure(): void {
+  const state = useProjectStore.getState();
+  if (!state.isPlaying) return;
+  state.setIsPlaying(false);
+  state.showMessage(
+    'error',
+    '動画を再生できませんでした。素材を再追加するか、互換プロキシの作成完了後に再試行してください',
+    6000,
+  );
 }
 
 let previewAudioContext: AudioContext | null = null;
@@ -91,6 +111,7 @@ function useMediaElementGain(
   gainValue: number,
   muted: boolean,
   isPlaying: boolean,
+  processing?: AudioProcessing,
 ) {
   useEffect(() => {
     const media = ref.current;
@@ -101,9 +122,22 @@ function useMediaElementGain(
       graph = previewGainGraphs.get(media) ?? null;
       if (!graph) {
         const source = previewAudioContext.createMediaElementSource(media);
+        const highPass = previewAudioContext.createBiquadFilter();
+        highPass.type = 'highpass';
+        const low = previewAudioContext.createBiquadFilter();
+        low.type = 'lowshelf';
+        low.frequency.value = 120;
+        const mid = previewAudioContext.createBiquadFilter();
+        mid.type = 'peaking';
+        mid.frequency.value = 1_000;
+        mid.Q.value = 1;
+        const high = previewAudioContext.createBiquadFilter();
+        high.type = 'highshelf';
+        high.frequency.value = 6_000;
+        const compressor = previewAudioContext.createDynamicsCompressor();
         const gain = previewAudioContext.createGain();
-        source.connect(gain).connect(previewAudioContext.destination);
-        graph = { source, gain, cleanupTimer: null };
+        source.connect(highPass).connect(low).connect(mid).connect(high).connect(compressor).connect(gain).connect(previewAudioContext.destination);
+        graph = { source, highPass, low, mid, high, compressor, gain, cleanupTimer: null };
         previewGainGraphs.set(media, graph);
       }
       if (graph.cleanupTimer !== null) {
@@ -112,6 +146,22 @@ function useMediaElementGain(
       }
       media.volume = 1;
       media.muted = false;
+      const resolved = resolveAudioProcessing(processing);
+      graph.highPass.frequency.setValueAtTime(
+        resolved.highPassHz > 0 ? resolved.highPassHz : 10,
+        previewAudioContext.currentTime,
+      );
+      graph.low.gain.setValueAtTime(resolved.lowGainDb, previewAudioContext.currentTime);
+      graph.mid.gain.setValueAtTime(resolved.midGainDb, previewAudioContext.currentTime);
+      graph.high.gain.setValueAtTime(resolved.highGainDb, previewAudioContext.currentTime);
+      graph.compressor.threshold.setValueAtTime(
+        resolved.compressor ? -18 : 0,
+        previewAudioContext.currentTime,
+      );
+      graph.compressor.knee.setValueAtTime(resolved.compressor ? 18 : 0, previewAudioContext.currentTime);
+      graph.compressor.ratio.setValueAtTime(resolved.compressor ? 3 : 1, previewAudioContext.currentTime);
+      graph.compressor.attack.setValueAtTime(0.02, previewAudioContext.currentTime);
+      graph.compressor.release.setValueAtTime(0.25, previewAudioContext.currentTime);
       graph.gain.gain.setValueAtTime(
         muted ? 0 : Math.max(0, Math.min(2, gainValue)),
         previewAudioContext.currentTime,
@@ -132,13 +182,18 @@ function useMediaElementGain(
         // nodes only after a real DOM removal.
         if (!media.isConnected) {
           graph?.source.disconnect();
+          graph?.highPass.disconnect();
+          graph?.low.disconnect();
+          graph?.mid.disconnect();
+          graph?.high.disconnect();
+          graph?.compressor.disconnect();
           graph?.gain.disconnect();
           previewGainGraphs.delete(media);
         }
         if (graph) graph.cleanupTimer = null;
       }, 0);
     };
-  }, [gainValue, isPlaying, muted, ref]);
+  }, [gainValue, isPlaying, muted, processing, ref]);
 }
 
 interface PreviewAudioLayerProps {
@@ -166,6 +221,7 @@ function PreviewAudioLayer({
     volume * gain,
     trackMuted || (clip.muted ?? false) || volume === 0,
     isPlaying,
+    clip.audioProcessing,
   );
 
   useEffect(() => {
@@ -218,6 +274,7 @@ interface PreviewVisualLayerProps {
   verticalReframe: number;
   hudPreset: HudPreset;
   onTogglePlay: () => void;
+  onPlaybackError: (asset: MediaAsset) => void;
 }
 
 /**
@@ -235,6 +292,7 @@ function PreviewVisualLayer({
   verticalReframe,
   hudPreset,
   onTogglePlay,
+  onPlaybackError,
 }: PreviewVisualLayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const rampSampler = useMemo(() => rampSamplerForClip(clip), [clip]);
@@ -244,6 +302,7 @@ function PreviewVisualLayer({
     volume,
     trackMuted || (clip.muted ?? false) || volume === 0,
     isPlaying,
+    clip.audioProcessing,
   );
   const localTime = playhead - clip.start;
   const instantaneousSpeed = rampSampler
@@ -344,6 +403,7 @@ function PreviewVisualLayer({
         style={videoStyle}
         playsInline
         onClick={onTogglePlay}
+        onError={() => onPlaybackError(asset)}
       />
       <MotionBlurCanvas
         videoRef={videoRef}
@@ -359,20 +419,33 @@ function PreviewVisualLayer({
   );
 }
 
-export function Preview() {
+interface PreviewProps {
+  /** Pause expensive preview media/WebGL work while a modal owns the UI. */
+  suspended?: boolean;
+}
+
+export function Preview({ suspended = false }: PreviewProps) {
   const fallbackAsset = useSelectedAsset();
   const assets = useMediaStore((s) => s.assets);
+  const promoteAssetToProxy = useMediaStore((s) => s.promoteAssetToProxy);
   const clips = useProjectStore((s) => s.clips);
   const tracks = useProjectStore((s) => s.tracks);
   const playhead = useProjectStore((s) => s.playhead);
   const setPlayhead = useProjectStore((s) => s.setPlayhead);
   const isPlaying = useProjectStore((s) => s.isPlaying);
+  const previewPlaying = isPlaying && !suspended;
   const togglePlay = useProjectStore((s) => s.togglePlay);
   const aspectRatio = useProjectStore((s) => s.aspectRatio);
   const verticalReframe = useProjectStore((s) => s.verticalReframe);
   const setVerticalReframe = useProjectStore((s) => s.setVerticalReframe);
   const markers = useProjectStore((s) => s.markers);
+  const subtitles = useProjectStore((s) => s.subtitles);
+  const subtitleStyle = useProjectStore((s) => s.subtitleStyle);
   const audioDucking = useProjectStore((s) => s.audioDucking);
+  const visibleSubtitles = useMemo(
+    () => activeSubtitleCues(subtitles, playhead),
+    [playhead, subtitles],
+  );
   const videoTrack = useMemo(
     () =>
       tracks.find(
@@ -444,6 +517,30 @@ export function Preview() {
   const activeAsset = activeClip ? (assetMap[activeClip.assetId] ?? null) : null;
   const showFallback = clips.length === 0 && fallbackAsset?.kind === 'video';
   const displayAsset: MediaAsset | null = activeAsset ?? (showFallback ? fallbackAsset : null);
+  const proxyingAssetIds = useRef(new Set<string>());
+  const handlePlaybackError = useCallback(async (asset: MediaAsset) => {
+    if (
+      asset.previewProxy ||
+      !asset.sourceToken ||
+      proxyingAssetIds.current.has(asset.id)
+    ) {
+      reportMainPlaybackFailure();
+      return;
+    }
+    proxyingAssetIds.current.add(asset.id);
+    useProjectStore.getState().setIsPlaying(false);
+    useProjectStore.getState().showMessage('info', `${asset.name} を互換プロキシへ切り替えています…`, 4000);
+    try {
+      const converted = await promoteAssetToProxy(asset.id);
+      useProjectStore.getState().showMessage(
+        converted ? 'success' : 'error',
+        converted ? '互換プロキシへ切り替えました' : '互換プロキシを作成できませんでした。素材を再追加してください',
+        5000,
+      );
+    } finally {
+      proxyingAssetIds.current.delete(asset.id);
+    }
+  }, [promoteAssetToProxy]);
 
   const activeUpperVisualLayers = useMemo(() => {
     const visualTracks = tracks.filter(
@@ -678,13 +775,14 @@ export function Preview() {
     videoTrackMuted ||
       (activeClip?.muted ?? false) ||
       mainVolume === 0,
-    isPlaying,
+    previewPlaying,
+    activeClip?.audioProcessing,
   );
-  const playingRef = useRef(isPlaying);
+  const playingRef = useRef(previewPlaying);
 
   useEffect(() => {
-    playingRef.current = isPlaying;
-  }, [isPlaying]);
+    playingRef.current = previewPlaying;
+  }, [previewPlaying]);
 
   // HUD preset for the motion blur canvas. Each preset wraps a per-game
   // set of view-locked UI zones. 'valorant' (default) preserves the
@@ -702,7 +800,7 @@ export function Preview() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !displayAsset) return;
-    if (isPlaying) return;
+    if (previewPlaying) return;
     let target = 0;
     if (activeClip) {
       const localT = playhead - activeClip.start;
@@ -723,13 +821,13 @@ export function Preview() {
         video.currentTime = target;
       }
     }
-  }, [playhead, activeClip, activeRampSampler, displayAsset, isPlaying]);
+  }, [playhead, activeClip, activeRampSampler, displayAsset, previewPlaying]);
 
   // Preserve authored black gaps and upper-only intervals. When there is no
   // base <video> to drive the clock, wall time advances the same continuous
   // timeline that native export renders.
   useEffect(() => {
-    if (!isPlaying || activeClip) return;
+    if (!previewPlaying || activeClip) return;
     let rafId = 0;
     let previous = performance.now();
     const step = (now: number) => {
@@ -765,18 +863,16 @@ export function Preview() {
     };
     rafId = requestAnimationFrame(step);
     return () => cancelAnimationFrame(rafId);
-  }, [activeClip, isPlaying]);
+  }, [activeClip, previewPlaying]);
 
   // Drive playback. Video element is the source of truth; playhead follows
   // its currentTime each animation frame, ensuring zero drift between the
   // displayed frame and the timeline cursor.
   useEffect(() => {
-    if (!isPlaying) return;
+    if (!previewPlaying) return;
     const video = videoRef.current;
     if (!video) return;
-    video.play().catch(() => {
-      /* ignore autoplay rejection */
-    });
+    video.play().catch(reportMainPlaybackFailure);
     let rafId = 0;
     const step = () => {
       if (!playingRef.current) return;
@@ -873,7 +969,7 @@ export function Preview() {
       cancelAnimationFrame(rafId);
       video.pause();
     };
-  }, [activeClip?.id, isPlaying, videoTrackId]);
+  }, [activeClip?.id, previewPlaying, videoTrackId]);
 
   // When the active asset changes mid-play, jump the video to the right local time.
   useEffect(() => {
@@ -884,10 +980,8 @@ export function Preview() {
       ? activeRampSampler.sourceTimeAtLocalTime(localT)
       : activeClip.trimStart + localT * (activeClip.speed ?? 1);
     video.currentTime = Math.max(0, Math.min(activeAsset.duration, target));
-    if (isPlaying) {
-      video.play().catch(() => {
-        /* ignore */
-      });
+    if (previewPlaying) {
+      video.play().catch(reportMainPlaybackFailure);
     }
     // We intentionally only react to clip/asset switch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1062,14 +1156,14 @@ export function Preview() {
           clip={clip}
           asset={asset}
           playhead={playhead}
-          isPlaying={isPlaying}
+        isPlaying={previewPlaying}
           trackMuted={track.muted}
           gain={track.id === bgmTrackId && duckActive ? duckGain : 1}
         />
       ))}
 
       <div className={styles.stage}>
-        <div className={styles.frame} data-aspect={aspectRatio}>
+        <div className={styles.frame} data-aspect={aspectRatio} data-preview-frame>
           {showVideo ? (
             <div
               className={styles.footageLayer}
@@ -1097,11 +1191,12 @@ export function Preview() {
                 playsInline
                 muted={videoTrackMuted}
                 onClick={togglePlay}
+                onError={() => { if (displayAsset) void handlePlaybackError(displayAsset); }}
               />
               <MotionBlurCanvas
                 videoRef={videoRef}
-                isPlaying={isPlaying}
-                active={motionBlur !== null && motionBlurStrength > 0}
+                isPlaying={previewPlaying}
+                active={!suspended && motionBlur !== null && motionBlurStrength > 0}
                 strength={motionBlurStrength}
                 hudPreset={hudPreset}
                 hudMaskStrength={hudPreset === 'none' ? 0 : 1}
@@ -1139,20 +1234,21 @@ export function Preview() {
               clip={clip}
               asset={asset}
               playhead={playhead}
-              isPlaying={isPlaying}
+              isPlaying={previewPlaying}
               trackMuted={track.muted}
               aspectRatio={aspectRatio}
               verticalReframe={verticalReframe}
               hudPreset={hudPreset}
               onTogglePlay={togglePlay}
+              onPlaybackError={handlePlaybackError}
             />
           ))}
           {showVideo && activeRampSampler ? (
-            <div className={styles.speedBadge} aria-hidden="true">
+            <div className={styles.speedBadge} data-preview-only-ui aria-hidden="true">
               {`${instSpeed.toFixed(1)}×`}
             </div>
           ) : showVideo && clipSpeed !== 1 ? (
-            <div className={styles.speedBadge} aria-hidden="true">
+            <div className={styles.speedBadge} data-preview-only-ui aria-hidden="true">
               {clipSpeed === 0.25
                 ? '¼×'
                 : clipSpeed === 0.5
@@ -1179,6 +1275,7 @@ export function Preview() {
               />
             ) : null,
           )}
+          <SubtitleLayer cues={visibleSubtitles} style={subtitleStyle} />
         </div>
       </div>
 

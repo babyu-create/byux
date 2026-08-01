@@ -4,10 +4,17 @@ import {
   type ExportOptions,
 } from './exporter';
 import { rasterizeOverlays } from './overlayRaster';
+import {
+  MAX_MOTION_TRACK_SIMPLIFICATION_ERROR_PERCENT,
+  MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
+} from './nativeExportLimits';
+import { simplifyMotionTrackKeyframes } from './motionTracker';
 import { clipDuration } from './timeline';
-import type { Clip, KillMarker, MediaAsset, Track } from './types';
+import type { Animatable, Keyframe } from './keyframes';
+import type { Clip, KillMarker, MediaAsset, SubtitleCue, SubtitleStyle, Track } from './types';
 
 export type NativeExportOptions = Omit<ExportOptions, 'signal' | 'onProgress'>;
+export type NativeEncodingPreference = 'auto' | 'software';
 
 export interface NativeExportAsset {
   id: string;
@@ -18,6 +25,7 @@ export interface NativeExportAsset {
   height?: number;
   /** Present only when this asset is consumed by a visible/playable lane. */
   sourceToken?: string;
+  audioStreamIndex?: number | null;
 }
 
 export interface NativeExportOverlay {
@@ -27,10 +35,13 @@ export interface NativeExportOverlay {
 
 export interface NativeExportRequest {
   version: 1;
+  encodingPreference: NativeEncodingPreference;
   options: NativeExportOptions;
   clips: Clip[];
   tracks: Track[];
   markers: KillMarker[];
+  subtitles: SubtitleCue[];
+  subtitleStyle?: SubtitleStyle;
   assets: NativeExportAsset[];
   overlays: NativeExportOverlay[];
 }
@@ -46,7 +57,6 @@ const MAX_NATIVE_OVERLAYS = 512;
 const MAX_NATIVE_OVERLAY_BYTES = 8 * 1024 * 1024;
 const MAX_NATIVE_OVERLAY_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_NATIVE_OVERLAY_DECODED_BYTES = 512 * 1024 * 1024;
-const MAX_NATIVE_KEYFRAMES_PER_PROPERTY = 64;
 interface ExportedVisualClip {
   clip: Clip;
   indexInTrack: number;
@@ -91,12 +101,71 @@ function requiredNativeSourceAssetIds(input: ExportInput): Set<string> {
   return required;
 }
 
+function exportSafeTrackingPair(
+  x: Animatable | undefined,
+  y: Animatable | undefined,
+): { x: Keyframe[]; y: Keyframe[] } | null {
+  if (!Array.isArray(x) || !Array.isArray(y)) return null;
+  if (
+    x.length <= MAX_NATIVE_KEYFRAMES_PER_PROPERTY &&
+    y.length <= MAX_NATIVE_KEYFRAMES_PER_PROPERTY
+  ) {
+    return { x, y };
+  }
+  if (
+    x.some((keyframe) => keyframe.easing && keyframe.easing !== 'linear') ||
+    y.some((keyframe) => keyframe.easing && keyframe.easing !== 'linear')
+  ) return null;
+  try {
+    const simplified = simplifyMotionTrackKeyframes(x, y);
+    if (simplified.maximumError > MAX_MOTION_TRACK_SIMPLIFICATION_ERROR_PERCENT) {
+      return null;
+    }
+    return { x: simplified.x, y: simplified.y };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Upgrade dense tracking data saved by versions before export-safe trajectory
+ * simplification. Only aligned, linear X/Y pairs are touched; authored easing
+ * and paths that cannot meet the visual error bound remain unchanged so the
+ * normal compatibility error is shown instead of silently changing motion.
+ */
+export function prepareClipsForNativeExport(clips: readonly Clip[]): Clip[] {
+  return clips.map((clip) => {
+    let changed = false;
+    const transform = clip.transform;
+    // Clip transform keyframes may be deliberately hand-authored and have no
+    // provenance marker in older project files. Never rewrite them implicitly.
+    // New tracker output is already <=64; overlay.tracking is explicit and can
+    // be upgraded safely below.
+    const overlays = clip.overlays?.map((overlay) => {
+      if (!overlay.tracking) return overlay;
+      const pair = exportSafeTrackingPair(
+        overlay.tracking.x,
+        overlay.tracking.y,
+      );
+      if (
+        !pair ||
+        (pair.x === overlay.tracking.x && pair.y === overlay.tracking.y)
+      ) return overlay;
+      changed = true;
+      return { ...overlay, tracking: pair };
+    });
+    return changed ? { ...clip, transform, overlays } : clip;
+  });
+}
+
 export function getNativeExportCompatibility(
   input: ExportInput,
   options: ExportOptions,
 ): NativeExportCompatibility {
   void options;
-  const visualClips = exportedVisualClips(input);
+  const exportClips = prepareClipsForNativeExport(input.clips);
+  const exportInput = exportClips === input.clips ? input : { ...input, clips: exportClips };
+  const visualClips = exportedVisualClips(exportInput);
   const mainVideoTrack = input.tracks.find(
     (track) =>
       track.kind === 'video' &&
@@ -105,15 +174,19 @@ export function getNativeExportCompatibility(
   );
   const hasBaseVideoClip = Boolean(
     mainVideoTrack &&
-      input.clips.some((clip) => clip.trackId === mainVideoTrack.id),
+      exportClips.some((clip) => clip.trackId === mainVideoTrack.id),
   );
-  const hasOversizedKeyframeProperty = input.clips.some((clip) =>
-    Object.values(clip.transform ?? {}).some(
-      (value) =>
-        Array.isArray(value) &&
-        value.length > MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
-    ),
-  );
+  const hasOversizedKeyframeProperty = exportClips.some((clip) => {
+    const transformTooLarge = Object.values(clip.transform ?? {}).some(
+      (value) => Array.isArray(value) && value.length > MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
+    );
+    const overlayTrackingTooLarge = clip.overlays?.some((overlay) =>
+      Object.values(overlay.tracking ?? {}).some(
+        (value) => Array.isArray(value) && value.length > MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
+      ),
+    ) ?? false;
+    return transformTooLarge || overlayTrackingTooLarge;
+  });
   const reasons = [
     ...(hasBaseVideoClip ? [] : ['表示中のメイン映像クリップがありません']),
     ...(hasOversizedKeyframeProperty
@@ -213,9 +286,14 @@ export async function prepareNativeExportRequest(
   input: ExportInput,
   options: ExportOptions,
   onProgress?: ExportOptions['onProgress'],
+  encodingPreference: NativeEncodingPreference = 'auto',
 ): Promise<{ request: NativeExportRequest; release(): Promise<void> }> {
   throwIfAborted(options.signal);
-  const compatibility = getNativeExportCompatibility(input, options);
+  const exportInput = {
+    ...input,
+    clips: prepareClipsForNativeExport(input.clips),
+  };
+  const compatibility = getNativeExportCompatibility(exportInput, options);
   if (!compatibility.compatible) {
     throw new Error(
       `このプロジェクトはネイティブ書き出しを利用できません: ${
@@ -227,8 +305,8 @@ export async function prepareNativeExportRequest(
   const progress = onProgress ?? options.onProgress;
   progress?.({ stage: 'ネイティブ書き出しを準備中', percent: -1 });
 
-  const referencedAssetIds = new Set(input.clips.map((clip) => clip.assetId));
-  const requiredSourceAssetIds = requiredNativeSourceAssetIds(input);
+  const referencedAssetIds = new Set(exportInput.clips.map((clip) => clip.assetId));
+  const requiredSourceAssetIds = requiredNativeSourceAssetIds(exportInput);
   if (referencedAssetIds.size > MAX_NATIVE_ASSETS) {
     throw new Error(
       `ネイティブ書き出しで扱える素材数 ${MAX_NATIVE_ASSETS} を超えています`,
@@ -263,21 +341,33 @@ export async function prepareNativeExportRequest(
       let sourceToken = requiresSource ? asset.sourceToken : undefined;
       if (requiresSource && !sourceToken) {
         const registerMediaFile = window.fce?.registerMediaFile;
+        const registerMediaFileFromFile = window.fce?.registerMediaFileFromFile;
         const releaseMediaFile = window.fce?.releaseMediaFile;
-        if (!asset.path || !registerMediaFile || !releaseMediaFile) {
+        if (!releaseMediaFile) {
           throw new Error(
             `素材をネイティブ書き出し用に登録できません: ${asset.name}`,
           );
         }
-        const registered = await registerMediaFile({
-          path: asset.path,
-          name: asset.name,
-          size: asset.size,
-          kind: asset.kind,
-        });
+        let registered:
+          | { token: string; url: string; size: number }
+          | undefined;
+        if (asset.file && registerMediaFileFromFile) {
+          const result = await registerMediaFileFromFile(asset.file, asset.kind);
+          if (result.ok) registered = result.source;
+        }
+        if (!registered && asset.path && registerMediaFile) {
+          registered =
+            (await registerMediaFile({
+              path: asset.path,
+              name: asset.name,
+              size: asset.size,
+              kind: asset.kind,
+            })) ?? undefined;
+        }
         if (!registered?.token) {
           throw new Error(
-            `素材をネイティブ書き出し用に登録できません: ${asset.name}`,
+            `素材との接続が失われました: ${asset.name}。` +
+              '素材一覧から削除し、「ファイルを追加」ボタンで元ファイルを選び直してください',
           );
         }
         sourceToken = registered.token;
@@ -294,10 +384,13 @@ export async function prepareNativeExportRequest(
         width: sourceDimensions.width,
         height: sourceDimensions.height,
         ...(sourceToken ? { sourceToken } : {}),
+        ...(asset.audioStreamIndex !== undefined
+          ? { audioStreamIndex: asset.audioStreamIndex }
+          : {}),
       });
     }
 
-    const visualClips = exportedVisualClips(input);
+    const visualClips = exportedVisualClips(exportInput);
     const overlayClipCount = visualClips.filter(
       ({ clip }) => clip.overlays && clip.overlays.length > 0,
     ).length;
@@ -353,10 +446,13 @@ export async function prepareNativeExportRequest(
 
     const request: NativeExportRequest = {
       version: 1,
+      encodingPreference,
       options: serializableOptions(options),
-      clips: cloneClips(input.clips),
+      clips: cloneClips(exportInput.clips),
       tracks: input.tracks.map((track) => ({ ...track })),
       markers: (input.markers ?? []).map((marker) => ({ ...marker })),
+      subtitles: (input.subtitles ?? []).map((cue) => ({ ...cue })),
+      subtitleStyle: input.subtitleStyle ? { ...input.subtitleStyle } : undefined,
       assets: requestAssets,
       overlays,
     };

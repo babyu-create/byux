@@ -6,11 +6,119 @@ export interface MediaProbeResult {
   height?: number;
 }
 
-const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'mkv', 'webm', 'avi']);
-const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac']);
+export const SUPPORTED_VIDEO_EXTENSIONS = [
+  'mp4',
+  'm4v',
+  'mov',
+  'qt',
+  'mkv',
+  'webm',
+  'avi',
+  'wmv',
+  'asf',
+  'flv',
+  'f4v',
+  'ts',
+  'mts',
+  'm2ts',
+  'm2t',
+  'mpg',
+  'mpeg',
+  'mpe',
+  'vob',
+  'ogv',
+  '3gp',
+  '3g2',
+  'mxf',
+] as const;
+
+export const SUPPORTED_AUDIO_EXTENSIONS = [
+  'mp3',
+  'wav',
+  'wave',
+  'ogg',
+  'oga',
+  'opus',
+  'm4a',
+  'aac',
+  'flac',
+  'wma',
+  'aiff',
+  'aif',
+  'ac3',
+  'eac3',
+  'amr',
+] as const;
+
+/**
+ * Keep the native file picker in sync with the actual importer allowlist.
+ * Relying on only `video/*,audio/*` makes Windows hide containers whose MIME
+ * association is missing (notably MKV/AVI/TS and DVR captures), even though
+ * FFmpeg can import them safely.
+ */
+export const SUPPORTED_VIDEO_ACCEPT = [
+  'video/*',
+  ...SUPPORTED_VIDEO_EXTENSIONS.map((extension) => `.${extension}`),
+].join(',');
+
+export const SUPPORTED_AUDIO_ACCEPT = [
+  'audio/*',
+  ...SUPPORTED_AUDIO_EXTENSIONS.map((extension) => `.${extension}`),
+].join(',');
+
+export const SUPPORTED_MEDIA_ACCEPT = `${SUPPORTED_VIDEO_ACCEPT},${SUPPORTED_AUDIO_ACCEPT}`;
+
+const VIDEO_EXTENSIONS = new Set<string>(SUPPORTED_VIDEO_EXTENSIONS);
+const AUDIO_EXTENSIONS = new Set<string>(SUPPORTED_AUDIO_EXTENSIONS);
+const MEDIA_METADATA_TIMEOUT_MS = 20_000;
+const PROXY_FIRST_VIDEO_EXTENSIONS = new Set([
+  'mkv',
+  'avi',
+  'wmv',
+  'asf',
+  'flv',
+  'f4v',
+  'ts',
+  'mts',
+  'm2ts',
+  'm2t',
+  'mpg',
+  'mpeg',
+  'mpe',
+  'vob',
+  'ogv',
+  'mxf',
+]);
+const PROXY_FIRST_AUDIO_EXTENSIONS = new Set([
+  'wma',
+  'aiff',
+  'aif',
+  'ac3',
+  'eac3',
+  'amr',
+]);
+
+/** Long captures benefit from a bounded 720p editing stream even when the
+ * source codec is technically playable. Short, high-bitrate highlights stay
+ * on the original so importing them never incurs a full transcode. */
+export const LONG_FORM_PROXY_MIN_BYTES = 1_000_000_000;
+export const LONG_FORM_PROXY_MIN_SECONDS = 15 * 60;
+
+export function shouldPreferPreviewProxy(size: number, duration: number): boolean {
+  return Number.isFinite(size) && size >= LONG_FORM_PROXY_MIN_BYTES &&
+    Number.isFinite(duration) && duration >= LONG_FORM_PROXY_MIN_SECONDS;
+}
 
 function fileExtension(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() ?? '';
+}
+
+export function needsVideoPreviewProxy(filename: string): boolean {
+  return PROXY_FIRST_VIDEO_EXTENSIONS.has(fileExtension(filename));
+}
+
+export function needsAudioPreviewProxy(filename: string): boolean {
+  return PROXY_FIRST_AUDIO_EXTENSIONS.has(fileExtension(filename));
 }
 
 export function isVideoFile(file: File): boolean {
@@ -27,16 +135,43 @@ export function isAudioFile(file: File): boolean {
 // guess would make a valid media file look "unsupported".
 const EXTENSION_MIME: Record<string, string> = {
   mp4: 'video/mp4',
+  m4v: 'video/x-m4v',
   mov: 'video/quicktime',
+  qt: 'video/quicktime',
   mkv: 'video/x-matroska',
   webm: 'video/webm',
   avi: 'video/x-msvideo',
+  wmv: 'video/x-ms-wmv',
+  asf: 'video/x-ms-asf',
+  flv: 'video/x-flv',
+  f4v: 'video/mp4',
+  ts: 'video/mp2t',
+  mts: 'video/mp2t',
+  m2ts: 'video/mp2t',
+  m2t: 'video/mp2t',
+  mpg: 'video/mpeg',
+  mpeg: 'video/mpeg',
+  mpe: 'video/mpeg',
+  vob: 'video/mpeg',
+  ogv: 'video/ogg',
+  '3gp': 'video/3gpp',
+  '3g2': 'video/3gpp2',
+  mxf: 'application/mxf',
   mp3: 'audio/mpeg',
   wav: 'audio/wav',
+  wave: 'audio/wav',
   ogg: 'audio/ogg',
+  oga: 'audio/ogg',
+  opus: 'audio/ogg; codecs=opus',
   m4a: 'audio/mp4',
   aac: 'audio/aac',
   flac: 'audio/flac',
+  wma: 'audio/x-ms-wma',
+  aiff: 'audio/aiff',
+  aif: 'audio/aiff',
+  ac3: 'audio/ac3',
+  eac3: 'audio/eac3',
+  amr: 'audio/amr',
 };
 
 export function guessMimeType(filename: string, kind: 'video' | 'audio'): string {
@@ -44,35 +179,91 @@ export function guessMimeType(filename: string, kind: 'video' | 'audio'): string
   return EXTENSION_MIME[ext] ?? (kind === 'video' ? 'video/mp4' : 'audio/mpeg');
 }
 
-export function probeVideoMetadata(file: File): Promise<MediaProbeResult> {
+/**
+ * Reading container metadata is not enough to prove Chromium can display the
+ * video. Some damaged capture files report duration and dimensions correctly,
+ * then fail on the first H.264 packet and leave the editor preview black.
+ * Seek to a real sample frame and require decoded frame data before accepting
+ * the source. Callers can then fall back to the FFmpeg compatibility proxy.
+ */
+function probePlayableVideoSource(
+  url: string,
+  errorMessage: string,
+): Promise<MediaProbeResult> {
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
     const video = document.createElement('video');
-    video.preload = 'metadata';
-    video.muted = true;
+    let result: MediaProbeResult | null = null;
+    let sampleTime = 0;
+    let settled = false;
 
     const cleanup = () => {
+      clearTimeout(timeoutId);
+      video.onloadedmetadata = null;
+      video.onloadeddata = null;
+      video.onseeked = null;
+      video.onerror = null;
       video.removeAttribute('src');
-      URL.revokeObjectURL(url);
+      video.load();
     };
-
-    video.onloadedmetadata = () => {
-      const result: MediaProbeResult = {
-        duration: Number.isFinite(video.duration) ? video.duration : 0,
-        width: video.videoWidth,
-        height: video.videoHeight,
-      };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(errorMessage));
+    };
+    const acceptDecodedFrame = () => {
+      if (
+        settled ||
+        !result ||
+        video.seeking ||
+        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+        Math.abs(video.currentTime - sampleTime) > 0.5
+      ) {
+        return;
+      }
+      settled = true;
       cleanup();
       resolve(result);
     };
 
-    video.onerror = () => {
-      cleanup();
-      reject(new Error(`Failed to read video metadata: ${file.name}`));
+    video.preload = 'auto';
+    video.muted = true;
+    video.crossOrigin = 'anonymous';
+    video.onloadedmetadata = () => {
+      result = {
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      };
+      if (
+        !Number.isFinite(result.duration) ||
+        result.duration <= 0 ||
+        !result.width ||
+        !result.height
+      ) {
+        fail();
+        return;
+      }
+      sampleTime = result.duration > 2 ? 1 : result.duration / 2;
+      try {
+        video.currentTime = sampleTime;
+        queueMicrotask(acceptDecodedFrame);
+      } catch {
+        fail();
+      }
     };
-
+    video.onloadeddata = acceptDecodedFrame;
+    video.onseeked = acceptDecodedFrame;
+    video.onerror = fail;
+    const timeoutId = setTimeout(fail, MEDIA_METADATA_TIMEOUT_MS);
     video.src = url;
   });
+}
+
+export function probeVideoMetadata(file: File): Promise<MediaProbeResult> {
+  const url = URL.createObjectURL(file);
+  return probePlayableVideoSource(url, `Failed to decode video: ${file.name}`)
+    .finally(() => URL.revokeObjectURL(url));
 }
 
 export function probeAudioMetadata(file: File): Promise<MediaProbeResult> {
@@ -82,6 +273,7 @@ export function probeAudioMetadata(file: File): Promise<MediaProbeResult> {
     audio.preload = 'metadata';
 
     const cleanup = () => {
+      clearTimeout(timeoutId);
       audio.removeAttribute('src');
       URL.revokeObjectURL(url);
     };
@@ -99,6 +291,10 @@ export function probeAudioMetadata(file: File): Promise<MediaProbeResult> {
       reject(new Error(`Failed to read audio metadata: ${file.name}`));
     };
 
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out reading audio metadata: ${file.name}`));
+    }, MEDIA_METADATA_TIMEOUT_MS);
     audio.src = url;
   });
 }
@@ -207,42 +403,40 @@ export async function mediaAssetToFile(asset: MediaAsset): Promise<File> {
 /** Probe a main-process streamed preview URL without materialising the proxy as
  * a renderer File/Blob. Used by the native long-form compatibility pipeline. */
 export function probeVideoUrlMetadata(url: string): Promise<MediaProbeResult> {
+  return probePlayableVideoSource(url, 'プレビュー用動画をデコードできませんでした');
+}
+
+/** Probe a main-process streamed audio URL without copying the whole source
+ * into renderer memory. */
+export function probeAudioUrlMetadata(url: string): Promise<MediaProbeResult> {
   return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
+    const audio = document.createElement('audio');
     const cleanup = () => {
-      // Clearing the handlers first is important: calling load() after
-      // removing src can itself emit `error`, which otherwise re-enters
-      // cleanup and may loop on some Chromium versions.
-      video.onloadedmetadata = null;
-      video.onerror = null;
-      video.removeAttribute('src');
-      video.load();
+      clearTimeout(timeoutId);
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+      audio.removeAttribute('src');
+      audio.load();
     };
-    video.preload = 'metadata';
-    video.crossOrigin = 'anonymous';
-    video.onloadedmetadata = () => {
-      const result = {
-        duration: video.duration,
-        width: video.videoWidth,
-        height: video.videoHeight,
-      };
+    audio.preload = 'metadata';
+    audio.onloadedmetadata = () => {
+      const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
       cleanup();
-      if (
-        !Number.isFinite(result.duration) ||
-        result.duration <= 0 ||
-        result.width <= 0 ||
-        result.height <= 0
-      ) {
-        reject(new Error('プレビュー用動画の情報を読み取れませんでした'));
+      if (duration <= 0) {
+        reject(new Error('プレビュー用音声の情報を読み取れませんでした'));
         return;
       }
-      resolve(result);
+      resolve({ duration });
     };
-    video.onerror = () => {
+    audio.onerror = () => {
       cleanup();
-      reject(new Error('プレビュー用動画を読み込めませんでした'));
+      reject(new Error('プレビュー用音声を読み込めませんでした'));
     };
-    video.src = url;
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error('プレビュー用音声の読み込みがタイムアウトしました'));
+    }, MEDIA_METADATA_TIMEOUT_MS);
+    audio.src = url;
   });
 }
 

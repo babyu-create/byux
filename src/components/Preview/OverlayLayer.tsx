@@ -7,6 +7,7 @@ import {
   overlayDecoration,
   sampleOverlayIntro,
 } from '../../lib/overlayText';
+import { sample } from '../../lib/keyframes';
 import styles from './OverlayLayer.module.css';
 
 interface OverlayLayerProps {
@@ -72,6 +73,8 @@ export function OverlayLayer({ overlays, contextValues, localTime }: OverlayLaye
 
         // Intro pose (opacity/offset/scale) sampled at the clip-local time.
         const pose = sampleOverlayIntro(o, t);
+        const trackingX = sample(o.tracking?.x, t, 0);
+        const trackingY = sample(o.tracking?.y, t, 0);
         const introTransform = introPoseToCss(pose, 100)
           // introPoseToCss uses px against the nominal 100px → convert to em so
           // it scales with the cqh font size (1em == fontPx).
@@ -81,8 +84,8 @@ export function OverlayLayer({ overlays, contextValues, localTime }: OverlayLaye
         // Compose the intro transform AFTER the positioning transform so the
         // centering (translateX/Y -50%) is preserved.
         const composedTransform = base.transform
-          ? `${base.transform} ${introTransform}`
-          : introTransform;
+          ? `${base.transform} ${introTransform} translate(${trackingX}cqw, ${trackingY}cqh)`
+          : `${introTransform} translate(${trackingX}cqw, ${trackingY}cqh)`;
 
         const wrapperStyle: React.CSSProperties = {
           ...base,

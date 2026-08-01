@@ -71,4 +71,14 @@ describe('projectStore.applyPresetToClips', () => {
     expect(applied).toBe(0);
     expect(useProjectStore.getState().clips).toBe(before);
   });
+
+  it('rejects an invalid look before it can make the project unsaveable', () => {
+    const before = [clip('a', 'tv')];
+    useProjectStore.setState({ clips: before });
+    const applied = useProjectStore
+      .getState()
+      .applyPresetToClips(['a'], { speed: -1 });
+    expect(applied).toBe(0);
+    expect(useProjectStore.getState().clips).toBe(before);
+  });
 });

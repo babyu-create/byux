@@ -7,12 +7,16 @@
 // generated in the main process, so renderer input can never smuggle a second
 // output, a network protocol, or a `movie=` file read into FFmpeg.
 
+const { buildVideoEncodingArgs } = require('./hardwareEncoding.cjs');
+const { buildHdrToSdrFilter } = require('./nativeFfmpeg.cjs');
+
 const MAX_CLIPS = 10_000;
 const MAX_TRACKS = 100;
 const MAX_ASSETS = 2_000;
 const MAX_OVERLAYS = 512;
 const MAX_OVERLAY_ITEMS = 5_000;
 const MAX_MARKERS = 10_000;
+const MAX_SUBTITLE_CUES = 10_000;
 const MAX_TIMELINE_SECONDS = 7 * 24 * 60 * 60;
 // FFmpeg's expression parser is recursive. Although the project schema can
 // retain larger authored arrays, emitting thousands of nested if() calls makes
@@ -32,6 +36,14 @@ const MAX_TOTAL_RAMP_AUDIO_SEGMENTS = 8_192;
 const MAX_RAMP_AUDIO_ERROR_SECONDS = 1 / 120;
 const MAX_DUCK_POINTS = 10_000;
 const EPS = 1e-4;
+// 48 kHz is the native rate used by OBS and the major GPU capture tools.
+// Normalize every clip before timeline concat so mixed-rate sources cannot
+// accumulate timestamp drift across a long project.
+const AUDIO_SAMPLE_RATE = 48_000;
+const AUDIO_NORMALIZATION_FILTERS = [
+  `aresample=${AUDIO_SAMPLE_RATE}:async=1:first_pts=0`,
+  `aformat=sample_fmts=fltp:sample_rates=${AUDIO_SAMPLE_RATE}:channel_layouts=stereo`,
+];
 
 class NativeExportPlanError extends Error {
   constructor(code, message, details = []) {
@@ -67,25 +79,28 @@ function safeId(value, label) {
 }
 
 function getResolution(resolution, aspectRatio) {
-  if (resolution !== '720p' && resolution !== '1080p') {
+  const sizes = {
+    '720p': { width: 1280, height: 720 },
+    '1080p': { width: 1920, height: 1080 },
+    '1440p': { width: 2560, height: 1440 },
+    '2160p': { width: 3840, height: 2160 },
+  };
+  const landscape = sizes[resolution];
+  if (!landscape) {
     throw new NativeExportPlanError('INVALID_OPTIONS', '解像度が不正です');
   }
   if (aspectRatio !== '16:9' && aspectRatio !== '9:16') {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'アスペクト比が不正です');
   }
   if (aspectRatio === '16:9') {
-    return resolution === '1080p'
-      ? { width: 1920, height: 1080 }
-      : { width: 1280, height: 720 };
+    return landscape;
   }
-  return resolution === '1080p'
-    ? { width: 1080, height: 1920 }
-    : { width: 720, height: 1280 };
+  return { width: landscape.height, height: landscape.width };
 }
 
 function encodingSettings(quality) {
   if (quality === 'high') return { preset: 'veryfast', crf: 16, audioBitrate: '256k' };
-  if (quality === 'compact') return { preset: 'superfast', crf: 27, audioBitrate: '256k' };
+  if (quality === 'compact') return { preset: 'superfast', crf: 27, audioBitrate: '128k' };
   if (quality !== undefined && quality !== 'recommended') {
     throw new NativeExportPlanError('INVALID_OPTIONS', '画質設定が不正です');
   }
@@ -453,7 +468,7 @@ function animatableHasChange(value, identity) {
   );
 }
 
-function motionBlurSpec(clip, options) {
+function motionBlurSpec(clip, options, fps) {
   if (options?.motionBlur !== true) return null;
   const effect = Array.isArray(clip.effects)
     ? clip.effects.find((candidate) => candidate?.type === 'motion-blur')
@@ -473,16 +488,21 @@ function motionBlurSpec(clip, options) {
     : authoredStrength;
   if (strength <= EPS || intensity <= EPS) return null;
   const amount = clamp(strength / 1.25, 0, 1);
-  // Keep one fixed four-frame window and fade older taps in continuously.
-  // Changing the frame count at thresholds makes the visible blur jump while
-  // dragging the strength slider.
-  const frames = 4;
+  // Bound history to roughly 1/60 second. The previous fixed four-tap window
+  // retained 50 ms at 60 fps, producing long ghost trails while doing twice
+  // the useful mixing work. 120 fps keeps one extra tap for a similar window.
+  const maxFrames = fps >= 100 ? 3 : 2;
+  // At 24/30 fps the nearest previous sample is farther than the desired
+  // shutter window. Fade its contribution by frame rate to avoid a strong
+  // one-frame double image while preserving normalized constant brightness.
+  const temporalScale = clamp(fps / 60, 0, 1);
   const weights = [
     1,
-    amount,
+    amount * temporalScale,
     clamp((amount - 1 / 3) * 1.5, 0, 1),
-    clamp((amount - 2 / 3) * 3, 0, 1),
-  ];
+  ].slice(0, maxFrames);
+  while (weights.length > 2 && weights.at(-1) <= EPS) weights.pop();
+  const frames = weights.length;
   const preset = ['valorant', 'cs2', 'apex', 'none'].includes(options.motionBlurHudPreset)
     ? options.motionBlurHudPreset
     : 'valorant';
@@ -498,31 +518,50 @@ function motionBlurSpec(clip, options) {
   return { frames, weights, preset, hudStrength };
 }
 
-function hudRegionExpression(preset) {
+function hudMaskDrawboxFilters(preset) {
+  // Red gives drawbox geometry distinct values on every Y/U/V plane
+  // (approximately 81/90/240 versus black 16/128/128). The following LUT can
+  // therefore build one identical full-range mask on all subsampled planes.
+  const color = 'red';
   if (preset === 'cs2') {
-    return (
-      'lte(Y\\,H*0.09)+' +
-      'lte(X\\,W*0.18)*lte(Y\\,H*0.26)+' +
-      'lte(X\\,W*0.28)*gte(Y\\,H*0.88)+' +
-      'gte(X\\,W*0.78)*gte(Y\\,H*0.88)'
-    );
+    return [
+      `drawbox=x=0:y=0:w=iw:h=ih*0.09:color=${color}:t=fill`,
+      `drawbox=x=0:y=0:w=iw*0.18:h=ih*0.26:color=${color}:t=fill`,
+      `drawbox=x=0:y=ih*0.88:w=iw*0.28:h=ih*0.12:color=${color}:t=fill`,
+      `drawbox=x=iw*0.78:y=ih*0.88:w=iw*0.22:h=ih*0.12:color=${color}:t=fill`,
+    ];
   }
   if (preset === 'apex') {
-    return (
-      'gte(Y\\,H*0.62)+' +
-      'lte(X\\,W*0.20)*lte(Y\\,H*0.28)'
-    );
+    return [
+      `drawbox=x=0:y=ih*0.62:w=iw:h=ih*0.38:color=${color}:t=fill`,
+      `drawbox=x=0:y=0:w=iw*0.20:h=ih*0.28:color=${color}:t=fill`,
+    ];
   }
+  return [
+    `drawbox=x=0:y=ih*0.58:w=iw:h=ih*0.42:color=${color}:t=fill`,
+    `drawbox=x=0:y=0:w=iw:h=ih*0.10:color=${color}:t=fill`,
+    `drawbox=x=0:y=0:w=iw*0.22:h=ih*0.32:color=${color}:t=fill`,
+  ];
+}
+
+function buildHudMaskFilterChain(preset, strength, width, height, fps, duration) {
+  const level = Math.round(clamp(strength, 0, 1) * 255);
   return (
-    'gte(Y\\,H*0.58)+' +
-    'lte(Y\\,H*0.10)+' +
-    'lte(X\\,W*0.22)*lte(Y\\,H*0.32)'
+    `color=c=black:s=${width}x${height}:r=${fps}:d=${number(duration)},` +
+    `format=yuv420p,${hudMaskDrawboxFilters(preset).join(',')},` +
+    // Convert black/red limited-range samples into an identical full-range
+    // merge weight on Y, U and V. This protects colored HUD edges without an
+    // expensive RGB/4:4:4 round-trip or a per-pixel blend expression.
+    `lut=y='if(gt(val\\,40)\\,${level}\\,0)':` +
+    `u='if(lt(val\\,110)\\,${level}\\,0)':` +
+    `v='if(gt(val\\,180)\\,${level}\\,0)'`
   );
 }
 
 function buildAudioFilterParts(spec) {
   const {
     inputIndex,
+    audioStreamIndex = 0,
     clip,
     hasAudio,
     volume,
@@ -532,19 +571,23 @@ function buildAudioFilterParts(spec) {
   const duration = clipDuration(clip);
   if (!hasAudio || volume <= EPS) {
     return [
-      `anullsrc=r=44100:cl=stereo,atrim=0:${number(duration)},` +
-      `asetpts=PTS-STARTPTS,volume=${number(volume)}${outputLabel}`,
+      `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:${number(duration)},` +
+      `asetpts=PTS-STARTPTS,volume=${number(volume)},` +
+      `${AUDIO_NORMALIZATION_FILTERS.join(',')}${outputLabel}`,
     ];
   }
+  const processingFilters = buildAudioProcessingFilters(clip.audioProcessing);
   const ramp = validateSpeedRamp(clip.speedRamp);
   if (!ramp) {
     const filters = [
       `atrim=${number(clip.trimStart)}:${number(clip.trimEnd)}`,
       'asetpts=PTS-STARTPTS',
       ...buildAtempoChain(clip.speed ?? 1),
+      ...processingFilters,
       `volume=${number(volume)}`,
+      ...AUDIO_NORMALIZATION_FILTERS,
     ];
-    return [`[${inputIndex}:a]${filters.join(',')}${outputLabel}`];
+    return [`[${inputIndex}:a:${audioStreamIndex}]${filters.join(',')}${outputLabel}`];
   }
 
   const sourceSpan = clip.trimEnd - clip.trimStart;
@@ -561,7 +604,9 @@ function buildAudioFilterParts(spec) {
     { length: rampAudioSegments },
     (_, index) => `[${prefix}ar${index}]`,
   );
-  const parts = [`[${inputIndex}:a]asplit=${rampAudioSegments}${splitLabels.join('')}`];
+  const parts = [
+    `[${inputIndex}:a:${audioStreamIndex}]asplit=${rampAudioSegments}${splitLabels.join('')}`,
+  ];
   const timelineSegment = duration / rampAudioSegments;
   for (let index = 0; index < rampAudioSegments; index += 1) {
     const p0 = index / rampAudioSegments;
@@ -586,14 +631,42 @@ function buildAudioFilterParts(spec) {
   }
   parts.push(
     `${renderedLabels.join('')}concat=n=${rampAudioSegments}:v=0:a=1,` +
-    `volume=${number(volume)}${outputLabel}`,
+    `${processingFilters.length > 0 ? `${processingFilters.join(',')},` : ''}` +
+    `volume=${number(volume)},${AUDIO_NORMALIZATION_FILTERS.join(',')}${outputLabel}`,
   );
   return parts;
+}
+
+function buildAudioProcessingFilters(value) {
+  if (value === undefined) return [];
+  if (!value || typeof value !== 'object') {
+    throw new NativeExportPlanError('INVALID_PROJECT', '音声処理が不正です');
+  }
+  const highPass = finite(value.highPassHz ?? 0, 'ハイパス', 0, 300);
+  if (highPass > 0 && highPass < 40) {
+    throw new NativeExportPlanError('INVALID_PROJECT', 'ハイパスが不正です');
+  }
+  const low = finite(value.lowGainDb ?? 0, '低音EQ', -12, 12);
+  const mid = finite(value.midGainDb ?? 0, '中音EQ', -12, 12);
+  const high = finite(value.highGainDb ?? 0, '高音EQ', -12, 12);
+  if (value.compressor !== undefined && typeof value.compressor !== 'boolean') {
+    throw new NativeExportPlanError('INVALID_PROJECT', 'コンプレッサー設定が不正です');
+  }
+  const filters = [];
+  if (highPass > 0) filters.push(`highpass=f=${number(highPass)}`);
+  if (Math.abs(low) > EPS) filters.push(`equalizer=f=120:t=q:w=0.7:g=${number(low)}`);
+  if (Math.abs(mid) > EPS) filters.push(`equalizer=f=1000:t=q:w=1:g=${number(mid)}`);
+  if (Math.abs(high) > EPS) filters.push(`equalizer=f=6000:t=q:w=0.7:g=${number(high)}`);
+  if (value.compressor === true) {
+    filters.push('acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=1.2');
+  }
+  return filters;
 }
 
 function buildClipFilters(spec) {
   const {
     inputIndex,
+    audioStreamIndex,
     clip,
     asset,
     width,
@@ -607,6 +680,7 @@ function buildClipFilters(spec) {
     motionBlurOptions,
     flattenOnBlack,
     workPrefix,
+    hdrToneMap,
   } = spec;
   const speed = clip.speed ?? 1;
   const duration = clipDuration(clip);
@@ -622,6 +696,8 @@ function buildClipFilters(spec) {
   else if (Math.abs(speed - 1) > 1e-3) {
     videoFilters.push(`setpts=${number(1 / speed)}*PTS`);
   }
+  const hdrToSdrFilter = buildHdrToSdrFilter(hdrToneMap);
+  if (hdrToSdrFilter) videoFilters.push(hdrToSdrFilter);
 
   const sourceMatchesOutput = asset.width === width && asset.height === height;
   const sourceWidth = Number(asset.width) || 0;
@@ -644,12 +720,13 @@ function buildClipFilters(spec) {
 
   const parts = [];
   let videoInput = `[${inputIndex}:v]`;
-  const blur = motionBlurSpec(clip, motionBlurOptions);
+  const blur = motionBlurSpec(clip, motionBlurOptions, fps);
   if (blur?.hudStrength > EPS) {
     const preLabel = `[${workPrefix}pre]`;
     const sharpLabel = `[${workPrefix}sharp]`;
     const blurInputLabel = `[${workPrefix}blurin]`;
     const blurredLabel = `[${workPrefix}blurred]`;
+    const maskLabel = `[${workPrefix}hudmask]`;
     const protectedLabel = `[${workPrefix}protected]`;
     parts.push(`${videoInput}${videoFilters.join(',')}${preLabel}`);
     parts.push(`${preLabel}split=2${sharpLabel}${blurInputLabel}`);
@@ -657,11 +734,18 @@ function buildClipFilters(spec) {
       `${blurInputLabel}tmix=frames=${blur.frames}:` +
       `weights='${blur.weights.map(number).join(' ')}'${blurredLabel}`,
     );
-    const mask =
-      `${number(blur.hudStrength)}*gt(${hudRegionExpression(blur.preset)}\\,0)`;
     parts.push(
-      `${blurredLabel}${sharpLabel}blend=all_expr='A*(1-(${mask}))+B*(${mask})'` +
-      protectedLabel,
+      `${buildHudMaskFilterChain(
+        blur.preset,
+        blur.hudStrength,
+        width,
+        height,
+        fps,
+        duration,
+      )}${maskLabel}`,
+    );
+    parts.push(
+      `${blurredLabel}${sharpLabel}${maskLabel}maskedmerge=planes=7${protectedLabel}`,
     );
     videoInput = protectedLabel;
     videoFilters.length = 0;
@@ -715,6 +799,15 @@ function buildClipFilters(spec) {
   if (needsAlpha) {
     videoFilters.push('format=rgba');
     if (spatialTransform) {
+      // `perspective` extends the outermost source pixel beyond a destination
+      // quadrilateral.  Without a transparent guard, a scaled-down upper
+      // video therefore paints edge-coloured bands over the entire frame
+      // instead of behaving like the clipped CSS layer in preview.  Two
+      // transparent pixels are enough to make that extension transparent
+      // while remaining visually negligible at the authored frame edge.
+      videoFilters.push(
+        'drawbox=x=0:y=0:w=iw:h=ih:color=black@0:t=2:replace=1',
+      );
       const perspectiveTime = `(on/${fps})`;
       const transition = transitionExpressions(clip, duration, perspectiveTime);
       const x =
@@ -796,6 +889,7 @@ function buildClipFilters(spec) {
   if (audioLabel) {
     parts.push(...buildAudioFilterParts({
       inputIndex,
+      audioStreamIndex,
       clip,
       hasAudio,
       volume: clipVolume,
@@ -957,26 +1051,54 @@ function introForOverlays(overlays, frameHeight) {
   };
 }
 
-function buildOverlayParts(base, input, output, index, start, end, intro) {
+function overlayTrackingForOverlays(overlays, width, height, start) {
+  if (!Array.isArray(overlays) || overlays.length === 0) return null;
+  // A clip's overlays are rasterized into one full-frame PNG. We can safely
+  // move that image only when every overlay shares the same tracking result;
+  // otherwise silently moving some text would be worse than leaving it fixed.
+  const tracked = overlays.filter((overlay) => overlay?.tracking);
+  if (tracked.length === 0 || tracked.length !== overlays.length) return null;
+  const first = tracked[0].tracking ?? {};
+  const trackingKey = JSON.stringify(first);
+  if (tracked.some((overlay) => JSON.stringify(overlay.tracking ?? {}) !== trackingKey)) {
+    throw new NativeExportPlanError(
+      'INVALID_OVERLAY',
+      '同じクリップ内のオーバーレイ追跡結果が一致しません。全体を再追跡してください。',
+    );
+  }
+  const localTime = `(t-${number(start)})`;
+  const x = `(${animatableExpression(first.x, 0, '追跡X', localTime)})*${number(width / 100)}`;
+  const y = `(${animatableExpression(first.y, 0, '追跡Y', localTime)})*${number(height / 100)}`;
+  return { x, y };
+}
+
+function buildOverlayParts(base, input, output, index, start, end, intro, tracking) {
   const startText = start.toFixed(3);
   const endText = end.toFixed(3);
   const enable = `enable=between(t\\,${startText}\\,${endText})`;
-  if (!intro) return [`${base}${input}overlay=0:0:${enable}${output}`];
+  if (!intro && !tracking) return [`${base}${input}overlay=0:0:${enable}${output}`];
   const faded = `[ovf${index}]`;
-  const fade =
-    `${input}format=rgba,` +
-    `fade=t=in:st=${startText}:d=${intro.duration.toFixed(3)}:alpha=1${faded}`;
-  let x = '0';
-  let y = '0';
-  if (intro.distancePx > 0) {
+  const fade = intro
+    ? `${input}format=rgba,` +
+      `fade=t=in:st=${startText}:d=${intro.duration.toFixed(3)}:alpha=1${faded}`
+    : `${input}format=rgba${faded}`;
+  let x = tracking?.x ?? '0';
+  let y = tracking?.y ?? '0';
+  if (intro?.distancePx > 0) {
     const ramp = `max(0\\,1-(t-${startText})/${intro.duration.toFixed(3)})`;
-    if (intro.kind === 'slide-up') y = `${intro.distancePx}*${ramp}`;
-    if (intro.kind === 'slide-left') x = `${intro.distancePx}*${ramp}`;
+    if (intro.kind === 'slide-up') y = `(${y})+${intro.distancePx}*${ramp}`;
+    if (intro.kind === 'slide-left') x = `(${x})+${intro.distancePx}*${ramp}`;
   }
   return [fade, `${base}${faded}overlay=${x}:${y}:${enable}${output}`];
 }
 
-function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, outputPath) {
+function buildNativeExportPlan(
+  request,
+  sourceByAssetId,
+  overlayPathByClipId,
+  outputPath,
+  videoEncoder = 'libx264',
+) {
   if (!request || request.version !== 1) {
     throw new NativeExportPlanError('INVALID_VERSION', '書き出しデータの形式が不正です');
   }
@@ -994,6 +1116,25 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     (!Array.isArray(request.markers) || request.markers.length > MAX_MARKERS)
   ) {
     throw new NativeExportPlanError('INVALID_PROJECT', 'マーカー数が不正です');
+  }
+  if (
+    request.subtitles !== undefined &&
+    (!Array.isArray(request.subtitles) || request.subtitles.length > MAX_SUBTITLE_CUES)
+  ) {
+    throw new NativeExportPlanError('INVALID_SUBTITLES', '字幕数が不正です');
+  }
+  for (const cue of request.subtitles ?? []) {
+    safeId(cue?.id, '字幕ID');
+    finite(cue?.start, '字幕開始位置', 0, MAX_TIMELINE_SECONDS);
+    finite(cue?.end, '字幕終了位置', 0, MAX_TIMELINE_SECONDS);
+    if (
+      cue.end <= cue.start ||
+      typeof cue.text !== 'string' ||
+      cue.text.length === 0 ||
+      cue.text.length > 2_000
+    ) {
+      throw new NativeExportPlanError('INVALID_SUBTITLES', '字幕の時刻または本文が不正です');
+    }
   }
   if (
     !(sourceByAssetId instanceof Map) ||
@@ -1016,10 +1157,16 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
   const options = request.options ?? {};
   const { width, height } = getResolution(options.resolution, options.aspectRatio);
   const fps = options.fps;
-  if (fps !== 30 && fps !== 60) {
+  if (fps !== 30 && fps !== 60 && fps !== 120) {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'フレームレートが不正です');
   }
   const encoding = encodingSettings(options.quality);
+  let videoEncodingArgs;
+  try {
+    videoEncodingArgs = buildVideoEncodingArgs(videoEncoder, options.quality);
+  } catch {
+    throw new NativeExportPlanError('INVALID_OPTIONS', '動画エンコーダー設定が不正です');
+  }
   const reframe = finite(options.verticalReframe ?? 0, '縦動画の位置', -1, 1);
   if (options.motionBlur !== undefined && typeof options.motionBlur !== 'boolean') {
     throw new NativeExportPlanError('INVALID_OPTIONS', 'モーションブラー設定が不正です');
@@ -1135,6 +1282,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
       }
       if (effect.intensity !== undefined) finite(effect.intensity, 'ブラー強度', 0, 100);
     }
+    buildAudioProcessingFilters(clip.audioProcessing);
     if (clip.transform !== undefined) {
       if (!clip.transform || typeof clip.transform !== 'object') {
         throw new NativeExportPlanError('INVALID_PROJECT', '変形設定が不正です');
@@ -1265,8 +1413,35 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         `元素材を確認できません: ${assetById.get(assetId)?.name ?? assetId}`,
       );
     }
+    if (
+      source.audioStreamIndex !== undefined &&
+      (!Number.isSafeInteger(source.audioStreamIndex) ||
+        source.audioStreamIndex < 0 ||
+        source.audioStreamIndex > 127)
+    ) {
+      throw new NativeExportPlanError('INVALID_PROJECT', '音声ストリーム番号が不正です');
+    }
+    if (
+      source.hdrToneMap !== undefined &&
+      source.hdrToneMap !== null &&
+      source.hdrToneMap !== 'pq' &&
+      source.hdrToneMap !== 'hlg'
+    ) {
+      throw new NativeExportPlanError('INVALID_PROJECT', 'HDR素材情報が不正です');
+    }
     inputIndexByAssetId.set(assetId, index);
-    inputArgs.push('-i', source.path);
+    // Final export always decodes the original source, never the lower-quality
+    // preview proxy. Salvage damaged DVR packets in-place: corrupt video is
+    // dropped/concealed, fps restores timeline cadence, and async audio
+    // resampling keeps the authored duration synchronized.
+    inputArgs.push(
+      '-fflags',
+      '+genpts+discardcorrupt',
+      '-err_detect',
+      'ignore_err',
+      '-i',
+      source.path,
+    );
   });
 
   const filters = [];
@@ -1284,7 +1459,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         `format=yuv420p,setsar=1,setpts=PTS-STARTPTS${videoLabel}`,
       );
       filters.push(
-        `anullsrc=r=44100:cl=stereo,atrim=0:${duration.toFixed(4)},` +
+        `anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo,atrim=0:${duration.toFixed(4)},` +
         `asetpts=PTS-STARTPTS${audioLabel}`,
       );
       return;
@@ -1294,6 +1469,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     filters.push(
       buildClipFilters({
         inputIndex: inputIndexByAssetId.get(item.clip.assetId),
+        audioStreamIndex: source.audioStreamIndex ?? 0,
         clip: item.clip,
         asset,
         width,
@@ -1307,6 +1483,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         motionBlurOptions: options,
         flattenOnBlack: true,
         workPrefix: `p${index}`,
+        hdrToneMap: source.hdrToneMap ?? null,
       }),
     );
   });
@@ -1324,6 +1501,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     filters.push(
       buildClipFilters({
         inputIndex: inputIndexByAssetId.get(clip.assetId),
+        audioStreamIndex: source.audioStreamIndex ?? 0,
         clip,
         asset,
         width,
@@ -1337,6 +1515,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
         motionBlurOptions: options,
         flattenOnBlack: false,
         workPrefix: `u${index}`,
+        hdrToneMap: source.hdrToneMap ?? null,
       }),
     );
     filters.push(
@@ -1402,10 +1581,15 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
           overlay.start,
           overlay.end,
           introForOverlays(overlay.clip.overlays, height),
+          overlayTrackingForOverlays(overlay.clip.overlays, width, height, overlay.start),
         ),
       );
       videoOutputLabel = output;
     });
+  }
+  if ((request.subtitles?.length ?? 0) > 0) {
+    filters.push(`${videoOutputLabel}ass=filename='subtitles.ass'[vsub]`);
+    videoOutputLabel = '[vsub]';
   }
 
   let audioOutputLabel = '[abase]';
@@ -1428,6 +1612,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
       const rawLabel = `[baraw${index}]`;
       filters.push(...buildAudioFilterParts({
         inputIndex: inputIndexByAssetId.get(clip.assetId),
+        audioStreamIndex: source.audioStreamIndex ?? 0,
         clip,
         hasAudio: true,
         volume: finite(clip.volume ?? 1, '音量', 0, 2),
@@ -1484,20 +1669,27 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     videoOutputLabel,
     '-map',
     audioOutputLabel,
-    '-c:v',
-    'libx264',
-    '-preset',
-    encoding.preset,
-    '-crf',
-    String(encoding.crf),
+    ...videoEncodingArgs,
     '-pix_fmt',
     'yuv420p',
+    ...([...sourceByAssetId.values()].some((source) => source.hdrToneMap)
+      ? [
+          '-color_primaries',
+          'bt709',
+          '-color_trc',
+          'bt709',
+          '-colorspace',
+          'bt709',
+          '-color_range',
+          'tv',
+        ]
+      : []),
     '-c:a',
     'aac',
     '-b:a',
     encoding.audioBitrate,
     '-ar',
-    '44100',
+    String(AUDIO_SAMPLE_RATE),
     '-ac',
     '2',
     '-movflags',
@@ -1523,6 +1715,7 @@ function buildNativeExportPlan(request, sourceByAssetId, overlayPathByClipId, ou
     width,
     height,
     fps,
+    videoEncoder,
   };
 }
 
@@ -1562,6 +1755,7 @@ module.exports = {
   MAX_OVERLAYS,
   NativeExportPlanError,
   buildAtempoChain,
+  buildHudMaskFilterChain,
   buildNativeExportPlan,
   buildTimeline,
   collectUnsupportedFeatures,

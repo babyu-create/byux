@@ -20,6 +20,10 @@ import { ClipOverlaysSection } from './ClipOverlaysSection';
 import { ClipPresetsSection } from './ClipPresetsSection';
 import { BeatDetectionSection } from './BeatDetectionSection';
 import { AudioDuckingSection } from './AudioDuckingSection';
+import { ClipAudioProcessingSection } from './ClipAudioProcessingSection';
+import { AudioStreamSection } from './AudioStreamSection';
+import { MotionTrackingSection } from './MotionTrackingSection';
+import { hasAudioProcessing } from '../../lib/audioProcessing';
 import styles from './PropertiesPanel.module.css';
 
 export function PropertiesPanel() {
@@ -31,9 +35,11 @@ export function PropertiesPanel() {
     selectedClipIds.length === 1
       ? (clips.find((c) => c.id === selectedClipIds[0]) ?? null)
       : null;
-  const selectedClipTrackKind = selectedClip
-    ? (tracks.find((t) => t.id === selectedClip.trackId)?.kind ?? null)
+  const selectedClipTrack = selectedClip
+    ? (tracks.find((track) => track.id === selectedClip.trackId) ?? null)
     : null;
+  const selectedClipTrackKind = selectedClipTrack?.kind ?? null;
+  const selectedClipLocked = selectedClipTrack?.locked === true;
   // The FIRST audio track is the BGM lane; auto-ducking is a BGM feature, so
   // the ducking control only shows for a clip on that track (not SE etc.).
   const bgmTrackId = tracks.find((t) => t.kind === 'audio')?.id ?? null;
@@ -49,6 +55,16 @@ export function PropertiesPanel() {
         <div className={styles.content}>
           {selectedClip ? (
             <>
+              {selectedClipLocked ? (
+                <div className={styles.lockedNotice} role="status">
+                  このトラックはロック中です。タイムラインの鍵を解除すると編集できます。
+                </div>
+              ) : null}
+              <div
+                className={selectedClipLocked ? styles.clipEditorLocked : undefined}
+                inert={selectedClipLocked}
+                aria-disabled={selectedClipLocked}
+              >
               {/* High-frequency FPS-montage control: open by default. */}
               <CollapsibleSection
                 id="speed"
@@ -76,6 +92,14 @@ export function PropertiesPanel() {
                 }
               >
                 <ClipVolumeSection clip={selectedClip} />
+              </CollapsibleSection>
+
+              <CollapsibleSection
+                id="audio-processing"
+                title="音声クリア・EQ"
+                active={hasAudioProcessing(selectedClip.audioProcessing)}
+              >
+                <ClipAudioProcessingSection clip={selectedClip} />
               </CollapsibleSection>
 
               {isVideoClip ? (
@@ -153,6 +177,13 @@ export function PropertiesPanel() {
                   <ClipPresetsSection clip={selectedClip} />
                 </CollapsibleSection>
               ) : null}
+
+              {isVideoClip && asset.kind === 'video' ? (
+                <CollapsibleSection id="motion-tracking" title="モーショントラッキング">
+                  <MotionTrackingSection clip={selectedClip} asset={asset} />
+                </CollapsibleSection>
+              ) : null}
+              </div>
             </>
           ) : null}
           {selectedClipIds.length > 1 ? (
@@ -173,6 +204,16 @@ export function PropertiesPanel() {
                 <IORangeSection asset={asset} />
               </CollapsibleSection>
             </>
+          ) : null}
+          {asset.audioStreams && asset.audioStreams.length > 1 ? (
+            <CollapsibleSection
+              id="audio-stream"
+              title="音声ストリーム"
+              defaultOpen
+              badge={`${asset.audioStreams.length}本`}
+            >
+              <AudioStreamSection asset={asset} />
+            </CollapsibleSection>
           ) : null}
           {asset.kind === 'audio' ? (
             <CollapsibleSection id="beat-detection" title="ビート検出">

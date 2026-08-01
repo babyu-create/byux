@@ -48,6 +48,7 @@ function runCaptured(binaryPath, args, options = {}) {
       cwd: options.cwd,
       env: minimalEnvironment(),
     });
+    if (typeof options.onSpawn === 'function') options.onSpawn(child);
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
@@ -100,16 +101,135 @@ async function verifyFfmpegBinary(binaryPath) {
   return true;
 }
 
-async function probeInputHasAudio(binaryPath, sourcePath) {
+const INPUT_STREAM_PATTERN =
+  /Stream #\d+:\d+(?:\[[^\]\r\n]+\])?(?:\([^\)\r\n]*\))?:\s*(Video|Audio):([^\r\n]*)/gi;
+
+/**
+ * Pick one stable audio stream for the whole editor pipeline. Recording tools
+ * commonly write game/mix and microphone as separate tracks. Honour the
+ * container's default disposition when present, then fall back to the first
+ * audio stream for OBS/capture-file compatibility.
+ *
+ * The returned index is the audio ordinal used by FFmpeg's `0:a:N` syntax,
+ * not the container-wide stream index.
+ */
+function parsePreferredAudioStreamIndex(stderr) {
+  const text = String(stderr);
+  const matches = [...text.matchAll(INPUT_STREAM_PATTERN)];
+  let audioOrdinal = 0;
+  let firstAudio = null;
+  for (const match of matches) {
+    if (match[1].toLowerCase() !== 'audio') continue;
+    if (firstAudio === null) firstAudio = audioOrdinal;
+    if (/\(default\)/i.test(match[2])) return audioOrdinal;
+    audioOrdinal += 1;
+  }
+  return firstAudio;
+}
+
+/**
+ * Parse the human-readable stream list once during import.  The ordinal is
+ * intentionally the `0:a:N` ordinal (rather than the container stream ID),
+ * matching every export/waveform command in the app.
+ */
+function parseAudioStreams(stderr) {
+  const streams = [];
+  const pattern = /Stream #\d+:\d+(?:\[[^\]\r\n]+\])?(?:\(([^\)\r\n]*)\))?:\s*Audio:([^\r\n]*)/gi;
+  for (const match of String(stderr).matchAll(pattern)) {
+    const description = match[2].trim();
+    const codec = description.split(/[ ,]/, 1)[0] || 'unknown';
+    const sampleRate = Number(description.match(/\b(\d{4,6})\s*Hz\b/i)?.[1]);
+    const channelMatch = description.match(/\b(mono|stereo|(?:\d+\.\d))\b/i);
+    const language = match[1]?.trim() || undefined;
+    streams.push({
+      index: streams.length,
+      codec,
+      ...(language ? { language } : {}),
+      ...(Number.isSafeInteger(sampleRate) && sampleRate > 0 ? { sampleRate } : {}),
+      ...(channelMatch ? { channels: channelMatch[1] } : {}),
+      default: /\(default\)/i.test(description),
+    });
+  }
+  return streams;
+}
+
+async function probeAudioStreams(binaryPath, sourcePath) {
   const result = await runCaptured(
     binaryPath,
     [
       '-hide_banner',
       '-nostdin',
+      '-loglevel',
+      'info',
       '-protocol_whitelist',
       'file,pipe',
       '-i',
       sourcePath,
+    ],
+    { timeoutMs: 30_000 },
+  );
+  const streams = parseAudioStreams(result.stderr);
+  const media = parseInputMediaStreams(result.stderr);
+  if (!media.hasVideo && !media.hasAudio) {
+    throw new Error('素材の音声・映像ストリームを確認できません');
+  }
+  return streams;
+}
+
+async function probePreferredAudioStreamIndex(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'info',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+    ],
+    { timeoutMs: 30_000 },
+  );
+  const media = parseInputMediaStreams(result.stderr);
+  if (!media.hasVideo && !media.hasAudio) {
+    throw new Error('素材の音声・映像ストリームを確認できません');
+  }
+  return parsePreferredAudioStreamIndex(result.stderr);
+}
+
+async function probeInputHasAudio(binaryPath, sourcePath) {
+  return (await probePreferredAudioStreamIndex(binaryPath, sourcePath)) !== null;
+}
+
+function parseInputMediaStreams(stderr) {
+  const text = String(stderr);
+  const streamKinds = [...text.matchAll(INPUT_STREAM_PATTERN)].map((match) =>
+    match[1].toLowerCase(),
+  );
+  const hasVideo = streamKinds.includes('video');
+  const hasAudio = streamKinds.includes('audio');
+  return {
+    hasVideo,
+    hasAudio,
+    kind: hasVideo ? 'video' : hasAudio ? 'audio' : null,
+  };
+}
+
+async function probeInputMediaKind(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'info',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+      '-map',
+      '0:v:0?',
       '-map',
       '0:a:0?',
       '-t',
@@ -120,13 +240,280 @@ async function probeInputHasAudio(binaryPath, sourcePath) {
     ],
     { timeoutMs: 30_000 },
   );
-  return /Stream #\d+:\d+(?:\([^)]*\))?: Audio:/i.test(result.stderr);
+  return parseInputMediaStreams(result.stderr).kind;
+}
+
+function parseInputVideoColorMetadata(stderr) {
+  // Every consumer maps 0:v:0. Inspect exactly the first advertised video
+  // stream so an HDR alternate angle or cover-art stream cannot cause the
+  // wrong source to be tone-mapped.
+  const videoMetadata = (
+    String(stderr)
+      .split(/\r?\n/)
+      .find((line) => /Stream #\d+:\d+.*Video:/i.test(line)) ?? ''
+  ).toLowerCase();
+  const transferMatch = /\b(smpte2084|arib-std-b67)\b/.exec(videoMetadata);
+  const primariesMatch = /\b(bt2020|smpte432)\b/.exec(videoMetadata);
+  const transfer = transferMatch?.[1] ?? null;
+  return {
+    transfer,
+    primaries: primariesMatch?.[1] ?? null,
+    toneMap: transfer === 'smpte2084'
+      ? 'pq'
+      : transfer === 'arib-std-b67'
+        ? 'hlg'
+        : null,
+  };
+}
+
+/**
+ * Extract the decoder-relevant part of the first video stream. Chromium's
+ * media stack is intentionally narrower than FFmpeg: HEVC, 10-bit/4:2:2
+ * formats and many variable-frame-rate captures need a small H.264 CFR proxy
+ * for reliable scrubbing, even when FFmpeg itself can decode them.
+ */
+function parseInputVideoCompatibility(stderr) {
+  const line = (
+    String(stderr)
+      .split(/\r?\n/)
+      .find((candidate) => /Stream #\d+:\d+.*Video:/i.test(candidate)) ?? ''
+  );
+  const codec = line.match(/Video:\s*([^,\s(]+)/i)?.[1]?.toLowerCase() ?? null;
+  const pixelFormat = line.match(/Video:\s*[^,]+,\s*([^\s(,]+)/i)?.[1]?.toLowerCase() ?? null;
+  const fps = Number(line.match(/(\d+(?:\.\d+)?)\s+fps\b/i)?.[1]);
+  const tbr = Number(line.match(/(\d+(?:\.\d+)?)\s+tbr\b/i)?.[1]);
+  const variableFrameRate = Number.isFinite(fps) && Number.isFinite(tbr) && Math.abs(fps - tbr) > 0.5;
+  const color = parseInputVideoColorMetadata(stderr);
+  return {
+    codec,
+    pixelFormat,
+    ...(Number.isFinite(fps) && fps > 0 ? { frameRate: fps } : {}),
+    variableFrameRate,
+    ...color,
+  };
+}
+
+function needsChromiumPreviewProxy(metadata) {
+  const codec = typeof metadata?.codec === 'string' ? metadata.codec.toLowerCase() : null;
+  const pixelFormat = typeof metadata?.pixelFormat === 'string' ? metadata.pixelFormat.toLowerCase() : null;
+  const browserCodec = codec === null || !new Set(['h264', 'avc1', 'vp8', 'vp9', 'av1']).has(codec);
+  const browserPixelFormat = pixelFormat !== null && !/^(yuv420p|yuvj420p|nv12)$/i.test(pixelFormat);
+  return browserCodec || browserPixelFormat || metadata?.toneMap !== null || metadata?.variableFrameRate === true;
+}
+
+/** Keep VFR captures seekable in Chromium by making only their editing proxy
+ * CFR. The original remains untouched and is always used for final export. */
+function buildPreviewFrameRateArgs(variableFrameRate) {
+  return variableFrameRate === true
+    ? ['-fps_mode', 'cfr', '-r', '60']
+    : [];
+}
+
+async function probeInputVideoColorMetadata(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'info',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+    ],
+    { timeoutMs: 20_000 },
+  );
+  return parseInputVideoColorMetadata(result.stderr);
+}
+
+async function probeInputVideoCompatibility(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'info',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+    ],
+    { timeoutMs: 20_000 },
+  );
+  return parseInputVideoCompatibility(result.stderr);
+}
+
+function buildHdrToSdrFilter(toneMap) {
+  const inputTransfer = toneMap === 'pq'
+    ? 'smpte2084'
+    : toneMap === 'hlg'
+      ? 'arib-std-b67'
+      : null;
+  if (!inputTransfer) return '';
+  // Convert to linear light before tone mapping, then explicitly convert the
+  // original wide-gamut primaries to a limited-range BT.709 SDR output. zscale
+  // reads the source primaries/matrix from the decoded frame metadata.
+  return (
+    `zscale=tin=${inputTransfer}:t=linear:npl=100,` +
+    'format=gbrpf32le,' +
+    'tonemap=tonemap=hable:desat=0,' +
+    'zscale=p=bt709:t=bt709:m=bt709:r=tv,' +
+    'format=yuv420p'
+  );
+}
+
+function buildVideoDecodeProbePlan(duration, sampleSeconds = 2) {
+  if (
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    !Number.isFinite(sampleSeconds) ||
+    sampleSeconds <= 0
+  ) {
+    return [{ start: 0, duration: sampleSeconds > 0 ? sampleSeconds : 2 }];
+  }
+  const starts = [
+    0,
+    duration * 0.25,
+    duration * 0.5,
+    duration * 0.75,
+    duration * 0.9,
+    Math.max(0, duration - 5),
+  ];
+  const uniqueStarts = [];
+  for (const value of starts) {
+    const start = Math.min(Math.max(0, value), Math.max(0, duration - 0.05));
+    if (uniqueStarts.some((existing) => Math.abs(existing - start) < 0.05)) continue;
+    uniqueStarts.push(start);
+  }
+  return uniqueStarts.map((start) => ({
+    start,
+    duration: Math.min(sampleSeconds, duration - start),
+  }));
+}
+
+/** Decode independent samples and fail on the first corrupt packet. Seeking a
+ * fresh decoder at each point catches DVR corruption that starts well after
+ * the opening GOP while keeping work constant for one-hour and five-hour
+ * recordings. This is intentionally stricter than the salvage transcode used
+ * by the compatibility proxy. */
+async function probeInputVideoDecodable(binaryPath, sourcePath) {
+  const duration = await probeInputDuration(binaryPath, sourcePath);
+  const samples = buildVideoDecodeProbePlan(duration, 2);
+  for (const sample of samples) {
+    const result = await runCaptured(
+      binaryPath,
+      [
+        '-hide_banner',
+        '-nostdin',
+        '-v',
+        'error',
+        '-xerror',
+        '-protocol_whitelist',
+        'file,pipe',
+        '-ss',
+        sample.start.toFixed(6),
+        '-i',
+        sourcePath,
+        '-t',
+        sample.duration.toFixed(6),
+        '-map',
+        '0:v:0',
+        '-an',
+        '-sn',
+        '-f',
+        'null',
+        '-',
+      ],
+      { timeoutMs: 12_000 },
+    );
+    if (result.code !== 0) return false;
+  }
+  return true;
+}
+
+async function probeInputDuration(binaryPath, sourcePath) {
+  const result = await runCaptured(
+    binaryPath,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-protocol_whitelist',
+      'file,pipe',
+      '-i',
+      sourcePath,
+    ],
+    { timeoutMs: 30_000 },
+  );
+  return parseDuration(result.stderr);
 }
 
 function parseDuration(stderr) {
   const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
   if (!match) return null;
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+function buildSegmentPlan(duration, segmentSeconds) {
+  if (
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    !Number.isFinite(segmentSeconds) ||
+    segmentSeconds <= 0
+  ) {
+    return [];
+  }
+  const count = Math.ceil(duration / segmentSeconds);
+  return Array.from({ length: count }, (_, index) => {
+    const start = index * segmentSeconds;
+    return {
+      start,
+      duration: Math.min(segmentSeconds, duration - start),
+    };
+  });
+}
+
+/**
+ * Keep decoder-reset repair useful for damaged captures without launching one
+ * FFmpeg process for every short slice of a multi-hour recording. Short media
+ * keeps the preferred reset interval; long media increases it just enough to
+ * stay below the process/file cap.
+ */
+function buildBoundedSegmentPlan(duration, preferredSegmentSeconds, maxSegments) {
+  if (
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    !Number.isFinite(preferredSegmentSeconds) ||
+    preferredSegmentSeconds <= 0 ||
+    !Number.isSafeInteger(maxSegments) ||
+    maxSegments <= 0
+  ) {
+    return [];
+  }
+  const preferredMultiples = Math.ceil(
+    duration / maxSegments / preferredSegmentSeconds,
+  );
+  const segmentSeconds = Math.max(
+    preferredSegmentSeconds,
+    preferredMultiples * preferredSegmentSeconds,
+  );
+  return buildSegmentPlan(duration, segmentSeconds);
+}
+
+function estimatePreviewProxyBytes(kind, duration) {
+  if (
+    (kind !== 'video' && kind !== 'audio') ||
+    !Number.isFinite(duration) ||
+    duration <= 0
+  ) {
+    return 0;
+  }
+  // CRF video size is content-dependent. 8 Mbps is a deliberately cautious
+  // planning rate for the 720p-or-smaller ultrafast preview profile; audio is
+  // bounded by its configured AAC bitrate.
+  const bitsPerSecond = kind === 'video' ? 8_000_000 + 128_000 : 160_000;
+  return Math.ceil((duration * bitsPerSecond) / 8);
 }
 
 async function validateOutput(binaryPath, outputPath, expected) {
@@ -284,8 +671,28 @@ async function terminateProcess(child, graceMs = 3_000) {
 module.exports = {
   MAX_CAPTURE_BYTES,
   appendTail,
+  buildHdrToSdrFilter,
+  buildBoundedSegmentPlan,
+  buildSegmentPlan,
+  buildVideoDecodeProbePlan,
+  estimatePreviewProxyBytes,
   minimalEnvironment,
+  parseDuration,
+  parsePreferredAudioStreamIndex,
+  parseAudioStreams,
+  probeAudioStreams,
+  parseInputMediaStreams,
+  parseInputVideoColorMetadata,
+  parseInputVideoCompatibility,
+  needsChromiumPreviewProxy,
+  buildPreviewFrameRateArgs,
+  probeInputDuration,
   probeInputHasAudio,
+  probePreferredAudioStreamIndex,
+  probeInputMediaKind,
+  probeInputVideoColorMetadata,
+  probeInputVideoCompatibility,
+  probeInputVideoDecodable,
   resolveFfmpegBinary,
   runCaptured,
   terminateProcess,

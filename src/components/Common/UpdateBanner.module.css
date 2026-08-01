@@ -103,6 +103,12 @@
   background: var(--accent-hover);
 }
 
+.btnPrimary:disabled,
+.btnSecondary:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .btnSecondary {
   padding: 6px 10px;
   background: transparent;

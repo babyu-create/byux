@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Target } from 'lucide-react';
+import { Music2, Target } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { formatTimecode } from '../../lib/media';
@@ -38,6 +38,7 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
   const setPreRoll = useProjectStore((s) => s.setPreRoll);
   const setPostRoll = useProjectStore((s) => s.setPostRoll);
   const autoClip = useProjectStore((s) => s.autoClipFromMarkers);
+  const syncKillsToBeats = useProjectStore((s) => s.syncKillsToBeats);
   const removeMediaAsset = useMediaStore((s) => s.removeAsset);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -127,6 +128,15 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
   };
 
   const totalSec = sortedMarkers.length * (preRollSec + postRollSec);
+  const handleBeatSync = () => {
+    const count = syncKillsToBeats();
+    setResultMessage(
+      count > 0
+        ? `${count}本のキルを最寄りのBGMビートへ同期しました`
+        : '同期できるビートがありません。BGMのビート検出とマーカー位置を確認してください',
+    );
+    window.setTimeout(() => setResultMessage(null), 3500);
+  };
 
   return (
     <div className={styles.root}>
@@ -210,6 +220,16 @@ export function KillMarkerSection({ asset }: KillMarkerSectionProps) {
         >
           <Target size={15} strokeWidth={2} aria-hidden="true" />
           <span>マーカーから自動切り出し</span>
+        </button>
+        <button
+          type="button"
+          className={styles.smallBtn}
+          onClick={handleBeatSync}
+          disabled={sortedMarkers.length === 0}
+          title="クリップ長を保ったまま、±0.45秒以内の最寄りビートへキル位置を合わせます"
+        >
+          <Music2 size={14} strokeWidth={2} aria-hidden="true" />
+          <span>キルをBGMビートへ同期</span>
         </button>
 
         {resultMessage ? <div className={styles.toast}>{resultMessage}</div> : null}

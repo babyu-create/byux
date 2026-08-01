@@ -82,6 +82,83 @@ describe('native atempo precision', () => {
 });
 
 describe('nativeExportPlan', () => {
+  it('uses the compact audio bitrate included in the size estimate', () => {
+    const compact = request();
+    compact.options = { ...compact.options, quality: 'compact' };
+    const plan = buildNativeExportPlan(
+      compact,
+      new Map([['asset', { path: 'source.mp4', hasAudio: false }]]),
+      new Map(),
+      'output.part',
+    );
+    const audioBitrateIndex = plan.args.indexOf('-b:a');
+    expect(plan.args[audioBitrateIndex + 1]).toBe('128k');
+  });
+
+  it('uses the registered default audio ordinal throughout native export', () => {
+    const selected = buildNativeExportPlan(
+      request(),
+      new Map([
+        ['asset', { path: 'source.mp4', hasAudio: true, audioStreamIndex: 1 }],
+      ]),
+      new Map(),
+      'output.part',
+    );
+    expect(selected.filterGraph).toContain('[0:a:1]');
+    expect(selected.filterGraph).not.toContain('[0:a:0]');
+
+    const legacyDefault = buildNativeExportPlan(
+      request(),
+      new Map([['asset', { path: 'source.mp4', hasAudio: true }]]),
+      new Map(),
+      'output.part',
+    );
+    expect(legacyDefault.filterGraph).toContain('[0:a:0]');
+  });
+
+  it('rejects invalid registered audio ordinals', () => {
+    expect(() => buildNativeExportPlan(
+      request(),
+      new Map([
+        ['asset', { path: 'source.mp4', hasAudio: true, audioStreamIndex: -1 }],
+      ]),
+      new Map(),
+      'output.part',
+    )).toThrowError(NativeExportPlanError);
+  });
+
+  it('accepts 1440p, 4K and 120 fps output presets', () => {
+    const source = new Map([
+      ['asset', { path: 'source.mp4', hasAudio: false }],
+    ]);
+    const highFps = request();
+    highFps.options = { ...highFps.options, resolution: '1440p', fps: 120 };
+    const highFpsPlan = buildNativeExportPlan(
+      highFps,
+      source,
+      new Map(),
+      'output.part',
+    );
+    expect(highFpsPlan.width).toBe(2560);
+    expect(highFpsPlan.height).toBe(1440);
+    expect(highFpsPlan.fps).toBe(120);
+
+    const fourK = request();
+    fourK.options = {
+      ...fourK.options,
+      resolution: '2160p',
+      aspectRatio: '9:16',
+    };
+    const fourKPlan = buildNativeExportPlan(
+      fourK,
+      source,
+      new Map(),
+      'output.part',
+    );
+    expect(fourKPlan.width).toBe(2160);
+    expect(fourKPlan.height).toBe(3840);
+  });
+
   it('keeps authored gaps and builds a disk-backed single-pass graph', () => {
     const source = new Map([
       ['asset', { path: 'C:\\media\\source.mp4', hasAudio: false }],
@@ -95,14 +172,77 @@ describe('nativeExportPlan', () => {
 
     expect(plan.totalDuration).toBe(4);
     expect(plan.filterGraph).toContain('color=c=black:s=1280x720:r=30:d=2.0000');
-    expect(plan.filterGraph).toContain('anullsrc=r=44100:cl=stereo');
+    expect(plan.filterGraph).toContain('anullsrc=r=48000:cl=stereo');
+    expect(plan.filterGraph).toContain(
+      'aresample=48000:async=1:first_pts=0',
+    );
+    expect(plan.filterGraph).toContain(
+      'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+    );
+    expect(plan.args.slice(plan.args.indexOf('-ar'), plan.args.indexOf('-ar') + 2)).toEqual([
+      '-ar',
+      '48000',
+    ]);
     expect(plan.filterGraph).toContain('setpts=0.5*PTS');
     expect(plan.filterGraph).toContain('fade=t=in:st=0:d=0.25');
     expect(plan.filterGraph).toContain('concat=n=2:v=1:a=1[vbase0][abase]');
     expect(plan.filterGraph).not.toContain('perspective=');
     expect(plan.filterGraph).not.toContain('geq=');
     expect(plan.args).toContain('-filter_complex_script');
+    expect(plan.args).toContain('+genpts+discardcorrupt');
+    expect(plan.args).toContain('ignore_err');
     expect(plan.args.at(-1)).toBe('C:\\output\\.movie.part');
+  });
+
+  it('tone-maps registered PQ sources to tagged BT.709 SDR', () => {
+    const plan = buildNativeExportPlan(
+      request(),
+      new Map([
+        [
+          'asset',
+          { path: 'hdr-source.mp4', hasAudio: false, hdrToneMap: 'pq' },
+        ],
+      ]),
+      new Map(),
+      'hdr-output.part',
+    );
+
+    expect(plan.filterGraph).toContain(
+      'zscale=tin=smpte2084:t=linear:npl=100',
+    );
+    expect(plan.filterGraph).toContain('tonemap=tonemap=hable:desat=0');
+    expect(plan.filterGraph).toContain(
+      'zscale=p=bt709:t=bt709:m=bt709:r=tv',
+    );
+    expect(plan.args).toContain('-color_primaries');
+    expect(plan.args).toContain('-color_trc');
+    expect(plan.args).toContain('-colorspace');
+    expect(plan.args).toContain('bt709');
+  });
+
+  it('uses a main-process-selected hardware encoder without changing the graph', () => {
+    const source = new Map([
+      ['asset', { path: 'source.mp4', hasAudio: false }],
+    ]);
+    const software = buildNativeExportPlan(
+      request(),
+      source,
+      new Map(),
+      'software.part',
+    );
+    const hardware = buildNativeExportPlan(
+      request(),
+      source,
+      new Map(),
+      'hardware.part',
+      'h264_nvenc',
+    );
+
+    expect(software.videoEncoder).toBe('libx264');
+    expect(hardware.videoEncoder).toBe('h264_nvenc');
+    expect(hardware.args).toContain('h264_nvenc');
+    expect(hardware.args).not.toContain('libx264');
+    expect(hardware.filterGraph).toBe(software.filterGraph);
   });
 
   it('skips an empty visible video lane when selecting the base lane', () => {
@@ -191,10 +331,17 @@ describe('nativeExportPlan', () => {
     expect(plan.filterGraph).toContain('asplit=16');
     expect(plan.filterGraph).toContain('concat=n=16:v=0:a=1');
     expect(plan.filterGraph).toContain('perspective=');
+    expect(plan.filterGraph).toContain(
+      'format=rgba,drawbox=x=0:y=0:w=iw:h=ih:color=black@0:t=2:replace=1,perspective=',
+    );
     expect(plan.filterGraph).toContain('colorchannelmixer=');
-    expect(plan.filterGraph).toContain("tmix=frames=4:weights='1 0.56 0.34 0'");
-    expect(plan.filterGraph).toContain('blend=all_expr=');
-    expect(plan.filterGraph).toContain('0.85*gt(');
+    expect(plan.filterGraph).toContain("tmix=frames=2:weights='1 0.28'");
+    expect(plan.filterGraph).toContain('format=yuv420p,drawbox=');
+    expect(plan.filterGraph).toContain("lut=y='if(gt(val\\,40)\\,217\\,0)'");
+    expect(plan.filterGraph).toContain("u='if(lt(val\\,110)\\,217\\,0)'");
+    expect(plan.filterGraph).toContain("v='if(gt(val\\,180)\\,217\\,0)'");
+    expect(plan.filterGraph).toContain('maskedmerge=planes=7');
+    expect(plan.filterGraph).not.toContain('blend=all_expr=');
     expect(plan.filterGraph).toContain('overlay=0:0:eof_action=pass');
     expect(plan.filterGraph).toContain('color=c=black');
   });
@@ -416,6 +563,33 @@ describe('nativeExportPlan', () => {
     expect(plan.filterGraph).not.toContain('tmix=');
   });
 
+  it('bounds blur history by output frame time at 30, 60, and 120 fps', () => {
+    const base = request();
+    const graphAt = (fps: number) => buildNativeExportPlan(
+      {
+        ...base,
+        options: {
+          ...base.options,
+          fps,
+          motionBlur: true,
+          motionBlurStrength: 1.25,
+          motionBlurHudPreset: 'none',
+        },
+        clips: base.clips.map((clip) => ({
+          ...clip,
+          effects: [{ type: 'motion-blur', intensity: 100 }],
+        })),
+      },
+      new Map([['asset', { path: 'source.mp4', hasAudio: false }]]),
+      new Map(),
+      `${fps}.part`,
+    ).filterGraph;
+
+    expect(graphAt(30)).toContain("tmix=frames=2:weights='1 0.5'");
+    expect(graphAt(60)).toContain("tmix=frames=2:weights='1 1'");
+    expect(graphAt(120)).toContain("tmix=frames=3:weights='1 1 1'");
+  });
+
   it('flattens base opacity onto black while keeping the alpha expression', () => {
     const base = request();
     const transparentBase = {
@@ -599,6 +773,54 @@ describe('nativeExportPlan', () => {
         'output.part',
       ),
     ).toThrow(/テキスト画像/);
+  });
+
+  it('moves rasterized overlays with the authored tracking keyframes', () => {
+    const tracked = {
+      ...request(),
+      clips: request().clips.map((clip) => ({
+        ...clip,
+        overlays: [{
+          id: 'text',
+          text: 'hello',
+          fontSize: 8,
+          color: '#fff',
+          position: 'center',
+          tracking: {
+            x: [{ t: 0, value: 1 }, { t: 2, value: 4 }],
+            y: 0,
+          },
+        }],
+      })),
+    };
+    const plan = buildNativeExportPlan(
+      tracked,
+      new Map([['asset', { path: 'source.mp4', hasAudio: false }]]),
+      new Map([['clip', 'overlay.png']]),
+      'output.part',
+    );
+    expect(plan.filterGraph).toContain('[1:v]format=rgba[ovf0]');
+    expect(plan.filterGraph).toContain('overlay=(if(lte((t-2)\\,0)');
+    expect(plan.filterGraph).toContain(')*12.8:(0)*7.2');
+  });
+
+  it('rejects divergent tracking results in one rasterized overlay group', () => {
+    const divergent = {
+      ...request(),
+      clips: request().clips.map((clip) => ({
+        ...clip,
+        overlays: [
+          { id: 'one', text: 'one', fontSize: 8, color: '#fff', position: 'center', tracking: { x: 1 } },
+          { id: 'two', text: 'two', fontSize: 8, color: '#fff', position: 'center', tracking: { x: 2 } },
+        ],
+      })),
+    };
+    expect(() => buildNativeExportPlan(
+      divergent,
+      new Map([['asset', { path: 'source.mp4', hasAudio: false }]]),
+      new Map([['clip', 'overlay.png']]),
+      'output.part',
+    )).toThrow(/追跡結果が一致しません/);
   });
 
   it('keeps progress monotonic and reserves one percent for validation', () => {

@@ -1,9 +1,9 @@
-import { useMemo } from 'react';
-import { Move3d, Plus, RotateCcw, Waves, ZoomIn } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { ChevronLeft, ChevronRight, Move3d, Plus, RotateCcw, Trash2, Waves, ZoomIn } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
 import type { Clip, ClipTransform } from '../../lib/types';
-import type { Animatable, Keyframe } from '../../lib/keyframes';
-import { isAnimated, upsertKeyframe } from '../../lib/keyframes';
+import type { Animatable, EasingKind, Keyframe } from '../../lib/keyframes';
+import { isAnimated, removeKeyframeAt, upsertKeyframe } from '../../lib/keyframes';
 import {
   IDENTITY_TRANSFORM,
   buildShakeKeyframes,
@@ -51,6 +51,8 @@ const FIELDS: FieldDef[] = [
 export function ClipTransformSection({ clip }: ClipTransformSectionProps) {
   const setTransform = useProjectStore((s) => s.setClipTransform);
   const playhead = useProjectStore((s) => s.playhead);
+  const setPlayhead = useProjectStore((s) => s.setPlayhead);
+  const [easing, setEasing] = useState<EasingKind>('easeOut');
 
   const transform = clip.transform;
   const active = clipHasTransform(transform);
@@ -66,6 +68,14 @@ export function ClipTransformSection({ clip }: ClipTransformSectionProps) {
     () => sampleClipTransform(transform, localT),
     [transform, localT],
   );
+  const keyframeTimes = useMemo(() => {
+    const times = Object.values(transform ?? {}).flatMap((value) =>
+      isAnimated(value) ? value.map((keyframe) => keyframe.t) : [],
+    );
+    return [...new Set(times.map((time) => Math.round(time * 10_000) / 10_000))]
+      .sort((a, b) => a - b);
+  }, [transform]);
+  const hasKeyframeHere = keyframeTimes.some((time) => Math.abs(time - localT) < 1e-4);
 
   /** Set a single field's value at the current local time (immutable). */
   const setField = (key: Field, value: number) => {
@@ -74,7 +84,7 @@ export function ClipTransformSection({ clip }: ClipTransformSectionProps) {
     let next: Animatable;
     if (isAnimated(current)) {
       // Already keyframed — upsert a keyframe at the playhead.
-      const kf: Keyframe = { t: localT, value, easing: 'easeOut' };
+      const kf: Keyframe = { t: localT, value, easing };
       next = upsertKeyframe(current, kf);
     } else {
       // Constant — just replace the constant.
@@ -95,7 +105,7 @@ export function ClipTransformSection({ clip }: ClipTransformSectionProps) {
     (Object.keys(IDENTITY_TRANSFORM) as Field[]).forEach((key) => {
       const current = base[key];
       const value = resolved[key];
-      const kf: Keyframe = { t: localT, value, easing: 'easeOut' };
+      const kf: Keyframe = { t: localT, value, easing };
       if (isAnimated(current)) {
         next[key] = upsertKeyframe(current, kf);
       } else {
@@ -107,6 +117,44 @@ export function ClipTransformSection({ clip }: ClipTransformSectionProps) {
       }
     });
     setTransform(clip.id, next);
+  };
+
+  const removeKeyframesAtPlayhead = () => {
+    const next: ClipTransform = { ...(transform ?? {}) };
+    (Object.keys(IDENTITY_TRANSFORM) as Field[]).forEach((key) => {
+      const value = next[key];
+      if (!isAnimated(value)) return;
+      const remaining = removeKeyframeAt(value, localT);
+      next[key] = remaining.length === 1 ? remaining[0].value : remaining;
+    });
+    setTransform(clip.id, next);
+  };
+
+  const updateSegmentEasing = (nextEasing: EasingKind) => {
+    setEasing(nextEasing);
+    const next: ClipTransform = { ...(transform ?? {}) };
+    let changed = false;
+    (Object.keys(IDENTITY_TRANSFORM) as Field[]).forEach((key) => {
+      const value = next[key];
+      if (!isAnimated(value)) return;
+      let target = -1;
+      value.forEach((keyframe, index) => {
+        if (keyframe.t <= localT + 1e-4) target = index;
+      });
+      if (target < 0) return;
+      next[key] = value.map((keyframe, index) =>
+        index === target ? { ...keyframe, easing: nextEasing } : keyframe,
+      );
+      changed = true;
+    });
+    if (changed) setTransform(clip.id, next);
+  };
+
+  const jumpKeyframe = (direction: -1 | 1) => {
+    const target = direction < 0
+      ? [...keyframeTimes].reverse().find((time) => time < localT - 1e-4)
+      : keyframeTimes.find((time) => time > localT + 1e-4);
+    if (target !== undefined) setPlayhead(clip.start + target);
   };
 
   /** One-click zoom-punch: scale 1.0 → ~1.15 with easeOut over the clip. */
@@ -173,6 +221,31 @@ export function ClipTransformSection({ clip }: ClipTransformSectionProps) {
           disabled={!active}
         >
           <RotateCcw size={13} strokeWidth={2.2} aria-hidden="true" />
+        </button>
+      </div>
+
+      <div className={styles.keyframeTools}>
+        <div className={styles.keyframeNav} role="group" aria-label="キーフレーム移動">
+          <button type="button" onClick={() => jumpKeyframe(-1)} disabled={!keyframeTimes.some((time) => time < localT - 1e-4)} aria-label="前のキーフレーム">
+            <ChevronLeft size={14} aria-hidden="true" />
+          </button>
+          <span>{keyframeTimes.length} KF</span>
+          <button type="button" onClick={() => jumpKeyframe(1)} disabled={!keyframeTimes.some((time) => time > localT + 1e-4)} aria-label="次のキーフレーム">
+            <ChevronRight size={14} aria-hidden="true" />
+          </button>
+        </div>
+        <label className={styles.easingSelect}>
+          <span>補間</span>
+          <select value={easing} onChange={(event) => updateSegmentEasing(event.target.value as EasingKind)}>
+            <option value="linear">直線</option>
+            <option value="easeIn">ゆっくり開始</option>
+            <option value="easeOut">ゆっくり停止</option>
+            <option value="easeInOut">なめらか</option>
+            <option value="hold">瞬時切替</option>
+          </select>
+        </label>
+        <button type="button" className={styles.deleteKeyframe} onClick={removeKeyframesAtPlayhead} disabled={!hasKeyframeHere} title="現在位置のキーフレームを削除" aria-label="現在位置のキーフレームを削除">
+          <Trash2 size={14} aria-hidden="true" />
         </button>
       </div>
 

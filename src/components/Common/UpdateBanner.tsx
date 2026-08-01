@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Sparkles, Download, CheckCircle2, AlertTriangle } from 'lucide-react';
 import type { NativeExportRequest } from '../../lib/nativeExporter';
+import type {
+  NativeMediaRegistrationResult,
+  NativeMediaSelectionResult,
+  NativeLoudnessResult,
+  NativeBeatResult,
+  NativeWaveformResult,
+  NativeAudioStream,
+} from '../../lib/types';
 import styles from './UpdateBanner.module.css';
 
 type UpdaterEvent =
@@ -118,6 +126,8 @@ interface ExportAPI {
       etaSec?: number | null;
       fps?: number | null;
       totalBytes?: number | null;
+      encoderLabel?: string;
+      hardwareEncoding?: boolean;
       error?: { code: string; message: string; details?: string[] };
     }) => void,
   ): () => void;
@@ -169,18 +179,55 @@ interface FCEGlobal {
   export?: ExportAPI;
   /** Tell the main process whether there are unsaved edits (see `close` handler in electron/main.cjs). */
   setDirty?: (dirty: boolean) => void;
+  saveDiagnostics?: (projectSummary: {
+    tracks: number;
+    clips: number;
+    assets: number;
+    subtitles: number;
+    durationSeconds: number;
+  }) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+  cache?: {
+    getSummary(): Promise<{
+      ok: boolean;
+      summary?: CacheSummary;
+      error?: string;
+    }>;
+    clearUnused(): Promise<{
+      ok: boolean;
+      busy?: boolean;
+      summary?: CacheSummary;
+      removed?: CacheSummary;
+      error?: string;
+    }>;
+  };
   onSaveBeforeClose?: (cb: (id: string) => void) => () => void;
   completeSaveBeforeClose?: (id: string, success: boolean) => void;
   /** Real disk path of a File the user dropped/picked (empty string if none). */
   getPathForFile?: (file: File) => string;
+  /** Resolve and register a user-provided disk File before editing starts. */
+  registerMediaFileFromFile?: (
+    file: File,
+    kind?: 'video' | 'audio',
+  ) => Promise<NativeMediaRegistrationResult>;
+  /** Use Electron's native picker so the main process owns the selected paths. */
+  selectMediaFiles?: (options?: {
+    kind?: 'video' | 'audio';
+    multiple?: boolean;
+  }) => Promise<NativeMediaSelectionResult>;
   /** Register a saved source path and receive an opaque streaming handle. */
   registerMediaFile?: (ref: {
     path: string;
     name: string;
     size: number;
     kind: 'video' | 'audio';
-  }) => Promise<{ token: string; url: string; size: number } | null>;
-  /** Create/reuse a disk-backed H.264 preview without loading the source into renderer memory. */
+  }) => Promise<{
+    token: string;
+    url: string;
+    size: number;
+    audioStreamIndex?: number | null;
+    audioStreams?: NativeAudioStream[];
+  } | null>;
+  /** Create/reuse a disk-backed H.264/AAC preview without loading the source into renderer memory. */
   createPreviewProxy?: (sourceToken: string) => Promise<{
     ok: boolean;
     token?: string;
@@ -189,6 +236,20 @@ interface FCEGlobal {
     cached?: boolean;
     error?: string;
   }>;
+  /** Generate compact peaks in the main process without decoding the whole source in renderer memory. */
+  generateMediaWaveform?: (sourceToken: string) => Promise<NativeWaveformResult>;
+  cancelMediaWaveform?: (sourceToken: string) => Promise<boolean>;
+  /** Stream RMS windows through native FFmpeg without materializing the source as a Blob. */
+  detectMediaBeats?: (sourceToken: string) => Promise<NativeBeatResult>;
+  cancelMediaBeatDetection?: (sourceToken: string) => Promise<boolean>;
+  /** Analyze EBU R128 loudness without transferring decoded audio to the renderer. */
+  analyzeMediaLoudness?: (sourceToken: string) => Promise<NativeLoudnessResult>;
+  selectAudioStream?: (sourceToken: string, index: number) => Promise<{
+    ok: boolean;
+    index?: number;
+    error?: string;
+  }>;
+  cancelMediaLoudness?: (sourceToken: string) => Promise<boolean>;
   /** Bounded source read used only by explicit heavyweight operations. */
   readMediaFileChunk?: (
     token: string,
@@ -196,6 +257,11 @@ interface FCEGlobal {
     length: number,
   ) => Promise<Uint8Array<ArrayBuffer> | null>;
   releaseMediaFile?: (token: string) => Promise<boolean>;
+}
+
+interface CacheSummary {
+  waveform: { files: number; bytes: number };
+  previewProxy: { files: number; bytes: number };
 }
 
 declare global {
@@ -207,6 +273,7 @@ declare global {
 export function UpdateBanner() {
   const [event, setEvent] = useState<UpdaterEvent | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
 
   useEffect(() => {
     const updater = window.fce?.updater;
@@ -214,6 +281,7 @@ export function UpdateBanner() {
     const off = updater.onEvent((e) => {
       setEvent(e);
       setDismissed(false);
+      setActionBusy(false);
     });
     return off;
   }, []);
@@ -221,14 +289,36 @@ export function UpdateBanner() {
   if (dismissed || !event) return null;
   if (event.status === 'up-to-date' || event.status === 'checking') return null;
 
+  const runUpdaterAction = async (action: () => Promise<unknown>) => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      const result = await action();
+      if (
+        result &&
+        typeof result === 'object' &&
+        'ok' in result &&
+        (result as { ok?: unknown }).ok === false
+      ) {
+        throw new Error('updater action rejected');
+      }
+    } catch {
+      setEvent({ status: 'error', message: 'update action failed' });
+      setDismissed(false);
+      setActionBusy(false);
+    }
+  };
+
   const handleInstall = () => {
-    window.fce?.updater?.installAndRestart();
+    const updater = window.fce?.updater;
+    if (updater) void runUpdaterAction(() => updater.installAndRestart());
   };
 
   // Unsigned artifacts have no publisher verification, so the download only
   // starts when the user explicitly requests it — never automatically.
   const handleDownload = () => {
-    window.fce?.updater?.download();
+    const updater = window.fce?.updater;
+    if (updater) void runUpdaterAction(() => updater.download());
   };
 
   if (event.status === 'error') {
@@ -237,7 +327,7 @@ export function UpdateBanner() {
         <span className={styles.icon}>
           <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
         </span>
-        <span className={styles.text}>更新を確認できませんでした。通信状態を確認してください。</span>
+        <span className={styles.text}>更新処理に失敗しました。通信状態を確認して再試行してください。</span>
         <div className={styles.actions}>
           <button
             type="button"
@@ -249,9 +339,13 @@ export function UpdateBanner() {
           <button
             type="button"
             className={styles.btnPrimary}
-            onClick={() => void window.fce?.updater?.check()}
+            onClick={() => {
+              const updater = window.fce?.updater;
+              if (updater) void runUpdaterAction(() => updater.check());
+            }}
+            disabled={actionBusy}
           >
-            再試行
+            {actionBusy ? '処理中…' : '再試行'}
           </button>
         </div>
       </div>
@@ -264,6 +358,7 @@ export function UpdateBanner() {
         <span className={styles.icon}><Sparkles size={16} strokeWidth={2} aria-hidden="true" /></span>
         <span className={styles.text}>
           新しいバージョン <strong>v{event.version}</strong> が利用可能です。
+          発行元を確認できない場合は適用しないでください。
         </span>
         <div className={styles.actions}>
           <button
@@ -277,8 +372,9 @@ export function UpdateBanner() {
             type="button"
             className={styles.btnPrimary}
             onClick={handleDownload}
+            disabled={actionBusy}
           >
-            ダウンロード
+            {actionBusy ? '処理中…' : 'ダウンロード'}
           </button>
         </div>
       </div>
@@ -326,8 +422,9 @@ export function UpdateBanner() {
             type="button"
             className={styles.btnPrimary}
             onClick={handleInstall}
+            disabled={actionBusy}
           >
-            今すぐ再起動
+            {actionBusy ? '処理中…' : '今すぐ再起動'}
           </button>
         </div>
       </div>

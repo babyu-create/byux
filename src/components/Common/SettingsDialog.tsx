@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Settings, Keyboard, Palette, Mic, AlertTriangle, RotateCcw } from 'lucide-react';
+import { Settings, Keyboard, Palette, Mic, AlertTriangle, RotateCcw, Activity, FileDown, CheckCircle2, HardDrive, Trash2 } from 'lucide-react';
 import {
   ACTIONS,
   DEFAULT_BINDINGS,
@@ -14,9 +14,20 @@ import {
 } from '../../lib/keybindings';
 import { ThemeSettings } from './ThemeSettings';
 import { AccessibleDialog } from './AccessibleDialog';
+import { useProjectStore } from '../../stores/projectStore';
+import { useMediaStore } from '../../stores/mediaStore';
+import { clipDuration } from '../../lib/timeline';
 import styles from './SettingsDialog.module.css';
 
-type SettingsTab = 'shortcuts' | 'theme';
+type SettingsTab = 'shortcuts' | 'theme' | 'support';
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+  const megabytes = bytes / (1024 * 1024);
+  return megabytes >= 1024
+    ? `${(megabytes / 1024).toFixed(1)} GB`
+    : `${megabytes.toFixed(megabytes >= 10 ? 0 : 1)} MB`;
+}
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -27,10 +38,30 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
   const [bindings, setBindingsState] = useState(() => getBindings());
   const [recordingId, setRecordingId] = useState<ActionId | null>(null);
   const [conflictWarning, setConflictWarning] = useState<string | null>(null);
+  const [diagnosticStatus, setDiagnosticStatus] = useState<string | null>(null);
+  const [cacheStatus, setCacheStatus] = useState<string | null>(null);
+  const [cacheSummary, setCacheSummary] = useState<{
+    waveform: { files: number; bytes: number };
+    previewProxy: { files: number; bytes: number };
+  } | null>(null);
+  const [clearingCache, setClearingCache] = useState(false);
+  const tracks = useProjectStore((state) => state.tracks);
+  const clips = useProjectStore((state) => state.clips);
+  const subtitleCount = useProjectStore((state) => state.subtitles.length);
+  const assetCount = useMediaStore((state) => state.assets.length);
 
   useEffect(() => {
     return subscribeBindings(() => setBindingsState({ ...getBindings() }));
   }, []);
+
+  useEffect(() => {
+    if (tab !== 'support') return;
+    let cancelled = false;
+    void window.fce?.cache?.getSummary().then((result) => {
+      if (!cancelled && result.ok && result.summary) setCacheSummary(result.summary);
+    });
+    return () => { cancelled = true; };
+  }, [tab]);
 
   // Capture next keypress when recording
   useEffect(() => {
@@ -118,8 +149,9 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
             onKeyDown={(event) => {
               if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
                 event.preventDefault();
-                setTab('theme');
-                document.getElementById('settings-tab-theme')?.focus();
+                const next = event.key === 'ArrowRight' ? 'theme' : 'support';
+                setTab(next);
+                document.getElementById(`settings-tab-${next}`)?.focus();
               }
             }}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
@@ -139,14 +171,37 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
             onKeyDown={(event) => {
               if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
                 event.preventDefault();
-                setTab('shortcuts');
-                document.getElementById('settings-tab-shortcuts')?.focus();
+                const next = event.key === 'ArrowRight' ? 'support' : 'shortcuts';
+                setTab(next);
+                document.getElementById(`settings-tab-${next}`)?.focus();
               }
             }}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             <Palette size={14} strokeWidth={2} aria-hidden="true" />
             テーマ
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="settings-tab-support"
+            aria-controls="settings-panel-support"
+            aria-selected={tab === 'support'}
+            tabIndex={tab === 'support' ? 0 : -1}
+            className={`${styles.tabBtn} ${tab === 'support' ? styles.tabActive : ''}`}
+            onClick={() => setTab('support')}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                event.preventDefault();
+                const next = event.key === 'ArrowRight' ? 'shortcuts' : 'theme';
+                setTab(next);
+                document.getElementById(`settings-tab-${next}`)?.focus();
+              }
+            }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <Activity size={14} strokeWidth={2} aria-hidden="true" />
+            サポート
           </button>
         </div>
 
@@ -171,6 +226,109 @@ export function SettingsDialog({ onClose }: SettingsDialogProps) {
             className={styles.body}
           >
             <ThemeSettings />
+          </div>
+        ) : null}
+
+        {tab === 'support' ? (
+          <div
+            id="settings-panel-support"
+            role="tabpanel"
+            aria-labelledby="settings-tab-support"
+            className={styles.body}
+          >
+            <section className={styles.supportCard}>
+              <Activity size={22} aria-hidden="true" />
+              <div>
+                <h3>診断情報</h3>
+                <p>
+                  動作環境、FFmpeg/GPUの状態、キャッシュ容量、匿名の件数情報をJSONへ保存します。
+                  素材名・プロジェクト名・ユーザー名・ローカルパスは含めません。
+                </p>
+              </div>
+            </section>
+            <button
+              type="button"
+              className={styles.diagnosticButton}
+              onClick={async () => {
+                const saveDiagnostics = window.fce?.saveDiagnostics;
+                if (!saveDiagnostics) {
+                  setDiagnosticStatus('診断情報の保存はデスクトップ版で利用できます');
+                  return;
+                }
+                setDiagnosticStatus('診断情報を収集中…');
+                const durationSeconds = clips.reduce(
+                  (end, clip) => Math.max(end, clip.start + clipDuration(clip)),
+                  0,
+                );
+                const result = await saveDiagnostics({
+                  tracks: tracks.length,
+                  clips: clips.length,
+                  assets: assetCount,
+                  subtitles: subtitleCount,
+                  durationSeconds,
+                });
+                setDiagnosticStatus(
+                  result.canceled
+                    ? null
+                    : result.ok
+                      ? `保存しました: ${result.path ?? ''}`
+                      : (result.error ?? '診断情報を保存できませんでした'),
+                );
+              }}
+            >
+              <FileDown size={16} aria-hidden="true" />
+              診断情報を保存
+            </button>
+            {diagnosticStatus ? (
+              <p className={styles.diagnosticStatus} aria-live="polite">
+                {diagnosticStatus.startsWith('保存しました') ? <CheckCircle2 size={14} aria-hidden="true" /> : null}
+                {diagnosticStatus}
+              </p>
+            ) : null}
+            <section className={styles.cacheCard}>
+              <HardDrive size={22} aria-hidden="true" />
+              <div>
+                <h3>キャッシュ管理</h3>
+                <p>
+                  {cacheSummary
+                    ? `互換プレビュー ${formatBytes(cacheSummary.previewProxy.bytes)} / 波形 ${formatBytes(cacheSummary.waveform.bytes)}`
+                    : 'キャッシュ容量を確認しています…'}
+                </p>
+                <p>編集中の素材は保護し、再生成できる未使用ファイルだけを削除します。</p>
+              </div>
+            </section>
+            <button
+              type="button"
+              className={styles.cacheButton}
+              disabled={clearingCache || !window.fce?.cache}
+              onClick={async () => {
+                const cache = window.fce?.cache;
+                if (!cache) return;
+                if (!window.confirm('未使用の互換プレビューと波形キャッシュを削除しますか？')) return;
+                setClearingCache(true);
+                setCacheStatus('未使用キャッシュを削除中…');
+                try {
+                  const result = await cache.clearUnused();
+                  if (result.ok && result.summary) {
+                    const removedBytes =
+                      (result.removed?.previewProxy.bytes ?? 0) +
+                      (result.removed?.waveform.bytes ?? 0);
+                    setCacheSummary(result.summary);
+                    setCacheStatus(`${formatBytes(removedBytes)}を削除しました`);
+                  } else {
+                    setCacheStatus(result.error ?? 'キャッシュを削除できませんでした');
+                  }
+                } finally {
+                  setClearingCache(false);
+                }
+              }}
+            >
+              <Trash2 size={16} aria-hidden="true" />
+              {clearingCache ? '削除中…' : '未使用キャッシュを削除'}
+            </button>
+            {cacheStatus ? (
+              <p className={styles.diagnosticStatus} aria-live="polite">{cacheStatus}</p>
+            ) : null}
           </div>
         ) : null}
 

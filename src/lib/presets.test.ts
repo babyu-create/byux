@@ -6,6 +6,7 @@ import {
   createPresetFromClip,
   deserialisePresets,
   extractClipLook,
+  isValidClipLook,
   loadPresets,
   looksEmpty,
   savePresets,
@@ -204,6 +205,22 @@ describe('serialise / deserialise presets', () => {
       { id: 'x', name: 'x', createdAt: 1, look: { speed: 'NaN' } },
     ]);
     expect(deserialisePresets(bad)).toEqual([]);
+  });
+
+  it('rejects finite but unsaveable look ranges', () => {
+    const invalidLooks = [
+      { speed: -1 },
+      { speedRamp: { from: 0, to: 2 } },
+      { transitionIn: { type: 'fade', duration: -0.2 } },
+      { effects: [{ type: 'motion-blur', intensity: 101 }] },
+      { overlays: [{ id: 'o', text: 'x', fontSize: 0, color: '#fff', position: 'center' }] },
+    ];
+    for (const look of invalidLooks) {
+      expect(isValidClipLook(look)).toBe(false);
+      expect(deserialisePresets(JSON.stringify([
+        { id: 'x', name: 'x', createdAt: 1, look },
+      ]))).toEqual([]);
+    }
   });
 });
 

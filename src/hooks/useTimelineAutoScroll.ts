@@ -22,6 +22,10 @@ const TimelineScrollContext = createContext<TimelineScrollContextValue | null>(n
 
 export const TimelineScrollProvider = TimelineScrollContext.Provider;
 
+export function useTimelineScrollRef(): RefObject<HTMLDivElement | null> | null {
+  return useContext(TimelineScrollContext)?.scrollRef ?? null;
+}
+
 export function useTimelineAutoScroll() {
   const ctx = useContext(TimelineScrollContext);
   const rafRef = useRef<number | null>(null);

@@ -120,3 +120,58 @@
   background: var(--accent) !important;
   color: var(--text-inverse) !important;
 }
+
+.peakTool {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.toolDivider {
+  height: 1px;
+  margin: 3px 0;
+  background: var(--border);
+}
+
+.normalizeBtn {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  transition: background var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
+}
+
+.normalizeBtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--accent));
+}
+
+.normalizeBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.peakHint,
+.peakNote {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.peakHint {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.peakNote {
+  color: var(--text-muted);
+  font-size: 9px;
+}

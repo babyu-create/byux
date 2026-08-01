@@ -262,6 +262,7 @@
 
 .frame {
   position: relative;
+  container-type: size;
   /* Use the app surface color rather than pure black. With motion blur on,
      the canvas overlay uses object-fit:contain — if there is any sub-pixel
      aspect mismatch between the canvas backing-store and the frame box,

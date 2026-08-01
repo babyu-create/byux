@@ -15,6 +15,12 @@ interface ScrubOptions {
   pausePlayback?: boolean;
 }
 
+/** The content element's DOMRect already includes its scroll translation. */
+export function timelineContentX(clientX: number, contentLeft: number): number {
+  if (!Number.isFinite(clientX) || !Number.isFinite(contentLeft)) return 0;
+  return Math.max(0, clientX - contentLeft);
+}
+
 /**
  * Provides pointer-down/move/up handlers that scrub the playhead based on
  * pointer X position relative to the timeline track area.
@@ -29,10 +35,12 @@ export function useScrub(options: ScrubOptions = {}) {
     const trackArea = document.querySelector(containerSelector) as HTMLElement | null;
     if (!trackArea) return;
     const rect = trackArea.getBoundingClientRect();
-    const scrollLeft = (trackArea.parentElement?.parentElement as HTMLElement | null)?.scrollLeft ?? 0;
-    const x = clientX - rect.left + scrollLeft;
+    // `rect.left` moves left with the scrolled content. Adding scrollLeft here
+    // a second time made long-timeline scrubbing jump forward by the current
+    // horizontal scroll offset.
+    const x = timelineContentX(clientX, rect.left);
     const { zoom, setPlayhead } = useProjectStore.getState();
-    setPlayhead(pxToTime(Math.max(0, x), zoom));
+    setPlayhead(pxToTime(x, zoom));
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLElement>) => {

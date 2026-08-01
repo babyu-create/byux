@@ -5,6 +5,7 @@ export type ActionId =
   | 'playback.toggle'
   | 'clip.split'
   | 'clip.delete'
+  | 'clip.rippleDelete'
   | 'zoom.in'
   | 'zoom.out'
   | 'marker.add'
@@ -38,6 +39,7 @@ export const ACTIONS: ActionDef[] = [
   // Clip editing
   { id: 'clip.split', group: 'クリップ', label: '選択クリップを分割', defaultKey: 'j' },
   { id: 'clip.delete', group: 'クリップ', label: '選択クリップを削除', defaultKey: 'delete' },
+  { id: 'clip.rippleDelete', group: 'クリップ', label: '選択クリップを詰めて削除', defaultKey: 'shift+delete' },
   { id: 'zoom.in', group: 'クリップ', label: 'ズームイン', defaultKey: '=' },
   { id: 'zoom.out', group: 'クリップ', label: 'ズームアウト', defaultKey: '-' },
   // Kill markers — default bound to W (rests under the FPS left hand on WASD).
@@ -72,6 +74,14 @@ export const RESERVED_BINDINGS: Readonly<Record<string, string>> = {
   'ctrl+y': 'やり直す',
   'ctrl+shift+z': 'やり直す',
   'meta+shift+z': 'やり直す',
+  'ctrl+c': '選択クリップをコピー',
+  'meta+c': '選択クリップをコピー',
+  'ctrl+v': '再生位置へ貼り付け',
+  'meta+v': '再生位置へ貼り付け',
+  'ctrl+d': '選択クリップを複製',
+  'meta+d': '選択クリップを複製',
+  'ctrl+a': 'すべてのクリップを選択',
+  'meta+a': 'すべてのクリップを選択',
 };
 
 const STORAGE_KEY = 'fce.pref.keybindings.v1';

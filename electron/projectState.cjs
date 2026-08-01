@@ -12,6 +12,30 @@ function canonicalProject(text) {
 }
 
 /**
+ * Autosave stores the project JSON as a JSON string inside an envelope. In the
+ * worst case every byte can be escaped, plus a small amount of metadata.
+ */
+function maxAutosaveEnvelopeBytes(maxProjectTextBytes) {
+  return maxProjectTextBytes * 2 + 64 * 1024;
+}
+
+function projectWriteError(error, fallback = 'プロジェクトを保存できませんでした') {
+  switch (error?.code) {
+    case 'ENOSPC':
+    case 'EDQUOT':
+      return '保存先の空き容量が不足しています。空き容量を確保してから再試行してください';
+    case 'EACCES':
+    case 'EPERM':
+    case 'EROFS':
+      return '保存先に書き込めません。別のフォルダーを選択するか、アクセス権を確認してください';
+    case 'ENAMETOOLONG':
+      return '保存先のパスまたはファイル名が長すぎます。短い名前で再試行してください';
+    default:
+      return fallback;
+  }
+}
+
+/**
  * Clear the recovery captured at save start, or an equivalent autosave that
  * finished while the explicit save was in flight. A newer, different
  * generation must remain available after a crash.
@@ -31,4 +55,9 @@ function shouldClearRecovery(recovery, savedText, autosaveGeneration) {
   return recoveryProject !== null && recoveryProject === savedProject;
 }
 
-module.exports = { canonicalProject, shouldClearRecovery };
+module.exports = {
+  canonicalProject,
+  maxAutosaveEnvelopeBytes,
+  projectWriteError,
+  shouldClearRecovery,
+};

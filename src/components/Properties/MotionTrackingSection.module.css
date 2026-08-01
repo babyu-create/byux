@@ -1,0 +1,14 @@
+.root { display: flex; flex-direction: column; gap: 9px; padding: 10px 14px 12px; }
+.description { display: flex; gap: 7px; align-items: flex-start; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.target { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-muted); font-size: 11px; }
+.target select { min-width: 145px; padding: 5px 7px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elevated); color: var(--text); font-size: 11px; }
+.regionGrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.regionGrid label { display: flex; flex-direction: column; gap: 3px; color: var(--text-muted); font-size: 10px; }
+.regionGrid input { width: 100%; box-sizing: border-box; min-height: 27px; padding: 3px 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elevated); color: var(--text); font: 11px var(--font-mono); }
+.run { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 31px; border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--border)); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 14%, var(--bg-elevated)); color: var(--text); font-size: 11px; cursor: pointer; }
+.run:hover { background: color-mix(in srgb, var(--accent) 24%, var(--bg-elevated)); }
+.progress { position: relative; display: flex; align-items: center; min-height: 31px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 10px; }
+.progressBar { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, var(--accent) 25%, transparent); transition: width 80ms linear; }
+.progress span { position: relative; padding-left: 8px; }
+.progress button { position: relative; margin-left: auto; margin-right: 5px; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+.note { margin: 0; color: var(--text-muted); font-size: 10px; line-height: 1.45; }

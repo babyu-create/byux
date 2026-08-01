@@ -1,0 +1,23 @@
+.root { display: grid; gap: 12px; padding: 2px 14px 14px; }
+.presetRow { display: flex; gap: 6px; }
+.presetButton,
+.resetButton { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 30px; padding: 5px 9px; border-radius: var(--radius-sm); font-size: 10px; font-weight: 700; }
+.presetButton { flex: 1; background: var(--accent-soft); border: 1px solid var(--accent); color: var(--text); }
+.resetButton { border: 1px solid var(--border); background: var(--bg-panel); color: var(--text-dim); }
+.group { display: grid; gap: 6px; }
+.label { color: var(--text-dim); font-size: 10px; font-weight: 700; }
+.segmented { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; padding: 1px; border-radius: var(--radius-sm); background: var(--border); overflow: hidden; }
+.segmented button { padding: 6px 2px; border: 0; background: var(--bg-elevated); color: var(--text-dim); font-size: 10px; }
+.segmented .active { background: var(--accent); color: var(--text-inverse); }
+.sliderRow { display: grid; grid-template-columns: 62px 1fr 55px; align-items: center; gap: 7px; }
+.sliderRow span,
+.toggleRow span { display: grid; gap: 2px; }
+.sliderRow strong,
+.toggleRow strong { color: var(--text); font-size: 10px; }
+.sliderRow small,
+.toggleRow small { color: var(--text-muted); font-size: 8px; font-weight: 400; }
+.sliderRow input { width: 100%; accent-color: var(--accent); }
+.sliderRow output { color: var(--text-dim); font-family: var(--font-mono); font-size: 9px; text-align: right; }
+.toggleRow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 9px; border-top: 1px solid var(--border-soft); }
+.toggleRow input { width: 17px; height: 17px; accent-color: var(--accent); }
+.note { margin: -2px 0 0; color: var(--text-muted); font-size: 8px; line-height: 1.5; }

@@ -17,6 +17,8 @@ import { exportStrengthFromIntensity } from './motionBlurCore';
 import { SLOW_TO_FAST_PRESET } from './speedRamp';
 import { buildDuckPoints } from './audioDucking';
 import type { Clip } from './types';
+import { sampleClipTransform } from './clipTransform';
+import { transitionModulationAt } from './transitions';
 
 describe('buildAtempoChain', () => {
   it('returns no filters at 1x', () => {
@@ -58,10 +60,13 @@ describe('getResolution', () => {
   it('maps 16:9 presets', () => {
     expect(getResolution('1080p', '16:9')).toEqual({ width: 1920, height: 1080 });
     expect(getResolution('720p', '16:9')).toEqual({ width: 1280, height: 720 });
+    expect(getResolution('1440p', '16:9')).toEqual({ width: 2560, height: 1440 });
+    expect(getResolution('2160p', '16:9')).toEqual({ width: 3840, height: 2160 });
   });
   it('maps 9:16 presets (portrait)', () => {
     expect(getResolution('1080p', '9:16')).toEqual({ width: 1080, height: 1920 });
     expect(getResolution('720p', '9:16')).toEqual({ width: 720, height: 1280 });
+    expect(getResolution('2160p', '9:16')).toEqual({ width: 2160, height: 3840 });
   });
 });
 
@@ -445,6 +450,40 @@ describe('rampFootageSeekAtOutputTime', () => {
       { clip: makeClip('c1', { trimEnd: 1 }), start: 3, end: 4 },
     ];
     expect(rampFootageSeekAtOutputTime(segments, 2)).toBe(2);
+  });
+
+  it('matches the preview transform sampler across the full clip window', () => {
+    const clip = makeClip('parity', {
+      transform: {
+        x: [{ t: 0, value: -12 }, { t: 2, value: 18, easing: 'easeOut' }],
+        y: [{ t: 0, value: 6 }, { t: 2, value: -8 }],
+        scale: [{ t: 0, value: 1 }, { t: 2, value: 1.25 }],
+        rotation: 14,
+        opacity: [{ t: 0, value: 0.8 }, { t: 2, value: 1 }],
+      },
+      transitionIn: { type: 'fade', duration: 0.35 },
+      transitionOut: { type: 'zoom', duration: 0.4 },
+    });
+    const segments: TransformSegment[] = [{ clip, start: 0, end: 2 }];
+    for (const time of [0, 0.1, 0.25, 0.5, 1, 1.5, 1.9, 2, 2.1]) {
+      const local = Math.max(0, Math.min(2, time));
+      const base = sampleClipTransform(clip.transform, local);
+      const transition = transitionModulationAt(clip.transitionIn, clip.transitionOut, local, 2);
+      const expected = {
+        x: base.x + transition.dx,
+        y: base.y + transition.dy,
+        scale: base.scale * transition.scale,
+        rotation: base.rotation,
+        opacity: base.opacity * transition.opacity,
+      };
+      expect(clipTransformAtOutputTime(segments, time)).toMatchObject({
+        x: expect.closeTo(expected.x, 5),
+        y: expect.closeTo(expected.y, 5),
+        scale: expect.closeTo(expected.scale, 5),
+        rotation: expect.closeTo(expected.rotation, 5),
+        opacity: expect.closeTo(expected.opacity, 5),
+      });
+    }
   });
 });
 

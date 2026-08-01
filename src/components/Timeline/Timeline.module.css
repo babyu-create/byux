@@ -9,7 +9,7 @@
 .body {
   flex: 1;
   display: grid;
-  grid-template-columns: 176px 1fr;
+  grid-template-columns: 224px 1fr;
   min-height: 0;
   overflow: hidden;
 }
@@ -20,13 +20,18 @@
   padding-top: 28px;
   background: var(--bg-elevated);
   border-right: 1px solid var(--border);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+
+.trackHeaders::-webkit-scrollbar {
+  width: 0;
 }
 
 .scroll {
   position: relative;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto;
   /* Contain paint to the scroll viewport — child clips outside the scroll
      area are clipped by the browser without triggering layout recalcs */
   contain: paint;
@@ -46,4 +51,14 @@
   min-height: 0;
   /* Isolate layout/style recalculation to this subtree */
   contain: layout style;
+}
+
+.marquee {
+  position: absolute;
+  inset-block: 0;
+  z-index: 8;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }

@@ -3,6 +3,13 @@ import type { Clip as ClipType, MediaAsset } from '../../lib/types';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { clipDuration, pxToTime } from '../../lib/timeline';
+import {
+  collectTimelineRenderIndices,
+  findIntersectingTimelineClipIndices,
+  findTimelineClipWindow,
+  reconcileOrderedTrackClips,
+  timelineClipsOverlap,
+} from '../../lib/timelineViewport';
 import { Clip } from './Clip';
 import { ContextMenu } from '../Common/ContextMenu';
 import { ClipVolumeSection } from '../Properties/ClipVolumeSection';
@@ -10,19 +17,26 @@ import { ClipSpeedSection } from '../Properties/ClipSpeedSection';
 import {
   removeClipWithFeedback,
   splitClipWithFeedback,
+  copySelectedWithFeedback,
+  duplicateSelectedWithFeedback,
+  lastSelectedClipIdOnTrack,
+  rippleDeleteSelectedWithFeedback,
 } from './timelineCommands';
 import styles from './Track.module.css';
 
 interface TrackProps {
   trackId: string;
   zoom: number;
-  totalSec: number;
+  visibleStartSec: number;
+  visibleEndSec: number;
   assetsById: Record<string, MediaAsset>;
 }
 
 export const Track = memo(function Track({
   trackId,
   zoom,
+  visibleStartSec,
+  visibleEndSec,
   assetsById,
 }: TrackProps) {
   // Subscribe to the stable arrays first, then derive locally with useMemo.
@@ -33,17 +47,73 @@ export const Track = memo(function Track({
   const allClips = useProjectStore((s) => s.clips);
   const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
   const track = useMemo(() => tracks.find((t) => t.id === trackId), [tracks, trackId]);
-  const clips = useMemo(
-    () => allClips.filter((c) => c.trackId === trackId),
-    [allClips, trackId],
+  const previousOrderedClipsRef = useRef<ClipType[]>([]);
+  const orderedClips = useMemo(() => {
+    const next = reconcileOrderedTrackClips(
+      allClips,
+      trackId,
+      previousOrderedClipsRef.current,
+    );
+    previousOrderedClipsRef.current = next;
+    return next;
+  }, [allClips, trackId]);
+  const clipWindow = useMemo(
+    () => findTimelineClipWindow(orderedClips, visibleStartSec, visibleEndSec),
+    [orderedClips, visibleEndSec, visibleStartSec],
   );
-  const orderedClips = useMemo(
-    () => [...clips].sort((a, b) => a.start - b.start || a.id.localeCompare(b.id)),
-    [clips],
+  const hasOverlappingClips = useMemo(
+    () => timelineClipsOverlap(orderedClips),
+    [orderedClips],
   );
-  const keyboardClipId =
-    [...selectedClipIds].reverse().find((id) => orderedClips.some((clip) => clip.id === id)) ??
-    orderedClips[0]?.id;
+  const overlappingVisibleIndices = useMemo(
+    () =>
+      hasOverlappingClips
+        ? findIntersectingTimelineClipIndices(
+            orderedClips,
+            visibleStartSec,
+            visibleEndSec,
+          )
+        : [],
+    [hasOverlappingClips, orderedClips, visibleEndSec, visibleStartSec],
+  );
+  const selectedKeyboardClipId = useMemo(
+    () => lastSelectedClipIdOnTrack(orderedClips, selectedClipIds, null),
+    [orderedClips, selectedClipIds],
+  );
+  const selectedKeyboardClipIndex = useMemo(
+    () =>
+      selectedKeyboardClipId
+        ? orderedClips.findIndex((clip) => clip.id === selectedKeyboardClipId)
+        : -1,
+    [orderedClips, selectedKeyboardClipId],
+  );
+  const firstVisibleClipIndex = hasOverlappingClips
+    ? (overlappingVisibleIndices[0] ?? 0)
+    : clipWindow.from;
+  const keyboardClipIndex =
+    selectedKeyboardClipIndex >= 0 ? selectedKeyboardClipIndex : firstVisibleClipIndex;
+  const keyboardClipId = orderedClips[keyboardClipIndex]?.id;
+  const renderIndices = useMemo(
+    () =>
+      collectTimelineRenderIndices(
+        orderedClips.length,
+        clipWindow,
+        [
+          ...overlappingVisibleIndices,
+          keyboardClipIndex - 1,
+          keyboardClipIndex,
+          keyboardClipIndex + 1,
+        ],
+        hasOverlappingClips,
+      ),
+    [
+      clipWindow,
+      hasOverlappingClips,
+      keyboardClipIndex,
+      orderedClips.length,
+      overlappingVisibleIndices,
+    ],
+  );
 
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -66,7 +136,7 @@ export const Track = memo(function Track({
     { x: number; y: number; kind: 'volume' | 'speed'; clipId: string } | null
   >(null);
   const quickEditClip = quickEdit
-    ? clips.find((candidate) => candidate.id === quickEdit.clipId)
+    ? orderedClips.find((candidate) => candidate.id === quickEdit.clipId)
     : undefined;
 
   const handleTrackPointerDown = (e: PointerEvent<HTMLDivElement>) => {
@@ -83,12 +153,17 @@ export const Track = memo(function Track({
     if (moved > 6) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const time = pxToTime(start.x - rect.left, zoom);
-    const hit = clips.find(
+    const hit = orderedClips.find(
       (c) => time >= c.start - 1e-6 && time <= c.start + clipDuration(c) + 1e-6,
     );
     if (!hit) return;
-    useProjectStore.getState().selectClip(hit.id);
+    const state = useProjectStore.getState();
+    if (!state.selectedClipIds.includes(hit.id)) state.selectClip(hit.id);
     setContextMenu({ x: start.x, y: start.y, clip: hit });
+  };
+
+  const handleTrackPointerCancel = () => {
+    rightClickRef.current = null;
   };
 
   // Drop OS files straight onto any compatible track. Visible video and
@@ -106,6 +181,7 @@ export const Track = memo(function Track({
     if (!track || track.locked) return;
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
+    const requestedCount = files.length;
 
     const rect = e.currentTarget.getBoundingClientRect();
     const dropTime = Math.max(0, pxToTime(e.clientX - rect.left, zoom));
@@ -117,6 +193,8 @@ export const Track = memo(function Track({
       .then((newAssets) => {
         let cursor = dropTime;
         let skipped = 0;
+        let added = 0;
+        let placementFailed = 0;
         for (const asset of newAssets) {
           const compatible =
             asset.kind === 'audio'
@@ -127,15 +205,36 @@ export const Track = memo(function Track({
             continue;
           }
           const id = ps.addClipFromAsset(asset.id, track.id, asset.duration, cursor);
-          if (id) cursor += asset.duration;
+          if (id) {
+            cursor += asset.duration;
+            added += 1;
+          } else {
+            placementFailed += 1;
+          }
         }
-        if (skipped > 0) {
+        const importFailed = requestedCount - newAssets.length;
+        if (added === 0 && newAssets.length === 0) {
           ps.showMessage(
             'error',
-            `${skipped}個のファイルはこの種類のトラックに追加できません`,
-            3500,
+            useMediaStore.getState().importError ??
+              'ファイルを読み込めませんでした。形式または読み取り権限を確認してください',
+            6000,
+          );
+        } else if (skipped > 0 || placementFailed > 0 || importFailed > 0) {
+          const details = [
+            skipped > 0 ? `種類違い ${skipped}件` : '',
+            placementFailed > 0 ? `配置失敗 ${placementFailed}件` : '',
+            importFailed > 0 ? `読込失敗 ${importFailed}件` : '',
+          ].filter(Boolean).join(' / ');
+          ps.showMessage(
+            'error',
+            `${added}件を配置しました / ${details}`,
+            5000,
           );
         }
+      })
+      .catch(() => {
+        ps.showMessage('error', 'ファイルの読み込み中にエラーが発生しました', 5000);
       });
   };
 
@@ -146,15 +245,18 @@ export const Track = memo(function Track({
     <div
       className={`${styles.root} ${track.locked ? styles.locked : ''} ${track.hidden ? styles.hidden : ''} ${isDragOver ? styles.dragOver : ''}`}
       data-kind={track.kind}
+      data-total-clip-count={orderedClips.length}
+      data-rendered-clip-count={renderIndices.length}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onPointerDown={handleTrackPointerDown}
       onPointerUp={handleTrackPointerUp}
-      onPointerCancel={handleTrackPointerUp}
+      onPointerCancel={handleTrackPointerCancel}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {orderedClips.map((clip, index) => {
+      {renderIndices.map((index) => {
+        const clip = orderedClips[index];
         const asset = assetsById[clip.assetId];
         return (
           <Clip
@@ -198,6 +300,14 @@ export const Track = memo(function Track({
               }),
           },
           {
+            label: 'コピー（Ctrl+C）',
+            onSelect: copySelectedWithFeedback,
+          },
+          {
+            label: '複製（Ctrl+D）',
+            onSelect: duplicateSelectedWithFeedback,
+          },
+          {
             label: '分割（再生位置で）',
             onSelect: () => splitClipWithFeedback(contextMenu.clip.id),
           },
@@ -208,6 +318,10 @@ export const Track = memo(function Track({
           {
             label: '削除',
             onSelect: () => removeClipWithFeedback(contextMenu.clip.id),
+          },
+          {
+            label: '選択を詰めて削除（Shift+Delete）',
+            onSelect: rippleDeleteSelectedWithFeedback,
           },
         ]}
       />

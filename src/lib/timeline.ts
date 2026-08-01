@@ -27,7 +27,12 @@ export interface RulerTick {
   label?: string;
 }
 
-export function buildRulerTicks(durationSec: number, zoom: number): RulerTick[] {
+export function buildRulerTicks(
+  durationSec: number,
+  zoom: number,
+  visibleStartSec = 0,
+  visibleEndSec = Number.POSITIVE_INFINITY,
+): RulerTick[] {
   const pxPs = pxPerSecond(zoom);
   let majorStep: number;
   let minorStep: number;
@@ -46,9 +51,18 @@ export function buildRulerTicks(durationSec: number, zoom: number): RulerTick[] 
     minorStep = 5;
   }
 
-  const ticks: RulerTick[] = [];
   const total = Math.max(durationSec, 30);
-  for (let t = 0; t <= total; t += minorStep) {
+  const start = Math.max(0, Math.min(total, visibleStartSec));
+  const end = Math.max(start, Math.min(total, visibleEndSec));
+  const firstIndex = Math.max(0, Math.floor(start / minorStep));
+  const lastIndex = Math.min(
+    Math.ceil(total / minorStep),
+    Math.ceil(end / minorStep),
+  );
+  const ticks: RulerTick[] = [];
+  for (let index = firstIndex; index <= lastIndex; index += 1) {
+    const t = index * minorStep;
+    if (t > total + 1e-6) break;
     const isMajor = Math.abs(Math.round(t / majorStep) * majorStep - t) < 1e-6;
     ticks.push({
       time: t,
