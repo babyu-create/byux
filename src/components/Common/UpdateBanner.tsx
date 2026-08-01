@@ -5,6 +5,7 @@ import type {
   NativeMediaRegistrationResult,
   NativeMediaSelectionResult,
   NativeLoudnessResult,
+  NativeBeatResult,
   NativeWaveformResult,
   NativeAudioStream,
 } from '../../lib/types';
@@ -238,6 +239,9 @@ interface FCEGlobal {
   /** Generate compact peaks in the main process without decoding the whole source in renderer memory. */
   generateMediaWaveform?: (sourceToken: string) => Promise<NativeWaveformResult>;
   cancelMediaWaveform?: (sourceToken: string) => Promise<boolean>;
+  /** Stream RMS windows through native FFmpeg without materializing the source as a Blob. */
+  detectMediaBeats?: (sourceToken: string) => Promise<NativeBeatResult>;
+  cancelMediaBeatDetection?: (sourceToken: string) => Promise<boolean>;
   /** Analyze EBU R128 loudness without transferring decoded audio to the renderer. */
   analyzeMediaLoudness?: (sourceToken: string) => Promise<NativeLoudnessResult>;
   selectAudioStream?: (sourceToken: string, index: number) => Promise<{

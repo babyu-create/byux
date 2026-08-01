@@ -130,6 +130,12 @@ contextBridge.exposeInMainWorld('fce', {
   cancelMediaWaveform(sourceToken) {
     return ipcRenderer.invoke('media:cancel-waveform', sourceToken);
   },
+  detectMediaBeats(sourceToken) {
+    return ipcRenderer.invoke('media:detect-beats', sourceToken);
+  },
+  cancelMediaBeatDetection(sourceToken) {
+    return ipcRenderer.invoke('media:cancel-beat-detection', sourceToken);
+  },
   analyzeMediaLoudness(sourceToken) {
     return ipcRenderer.invoke('media:analyze-loudness', sourceToken);
   },

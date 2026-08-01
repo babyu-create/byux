@@ -5,6 +5,7 @@ const { spawn } = require('node:child_process');
 const { appendTail, resolveFfmpegBinary } = require('../electron/nativeFfmpeg.cjs');
 const { buildWaveformFfmpegArgs, createWaveformMetadataAccumulator } = require('../electron/nativeWaveform.cjs');
 const { buildLoudnessFfmpegArgs, parseLoudnessSummary } = require('../electron/nativeLoudness.cjs');
+const { buildBeatFfmpegArgs, createBeatMetadataAccumulator } = require('../electron/nativeBeats.cjs');
 
 function runStreaming(binaryPath, args, onStdout) {
   return new Promise((resolve, reject) => {
@@ -44,8 +45,16 @@ async function main() {
     if (loudnessRun.code !== 0) throw new Error(`loudness failed: ${loudnessRun.stderr}`);
     const loudness = parseLoudnessSummary(loudnessRun.stderr);
     if (!loudness) throw new Error('LUFS summary was not parsed');
+    const beatAccumulator = createBeatMetadataAccumulator();
+    const beatRun = await runStreaming(
+      binaryPath,
+      buildBeatFfmpegArgs(sourcePath),
+      (chunk) => beatAccumulator.push(chunk),
+    );
+    if (beatRun.code !== 0) throw new Error(`beat detection failed: ${beatRun.stderr}`);
+    const beats = beatAccumulator.finish();
     console.log(
-      `LONG_MEDIA_SMOKE_OK peaks=${peaks.length} lufs=${loudness.integratedLufs.toFixed(1)} ` +
+      `LONG_MEDIA_SMOKE_OK peaks=${peaks.length} beats=${beats.length} lufs=${loudness.integratedLufs.toFixed(1)} ` +
       `elapsedSec=${((Date.now() - started) / 1000).toFixed(1)} rssGrowthMb=${((peakRss - startingRss) / 1024 / 1024).toFixed(1)}`,
     );
   } finally {

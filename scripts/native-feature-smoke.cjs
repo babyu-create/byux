@@ -8,6 +8,7 @@ const { buildNativeExportPlan } = require('../electron/nativeExportPlan.cjs');
 const { buildAssSubtitles } = require('../electron/nativeSubtitles.cjs');
 const { buildLoudnessFfmpegArgs, parseLoudnessSummary } = require('../electron/nativeLoudness.cjs');
 const { buildWaveformFfmpegArgs, createWaveformMetadataAccumulator } = require('../electron/nativeWaveform.cjs');
+const { buildBeatFfmpegArgs, createBeatMetadataAccumulator } = require('../electron/nativeBeats.cjs');
 const { encodeWaveformCache, decodeWaveformCache } = require('../electron/waveformCache.cjs');
 const {
   probeInputMediaKind,
@@ -146,9 +147,19 @@ async function main() {
     if (!cached || cached.peaks.length !== peaks.length || peaks.length < 40) {
       throw new Error('waveform cache round-trip failed');
     }
+    const beatRun = await runCaptured(
+      binaryPath,
+      buildBeatFfmpegArgs(unknownPath, audioStreamIndex),
+      { timeoutMs: 60_000 },
+    );
+    if (beatRun.code !== 0) throw new Error(`beat detection failed: ${beatRun.stderr}`);
+    const beatAccumulator = createBeatMetadataAccumulator();
+    beatAccumulator.push(beatRun.stdout);
+    const beats = beatAccumulator.finish();
+    if (beatAccumulator.windowCount < 40) throw new Error('beat RMS stream was incomplete');
     console.log(
       `NATIVE_FEATURE_SMOKE_OK kind=${detected} subtitles=${request.subtitles.length} ` +
-      `lufs=${loudness.integratedLufs.toFixed(1)} peaks=${peaks.length}`,
+      `lufs=${loudness.integratedLufs.toFixed(1)} peaks=${peaks.length} beats=${beats.length}`,
     );
   } finally {
     await fs.rm(workDir, { recursive: true, force: true });

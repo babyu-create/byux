@@ -799,6 +799,15 @@ function buildClipFilters(spec) {
   if (needsAlpha) {
     videoFilters.push('format=rgba');
     if (spatialTransform) {
+      // `perspective` extends the outermost source pixel beyond a destination
+      // quadrilateral.  Without a transparent guard, a scaled-down upper
+      // video therefore paints edge-coloured bands over the entire frame
+      // instead of behaving like the clipped CSS layer in preview.  Two
+      // transparent pixels are enough to make that extension transparent
+      // while remaining visually negligible at the authored frame edge.
+      videoFilters.push(
+        'drawbox=x=0:y=0:w=iw:h=ih:color=black@0:t=2:replace=1',
+      );
       const perspectiveTime = `(on/${fps})`;
       const transition = transitionExpressions(clip, duration, perspectiveTime);
       const x =

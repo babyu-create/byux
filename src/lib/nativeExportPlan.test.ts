@@ -331,6 +331,9 @@ describe('nativeExportPlan', () => {
     expect(plan.filterGraph).toContain('asplit=16');
     expect(plan.filterGraph).toContain('concat=n=16:v=0:a=1');
     expect(plan.filterGraph).toContain('perspective=');
+    expect(plan.filterGraph).toContain(
+      'format=rgba,drawbox=x=0:y=0:w=iw:h=ih:color=black@0:t=2:replace=1,perspective=',
+    );
     expect(plan.filterGraph).toContain('colorchannelmixer=');
     expect(plan.filterGraph).toContain("tmix=frames=2:weights='1 0.28'");
     expect(plan.filterGraph).toContain('format=yuv420p,drawbox=');

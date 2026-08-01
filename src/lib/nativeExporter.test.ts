@@ -10,8 +10,10 @@ vi.mock('./overlayRaster', () => ({
 
 import {
   getNativeExportCompatibility,
+  prepareClipsForNativeExport,
   prepareNativeExportRequest,
 } from './nativeExporter';
+import { getLegacyClipTrackingMigration } from './motionTracker';
 
 const VIDEO_TRACK: Track = {
   id: 'video',
@@ -183,6 +185,72 @@ describe('getNativeExportCompatibility', () => {
     expect(result.reasons.join(' ')).toContain('64');
   });
 
+  it('does not rewrite dense clip transforms without explicit tracking provenance', () => {
+    const frames = Array.from({ length: 1_800 }, (_, index) => ({
+      t: index / 30,
+      value: index / 100,
+      easing: 'linear' as const,
+    }));
+    const clip = makeClip({
+      trimEnd: 60,
+      transform: {
+        x: frames,
+        y: frames.map((frame) => ({ ...frame, value: frame.value * -0.5 })),
+      },
+    });
+    const prepared = prepareClipsForNativeExport([clip]);
+    expect(prepared[0].transform?.x).toHaveLength(1_800);
+    expect(prepared[0].transform?.y).toHaveLength(1_800);
+    expect(getNativeExportCompatibility(makeInput([clip]), makeOptions()).compatible).toBe(false);
+  });
+
+  it('offers an explicit export-safe migration for legacy dense tracking', () => {
+    const frames = Array.from({ length: 1_800 }, (_, index) => ({
+      t: index / 30,
+      value: index / 100,
+      easing: 'linear' as const,
+    }));
+    const migration = getLegacyClipTrackingMigration(makeClip({
+      trimEnd: 60,
+      transform: {
+        x: frames,
+        y: frames.map((frame) => ({ ...frame, value: frame.value * -0.5 })),
+      },
+    }));
+    expect(migration).not.toBeNull();
+    expect(migration?.originalCount).toBe(1_800);
+    expect(migration?.keyframeCount).toBeLessThanOrEqual(64);
+    expect(migration?.maximumError).toBeLessThanOrEqual(0.15);
+    expect(migration?.transform.x).toHaveLength(2);
+    expect(migration?.transform.y).toHaveLength(2);
+  });
+
+  it('reports dense overlay tracking that cannot be simplified accurately', () => {
+    const noisy = Array.from({ length: 65 }, (_, index) => ({
+      t: index / 30,
+      value: index % 2 === 0 ? -20 : 20,
+      easing: 'linear' as const,
+    }));
+    const result = getNativeExportCompatibility(
+      makeInput([makeClip({
+        overlays: [{
+          id: 'tracked-overlay',
+          text: 'Tracked',
+          fontSize: 8,
+          color: '#fff',
+          position: 'center',
+          tracking: {
+            x: noisy,
+            y: noisy.map((frame) => ({ ...frame, value: -frame.value })),
+          },
+        }],
+      })]),
+      makeOptions(),
+    );
+    expect(result.compatible).toBe(false);
+    expect(result.reasons.join(' ')).toContain('64');
+  });
+
   it('accepts visible secondary video and overlay lanes', () => {
     const secondaryVideoTrack: Track = {
       id: 'secondary-video',
@@ -337,6 +405,38 @@ describe('prepareNativeExportRequest', () => {
     expect(prepared.request.assets[0]).not.toHaveProperty('path');
     expect(prepared.request.markers).toEqual(input.markers);
     expect(progress).toHaveBeenCalled();
+    await prepared.release();
+  });
+
+  it('sends an export-safe clone for explicit overlay tracking from older versions', async () => {
+    const frames = Array.from({ length: 1_800 }, (_, index) => ({
+      t: index / 30,
+      value: Math.sin(index / 80) * 5,
+      easing: 'linear' as const,
+    }));
+    const clip = makeClip({
+      trimEnd: 60,
+      overlays: [{
+        id: 'legacy-tracked-overlay',
+        text: 'Tracked',
+        fontSize: 8,
+        color: '#fff',
+        position: 'center',
+        tracking: {
+          x: frames,
+          y: frames.map((frame) => ({ ...frame, value: frame.value * -0.5 })),
+        },
+      }],
+    });
+    const prepared = await prepareNativeExportRequest(
+      makeInput([clip]),
+      makeOptions(),
+    );
+    const exportedX = prepared.request.clips[0].overlays?.[0].tracking?.x;
+    const exportedY = prepared.request.clips[0].overlays?.[0].tracking?.y;
+    expect(Array.isArray(exportedX) && exportedX.length).toBeLessThanOrEqual(64);
+    expect(Array.isArray(exportedY) && exportedY.length).toBeLessThanOrEqual(64);
+    expect(clip.overlays?.[0].tracking?.x).toHaveLength(1_800);
     await prepared.release();
   });
 

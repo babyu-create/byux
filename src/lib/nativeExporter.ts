@@ -4,7 +4,13 @@ import {
   type ExportOptions,
 } from './exporter';
 import { rasterizeOverlays } from './overlayRaster';
+import {
+  MAX_MOTION_TRACK_SIMPLIFICATION_ERROR_PERCENT,
+  MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
+} from './nativeExportLimits';
+import { simplifyMotionTrackKeyframes } from './motionTracker';
 import { clipDuration } from './timeline';
+import type { Animatable, Keyframe } from './keyframes';
 import type { Clip, KillMarker, MediaAsset, SubtitleCue, SubtitleStyle, Track } from './types';
 
 export type NativeExportOptions = Omit<ExportOptions, 'signal' | 'onProgress'>;
@@ -51,7 +57,6 @@ const MAX_NATIVE_OVERLAYS = 512;
 const MAX_NATIVE_OVERLAY_BYTES = 8 * 1024 * 1024;
 const MAX_NATIVE_OVERLAY_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_NATIVE_OVERLAY_DECODED_BYTES = 512 * 1024 * 1024;
-const MAX_NATIVE_KEYFRAMES_PER_PROPERTY = 64;
 interface ExportedVisualClip {
   clip: Clip;
   indexInTrack: number;
@@ -96,12 +101,71 @@ function requiredNativeSourceAssetIds(input: ExportInput): Set<string> {
   return required;
 }
 
+function exportSafeTrackingPair(
+  x: Animatable | undefined,
+  y: Animatable | undefined,
+): { x: Keyframe[]; y: Keyframe[] } | null {
+  if (!Array.isArray(x) || !Array.isArray(y)) return null;
+  if (
+    x.length <= MAX_NATIVE_KEYFRAMES_PER_PROPERTY &&
+    y.length <= MAX_NATIVE_KEYFRAMES_PER_PROPERTY
+  ) {
+    return { x, y };
+  }
+  if (
+    x.some((keyframe) => keyframe.easing && keyframe.easing !== 'linear') ||
+    y.some((keyframe) => keyframe.easing && keyframe.easing !== 'linear')
+  ) return null;
+  try {
+    const simplified = simplifyMotionTrackKeyframes(x, y);
+    if (simplified.maximumError > MAX_MOTION_TRACK_SIMPLIFICATION_ERROR_PERCENT) {
+      return null;
+    }
+    return { x: simplified.x, y: simplified.y };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Upgrade dense tracking data saved by versions before export-safe trajectory
+ * simplification. Only aligned, linear X/Y pairs are touched; authored easing
+ * and paths that cannot meet the visual error bound remain unchanged so the
+ * normal compatibility error is shown instead of silently changing motion.
+ */
+export function prepareClipsForNativeExport(clips: readonly Clip[]): Clip[] {
+  return clips.map((clip) => {
+    let changed = false;
+    const transform = clip.transform;
+    // Clip transform keyframes may be deliberately hand-authored and have no
+    // provenance marker in older project files. Never rewrite them implicitly.
+    // New tracker output is already <=64; overlay.tracking is explicit and can
+    // be upgraded safely below.
+    const overlays = clip.overlays?.map((overlay) => {
+      if (!overlay.tracking) return overlay;
+      const pair = exportSafeTrackingPair(
+        overlay.tracking.x,
+        overlay.tracking.y,
+      );
+      if (
+        !pair ||
+        (pair.x === overlay.tracking.x && pair.y === overlay.tracking.y)
+      ) return overlay;
+      changed = true;
+      return { ...overlay, tracking: pair };
+    });
+    return changed ? { ...clip, transform, overlays } : clip;
+  });
+}
+
 export function getNativeExportCompatibility(
   input: ExportInput,
   options: ExportOptions,
 ): NativeExportCompatibility {
   void options;
-  const visualClips = exportedVisualClips(input);
+  const exportClips = prepareClipsForNativeExport(input.clips);
+  const exportInput = exportClips === input.clips ? input : { ...input, clips: exportClips };
+  const visualClips = exportedVisualClips(exportInput);
   const mainVideoTrack = input.tracks.find(
     (track) =>
       track.kind === 'video' &&
@@ -110,15 +174,19 @@ export function getNativeExportCompatibility(
   );
   const hasBaseVideoClip = Boolean(
     mainVideoTrack &&
-      input.clips.some((clip) => clip.trackId === mainVideoTrack.id),
+      exportClips.some((clip) => clip.trackId === mainVideoTrack.id),
   );
-  const hasOversizedKeyframeProperty = input.clips.some((clip) =>
-    Object.values(clip.transform ?? {}).some(
-      (value) =>
-        Array.isArray(value) &&
-        value.length > MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
-    ),
-  );
+  const hasOversizedKeyframeProperty = exportClips.some((clip) => {
+    const transformTooLarge = Object.values(clip.transform ?? {}).some(
+      (value) => Array.isArray(value) && value.length > MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
+    );
+    const overlayTrackingTooLarge = clip.overlays?.some((overlay) =>
+      Object.values(overlay.tracking ?? {}).some(
+        (value) => Array.isArray(value) && value.length > MAX_NATIVE_KEYFRAMES_PER_PROPERTY,
+      ),
+    ) ?? false;
+    return transformTooLarge || overlayTrackingTooLarge;
+  });
   const reasons = [
     ...(hasBaseVideoClip ? [] : ['表示中のメイン映像クリップがありません']),
     ...(hasOversizedKeyframeProperty
@@ -221,7 +289,11 @@ export async function prepareNativeExportRequest(
   encodingPreference: NativeEncodingPreference = 'auto',
 ): Promise<{ request: NativeExportRequest; release(): Promise<void> }> {
   throwIfAborted(options.signal);
-  const compatibility = getNativeExportCompatibility(input, options);
+  const exportInput = {
+    ...input,
+    clips: prepareClipsForNativeExport(input.clips),
+  };
+  const compatibility = getNativeExportCompatibility(exportInput, options);
   if (!compatibility.compatible) {
     throw new Error(
       `このプロジェクトはネイティブ書き出しを利用できません: ${
@@ -233,8 +305,8 @@ export async function prepareNativeExportRequest(
   const progress = onProgress ?? options.onProgress;
   progress?.({ stage: 'ネイティブ書き出しを準備中', percent: -1 });
 
-  const referencedAssetIds = new Set(input.clips.map((clip) => clip.assetId));
-  const requiredSourceAssetIds = requiredNativeSourceAssetIds(input);
+  const referencedAssetIds = new Set(exportInput.clips.map((clip) => clip.assetId));
+  const requiredSourceAssetIds = requiredNativeSourceAssetIds(exportInput);
   if (referencedAssetIds.size > MAX_NATIVE_ASSETS) {
     throw new Error(
       `ネイティブ書き出しで扱える素材数 ${MAX_NATIVE_ASSETS} を超えています`,
@@ -318,7 +390,7 @@ export async function prepareNativeExportRequest(
       });
     }
 
-    const visualClips = exportedVisualClips(input);
+    const visualClips = exportedVisualClips(exportInput);
     const overlayClipCount = visualClips.filter(
       ({ clip }) => clip.overlays && clip.overlays.length > 0,
     ).length;
@@ -376,7 +448,7 @@ export async function prepareNativeExportRequest(
       version: 1,
       encodingPreference,
       options: serializableOptions(options),
-      clips: cloneClips(input.clips),
+      clips: cloneClips(exportInput.clips),
       tracks: input.tracks.map((track) => ({ ...track })),
       markers: (input.markers ?? []).map((marker) => ({ ...marker })),
       subtitles: (input.subtitles ?? []).map((cue) => ({ ...cue })),

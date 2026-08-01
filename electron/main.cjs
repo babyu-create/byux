@@ -66,6 +66,10 @@ const {
   buildWaveformFfmpegArgs,
 } = require('./nativeWaveform.cjs');
 const {
+  createBeatMetadataAccumulator,
+  buildBeatFfmpegArgs,
+} = require('./nativeBeats.cjs');
+const {
   MAX_LOUDNESS_LOG_BYTES,
   buildLoudnessFfmpegArgs,
   parseLoudnessSummary,
@@ -875,6 +879,7 @@ const MAX_NATIVE_OVERLAY_DECODED_BYTES = 512 * 1024 * 1024;
 const pendingExports = new Map();
 const pendingProxyJobs = new Map();
 const pendingWaveformJobs = new Map();
+const pendingBeatJobs = new Map();
 const pendingLoudnessJobs = new Map();
 let lastExportPath = null;
 let ffmpegCapabilityPromise = null;
@@ -1196,6 +1201,7 @@ function abandonAllExports() {
     ...[...pendingExports.keys()].map((token) => abandonExport(token)),
     ...[...pendingProxyJobs.keys()].map((token) => abandonProxyJob(token)),
     ...[...pendingWaveformJobs.keys()].map((token) => abandonWaveformJob(token)),
+    ...[...pendingBeatJobs.keys()].map((token) => abandonBeatJob(token)),
     ...[...pendingLoudnessJobs.keys()].map((token) => abandonLoudnessJob(token)),
   ]);
 }
@@ -1213,6 +1219,7 @@ async function confirmDiscardBeforeClose() {
     pendingExports.size > 0 ||
     pendingProxyJobs.size > 0 ||
     pendingWaveformJobs.size > 0 ||
+    pendingBeatJobs.size > 0 ||
     pendingLoudnessJobs.size > 0;
   const hasChanges = isDirty;
   if (!hasExport && !hasChanges && !autosaveCleanupRequired) return true;
@@ -2773,6 +2780,154 @@ ipcMain.handle('media:cancel-waveform', async (event, sourceToken) => {
   return jobs.length > 0;
 });
 
+function releaseBeatSourceLease(job) {
+  if (job.sourceLeaseReleased) return;
+  job.sourceLeaseReleased = true;
+  releaseRegisteredMediaLease(job.sourceToken);
+}
+
+function waitForBeatChild(job, accumulator) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(result);
+    };
+    job.child.stdout.on('data', (chunk) => {
+      if (job.runtimeError) return;
+      try {
+        accumulator.push(chunk);
+      } catch (error) {
+        job.runtimeError = error;
+        void terminateProcess(job.child).catch(() => {});
+      }
+    });
+    job.child.stderr.on('data', (chunk) => {
+      job.stderrTail = appendTail(job.stderrTail, chunk);
+    });
+    job.child.once('error', (error) => finish(error));
+    job.child.once('close', (code, signal) => finish(null, { code, signal }));
+  });
+}
+
+async function abandonBeatJob(token) {
+  const job = pendingBeatJobs.get(token);
+  if (!job) return false;
+  if (job.cleanupPromise) return job.cleanupPromise;
+  job.cancelled = true;
+  const cleanupPromise = (async () => {
+    await terminateProcess(job.child);
+    job.child = null;
+    await job.operation.catch(() => {});
+    releaseBeatSourceLease(job);
+    if (pendingBeatJobs.get(token) === job) pendingBeatJobs.delete(token);
+    return true;
+  })();
+  job.cleanupPromise = cleanupPromise;
+  try {
+    return await cleanupPromise;
+  } catch (error) {
+    if (job.cleanupPromise === cleanupPromise) job.cleanupPromise = null;
+    throw error;
+  }
+}
+
+ipcMain.handle('media:detect-beats', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') {
+    return { ok: false, error: '安全でない画面からの操作を拒否しました' };
+  }
+  const source = registeredMedia.get(sourceToken);
+  if (!source || (source.kind !== 'audio' && source.kind !== 'video')) {
+    return { ok: false, error: '素材を確認できません' };
+  }
+  if (source.audioStreamIndex === null) {
+    return { ok: false, error: '音声ストリームが見つかりません' };
+  }
+  const audioStreamIndex = Number.isSafeInteger(source.audioStreamIndex)
+    ? source.audioStreamIndex
+    : 0;
+  const token = crypto.randomUUID();
+  const job = {
+    token,
+    sourceToken,
+    child: null,
+    operation: Promise.resolve(),
+    cleanupPromise: null,
+    cancelled: false,
+    sourceLeaseReleased: false,
+    runtimeError: null,
+    stderrTail: '',
+  };
+  source.leases = (source.leases ?? 0) + 1;
+  pendingBeatJobs.set(token, job);
+
+  try {
+    await ensureNativeFfmpeg();
+    const [realPath, stat] = await Promise.all([
+      fs.realpath(source.path),
+      fs.stat(source.path),
+    ]);
+    if (
+      !stat.isFile() ||
+      realPath !== source.path ||
+      stat.size !== source.size ||
+      (source.dev !== undefined && stat.dev !== source.dev) ||
+      (source.ino !== undefined && source.ino !== 0 && stat.ino !== source.ino) ||
+      Math.abs(stat.mtimeMs - source.mtimeMs) > 1 ||
+      isDangerousWindowsDevicePath(realPath)
+    ) {
+      throw new Error('素材が読み込み後に変更されました');
+    }
+    if (job.cancelled) throw new Error('ビート検出を中止しました');
+
+    const accumulator = createBeatMetadataAccumulator();
+    const child = spawn(
+      ffmpegBinaryPath(),
+      buildBeatFfmpegArgs(source.path, audioStreamIndex),
+      {
+        shell: false,
+        windowsHide: true,
+        detached: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: minimalEnvironment(),
+      },
+    );
+    job.child = child;
+    const operation = waitForBeatChild(job, accumulator);
+    job.operation = operation.then(() => undefined, () => undefined);
+    const result = await operation;
+    job.child = null;
+    if (job.runtimeError) throw job.runtimeError;
+    if (job.cancelled) throw new Error('ビート検出を中止しました');
+    if (result.code !== 0) {
+      throw new Error(`ビート検出に失敗しました (FFmpeg: ${String(result.code)})`);
+    }
+    const beats = accumulator.finish();
+    if (accumulator.windowCount === 0) {
+      throw new Error('音声ストリームが見つかりません');
+    }
+    return { ok: true, beats };
+  } catch (error) {
+    let message = error instanceof Error ? error.message : String(error);
+    message = message.replaceAll(source.path, '[素材]').slice(0, 500);
+    return { ok: false, error: message, canceled: job.cancelled };
+  } finally {
+    if (pendingBeatJobs.get(token) === job) pendingBeatJobs.delete(token);
+    releaseBeatSourceLease(job);
+  }
+});
+
+ipcMain.handle('media:cancel-beat-detection', async (event, sourceToken) => {
+  if (!isTrustedIpcEvent(event) || typeof sourceToken !== 'string') return false;
+  const jobs = [...pendingBeatJobs.values()].filter(
+    (job) => job.sourceToken === sourceToken,
+  );
+  await Promise.all(jobs.map((job) => abandonBeatJob(job.token)));
+  return jobs.length > 0;
+});
+
 function releaseLoudnessSourceLease(job) {
   if (job.sourceLeaseReleased) return;
   job.sourceLeaseReleased = true;
@@ -4035,6 +4190,7 @@ async function createWindow() {
       pendingExports.size === 0 &&
       pendingProxyJobs.size === 0 &&
       pendingWaveformJobs.size === 0 &&
+      pendingBeatJobs.size === 0 &&
       pendingLoudnessJobs.size === 0 &&
       !isDirty &&
       activeProjectSaves === 0 &&
@@ -4075,6 +4231,7 @@ app.on('before-quit', (event) => {
     (pendingExports.size > 0 ||
       pendingProxyJobs.size > 0 ||
       pendingWaveformJobs.size > 0 ||
+      pendingBeatJobs.size > 0 ||
       pendingLoudnessJobs.size > 0 ||
       isDirty ||
       activeProjectSaves > 0 ||
@@ -4170,6 +4327,9 @@ process.on('exit', () => {
     try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
   }
   for (const job of pendingWaveformJobs.values()) {
+    try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
+  }
+  for (const job of pendingBeatJobs.values()) {
     try { job.child?.kill('SIGKILL'); } catch { /* process already gone */ }
   }
   for (const job of pendingLoudnessJobs.values()) {

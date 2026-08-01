@@ -1,7 +1,13 @@
 import { useMemo, useState } from 'react';
 import { Crosshair, ScanSearch, Square } from 'lucide-react';
 import { useProjectStore } from '../../stores/projectStore';
-import { trackVideoElement, type TrackingRegion } from '../../lib/motionTracker';
+import {
+  motionTrackingTimelineTime,
+  getLegacyClipTrackingMigration,
+  trackVideoElement,
+  type TrackingRegion,
+} from '../../lib/motionTracker';
+import { MAX_MOTION_TRACK_SIMPLIFICATION_ERROR_PERCENT } from '../../lib/nativeExportLimits';
 import { clipDuration } from '../../lib/timeline';
 import type { Clip, MediaAsset } from '../../lib/types';
 import styles from './MotionTrackingSection.module.css';
@@ -12,7 +18,6 @@ interface MotionTrackingSectionProps {
 }
 
 const DEFAULT_REGION: TrackingRegion = { x: 0.4, y: 0.3, width: 0.2, height: 0.2 };
-
 export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProps) {
   const setClipTransform = useProjectStore((state) => state.setClipTransform);
   const updateClipOverlay = useProjectStore((state) => state.updateClipOverlay);
@@ -25,6 +30,20 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
   const [target, setTarget] = useState<'clip' | 'overlays'>('clip');
   const effectiveTarget = target === 'overlays' && (clip.overlays?.length ?? 0) > 0 ? target : 'clip';
   const duration = useMemo(() => clipDuration(clip), [clip]);
+  const legacyMigration = useMemo(
+    () => getLegacyClipTrackingMigration(clip),
+    [clip],
+  );
+
+  const migrateLegacyTrack = () => {
+    if (!legacyMigration) return;
+    setClipTransform(clip.id, legacyMigration.transform);
+    showMessage(
+      'success',
+      `旧追跡データを${legacyMigration.originalCount}点から${legacyMigration.keyframeCount}点へ整理しました（最大誤差 ${legacyMigration.maximumError.toFixed(2)}%）`,
+      5000,
+    );
+  };
 
   const updateRegion = (key: keyof TrackingRegion, value: string) => {
     const parsed = Number(value);
@@ -59,9 +78,16 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
         endTime: clip.trimEnd,
         fps,
         region,
+        keyframeTimeAtSourceTime: (sourceTime) =>
+          motionTrackingTimelineTime(clip, sourceTime),
         onProgress: setProgress,
         signal: controller.signal,
       });
+      if (result.maximumSimplificationError > MAX_MOTION_TRACK_SIMPLIFICATION_ERROR_PERCENT) {
+        throw new Error(
+          `動きが複雑で、書き出し可能な${result.keyframeCount}点へ精度を保ったまま整理できませんでした（最大誤差 ${result.maximumSimplificationError.toFixed(2)}%）。追跡範囲を短くして再試行してください。`,
+        );
+      }
       if (effectiveTarget === 'clip') {
         setClipTransform(clip.id, {
           ...(clip.transform ?? {}),
@@ -79,8 +105,8 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
       }
       setConfidence(result.averageConfidence);
       showMessage(
-        result.averageConfidence >= 0.55 ? 'success' : 'info',
-        `追跡完了（${result.frameCount}フレーム / 信頼度 ${Math.round(result.averageConfidence * 100)}%）`,
+        result.averageConfidence >= 0.55 && result.maximumSimplificationError <= MAX_MOTION_TRACK_SIMPLIFICATION_ERROR_PERCENT ? 'success' : 'info',
+        `追跡完了（${result.frameCount}フレーム→${result.keyframeCount}点 / 信頼度 ${Math.round(result.averageConfidence * 100)}% / 軌跡誤差 最大${result.maximumSimplificationError.toFixed(2)}%）`,
         4000,
       );
     } catch (error) {
@@ -135,10 +161,18 @@ export function MotionTrackingSection({ clip, asset }: MotionTrackingSectionProp
           </button>
         </div>
       ) : (
-        <button type="button" className={styles.run} onClick={() => void run()}>
-          <ScanSearch size={14} aria-hidden="true" />
-          {confidence === null ? `範囲を追跡（${duration.toFixed(1)}秒）` : `再追跡（信頼度 ${Math.round(confidence * 100)}%）`}
-        </button>
+        <>
+          {legacyMigration ? (
+            <button type="button" className={styles.run} onClick={migrateLegacyTrack}>
+              <ScanSearch size={14} aria-hidden="true" />
+              {`旧追跡データを安全に整理（${legacyMigration.originalCount}→${legacyMigration.keyframeCount}点）`}
+            </button>
+          ) : null}
+          <button type="button" className={styles.run} onClick={() => void run()}>
+            <ScanSearch size={14} aria-hidden="true" />
+            {confidence === null ? `範囲を追跡（${duration.toFixed(1)}秒）` : `再追跡（信頼度 ${Math.round(confidence * 100)}%）`}
+          </button>
+        </>
       )}
       <p className={styles.note}>まず対象を中央付近に置き、4つの数値で囲みを合わせてください。追跡結果は横/縦位置のキーフレームになります。テキスト全体を選ぶと同じ動きが全テキストに適用されます。</p>
     </div>

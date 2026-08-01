@@ -1163,7 +1163,7 @@ export function Preview({ suspended = false }: PreviewProps) {
       ))}
 
       <div className={styles.stage}>
-        <div className={styles.frame} data-aspect={aspectRatio}>
+        <div className={styles.frame} data-aspect={aspectRatio} data-preview-frame>
           {showVideo ? (
             <div
               className={styles.footageLayer}
@@ -1244,11 +1244,11 @@ export function Preview({ suspended = false }: PreviewProps) {
             />
           ))}
           {showVideo && activeRampSampler ? (
-            <div className={styles.speedBadge} aria-hidden="true">
+            <div className={styles.speedBadge} data-preview-only-ui aria-hidden="true">
               {`${instSpeed.toFixed(1)}×`}
             </div>
           ) : showVideo && clipSpeed !== 1 ? (
-            <div className={styles.speedBadge} aria-hidden="true">
+            <div className={styles.speedBadge} data-preview-only-ui aria-hidden="true">
               {clipSpeed === 0.25
                 ? '¼×'
                 : clipSpeed === 0.5

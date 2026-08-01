@@ -169,6 +169,10 @@ export type NativeWaveformResult =
   | { ok: true; peaks: Float32Array; peaksPerSecond: number; cached?: boolean }
   | { ok: false; error: string; canceled?: boolean };
 
+export type NativeBeatResult =
+  | { ok: true; beats: number[] }
+  | { ok: false; error: string; canceled?: boolean };
+
 export interface NativeLoudnessAnalysis {
   integratedLufs: number;
   loudnessRange: number;
